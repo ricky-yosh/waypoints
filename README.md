@@ -1,5 +1,4 @@
 # Waypoints
----
 Chaining prompts by hand means copy-pasting outputs, losing track of context, and not knowing which results still hold after you change something upstream. [Name] makes the plan the main thing you work with.
 
 Plans as blocks: phases made up of points, written as a document you can edit.
