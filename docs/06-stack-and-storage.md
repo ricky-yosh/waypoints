@@ -2,7 +2,9 @@
 
 ## Rust core
 
-Plan model, state machine, jj and ACP plumbing live in a core crate with no UI dependency. Build it as a library with a thin CLI first (create a plan, run a phase, see state, print diff). The CLI becomes the test harness and what the UI calls later.
+Workflow logic, storage, and jj integration live in a core library with no UI dependency. A local backend hosts that library and exposes a JSON-RPC API shared by the GUI and CLI. The GUI does not shell out to the CLI, and clients do not open independent copies of the store. The backend owns database access and coordinates Waypoints-initiated operations.
+
+The CLI is the interface for human scripting and agents with terminal access; no MCP adapter is planned. Keep workflow metadata durable, but leave conversations and transcripts in existing harnesses. Start with state-change notifications and a full refresh on reconnect rather than event replay. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli) for the authoritative boundary and local IPC recommendation.
 
 ## GPUI
 

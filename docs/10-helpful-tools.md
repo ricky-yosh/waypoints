@@ -1,5 +1,15 @@
 # GPUI Ecosystem Research
 
+## Current architecture decision — supersedes MCP recommendations below
+
+Waypoints uses a **headless core + shared local JSON-RPC backend + desktop GUI and CLI clients**. The CLI provides workflow operations to local agents with terminal access. **MCP is out of scope: do not install `gpui-mcp` or build an MCP adapter as part of this plan.**
+
+The MCP integration proposals and priorities retained below are earlier research, not the current implementation roadmap. In particular, the proposed MCP debugging architecture, Phase 1 integration, MCP planning deliverables, and initial-stack MCP selection are superseded by this decision.
+
+The native GPUI inspector remains relevant for GUI development. Runtime UI inspection and visual verification are separate from the semantic workflow API; agents can operate Waypoints through its CLI without automating GUI clicks. Screenshots may be temporary; no image archive is required. Evaluate any additional debugging tool for compatibility and actual need before adoption.
+
+See [Architecture: local backend, GUI, and CLI](02-architecture.md#architecture-decision-local-backend-gui-and-cli) and the [current build order](07-spikes-and-build-order.md#build-order).
+
 Use the awesome-gpui repository as a primary reference for discovering GPUI libraries, tools, example applications, and architectural patterns.
 
 Before implementing significant functionality from scratch, consult this directory to identify existing solutions.
