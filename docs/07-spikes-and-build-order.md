@@ -15,19 +15,18 @@ Write down what you learn; it becomes the spec for the real core crate.
 
 **Current decision: core and CLI first, GUI later.** This supersedes the earlier requirement to include a node UI in the first usable slice.
 
-1. Define the foundation: workflows, phases/prompts, relationships, and the meaning and lifecycle of a session. Keep Waypoints metadata separate from harness-owned conversations.
-2. Implement the headless core and persistence: create and manage multiple workflows, with explicit identity and workflow selection. Introduce basic jj queries/associations without building a new code-history system.
+1. Define the foundation: projects identified by local folders, branching workflows, prompt nodes, and saved relationships distinct from native jj ancestry. Workflows are the sidebar items; agent sessions remain harness-owned.
+2. Implement the headless core and persistence: register projects and manage multiple workflows, with explicit project/workflow identity and selection. Introduce basic jj queries/associations without building a new code-history system.
 3. Expose operations through the local JSON-RPC backend and thin CLI. Keep database access in the backend; support noninteractive commands, structured output, and clear errors.
-4. Verify the headless workflow end to end: create two workflows, edit them independently, manage the agreed session metadata, and reopen after a backend restart. Confirm client reconnect/refresh and persistent workflow undo/redo.
+4. Verify the headless workflow end to end: create two workflows and edit them independently. In one, create an interfaces/placeholders node with authentication, image-uploading, and settings children. Exercise separate workspaces for two branches, inspect native revision history, and explicitly continue from an older revision using validated jj operations. Edit the upstream node and refresh ancestry/conflict information. Reopen after a backend restart; confirm client reconnect/refresh and persistent workflow undo/redo.
 5. Once the foundation works, add the GPUI client using the same backend operations. Verify CLI edits appear in the GUI before expanding node interactions.
-6. Evaluate ACP execution integration separately; it is not a prerequisite for establishing workflows and session metadata.
+6. Evaluate ACP execution integration separately; it is not a prerequisite for establishing branching workflows and native history navigation.
 
 No MCP adapter, transcript archive, or durable notification replay is required. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli).
 
 ## Open questions
 
-- What does a Waypoints session represent: an active workflow context, a reference to a harness conversation, or another explicitly defined scope? Settle this before implementing session lifecycle.
-- When an upstream phase is edited, should downstream phases auto re-run, or be marked stale for the user to choose?
+- Which native jj operations and retention rules support browsing and explicitly continuing from historical node revisions without inventing another snapshot system?
 - Does the Claude ACP adapter emit diff content for edits?
 - Which agents in practice support resume, load, or fork, and does a session survive a change of working directory?
 - Does Zed show a phase's diff correctly in a colocated jj repo?

@@ -30,7 +30,18 @@ CLI -----------+
 
 Recommended starting topology: one backend per open repository, shared by its clients, using local IPC (Unix-domain sockets or Windows named pipes), not a public HTTP endpoint. Restrict access to the owning user. A GUI or CLI may start or connect to it; an always-running background service is not required. Backend lifetime and IPC details still need implementation validation.
 
-**Current implementation priority: headless core and CLI first; GUI later.** Establish creation and management of multiple workflows, persistence, and session setup through the local backend and CLI before implementing the node view. Define what a Waypoints session represents before implementing its lifecycle; it must not become a transcript store or duplicate harness-owned conversations. AI execution integration is not a prerequisite. This supersedes the earlier UI-first milestone, without changing the shared-backend architecture. See [build order](07-spikes-and-build-order.md).
+**Current implementation priority: headless core and CLI first; GUI later.** Establish project-folder registration, multiple branching workflows, node editing, and persistence through the local backend and CLI before implementing the node view. Workflows are the sidebar items grouped by project; do not introduce a separate application-level "session" entity. Agent session references belong to existing harnesses. AI execution integration is not a prerequisite. This supersedes the earlier UI-first milestone, without changing the shared-backend architecture. See [build order](07-spikes-and-build-order.md).
+
+## Workflow model and native history
+
+- A project identifies a local project folder/repository and groups workflows. The CLI selects projects and workflows explicitly; the later GUI presents that organization in its sidebar.
+- A workflow contains prompt nodes and saved connections, with branching supported from the start. See the [interfaces and parallel implementations example](01-concept.md#project-workflow-and-node-example).
+- A node represents a prompt/assignment associated with an evolving jj change, not a frozen commit or a single agent turn. A change ID follows evolving work; commit IDs identify exact code revisions. Resolve native divergence explicitly rather than assuming a change ID always identifies one current commit.
+- Keep workflow links distinct from jj parent relationships. Reflect manual repository changes without guessing prompt associations. A missing native change does not delete the saved node; mark the association missing and require an explicit action to create or select a replacement.
+- Browsing native revisions and continuing work from an old revision are separate operations. Validate jj commands and retention before promising indefinite availability or a particular restore/branch behavior.
+- Prompt-edit undo history is distinct from native code history. Associating an exact historical prompt with a code revision requires an explicit recorded reference; do not infer that correspondence.
+- Separate workspaces are needed for simultaneous editing of different code states, not for every idle node or historical revision. Allocate working directories on demand; two concurrent editors/agents must not share a directory for different nodes.
+- Workflow metadata undo/redo remains chronological even though the workflow and native code graph can branch. Neither undoing a prompt nor browsing code history rewinds an agent conversation.
 
 ## Architecture decision: persistent workflow undo/redo
 
@@ -71,7 +82,7 @@ Plus: failed, stale (an upstream phase changed), conflicted (jj reports a confli
 
 ## Re-running and "nodes extending onward"
 
-Treat each re-run of a phase as a new revision of the same node. The canvas can show a short stack of versions, with downstream nodes attached to the version they were built on. jj change IDs stay stable across rewrites, so a node can follow its change.
+Refining a phase can evolve the same node's native jj change through multiple commit revisions. Do not assume every turn creates a new child change or an application-owned code snapshot. Preserve exact native revision references where needed to identify inputs. Users explicitly choose whether to continue a change or create an alternative; follow native jj ancestry and surface divergence, conflicts, and stale downstream context. See [jj snapshots](04-jj-snapshots.md).
 
 ## Context fallback
 

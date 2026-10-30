@@ -6,18 +6,37 @@ Work with coding agents often means chaining prompts by hand: run one, wait and 
 
 ## The core idea
 
-The plan is the main object you work with.
+The workflow is the main object you work with. Workflows are grouped by project folder in the eventual sidebar; the CLI must support the same project/workflow selection without a GUI. A workflow is a branching graph, not a linear prompt queue.
 
-- A plan is a document of phases; each phase has points (Step 1: pt 1, 2, 3; Step 2: pt 1, 2).
-- Running a phase gives it an agent session. That session is either a fork of an earlier phase's chat, or a fresh one seeded with the plan text, so context is preserved.
-- Finishing a phase stores its result as a snapshot (a jj change), so each phase is preserved and the original "seed" can be revisited and iterated.
-- Editing an earlier phase marks everything downstream as stale (and shows conflicts if jj reports them).
+- Each node represents a phase's prompt/assignment, which can be refined through multiple turns rather than requiring a new node for each turn.
+- A node is associated with an evolving native jj change. Its historical code revisions are native jj commits, not a separate Waypoints snapshot system.
+- Users move backward and forward between nodes and workflows, inspect historical revisions, and explicitly continue work from a chosen revision.
+- Connections express intended workflow relationships. Native jj ancestry is separate repository truth; show differences rather than silently forcing one to match the other.
+- Upstream edits can make downstream work stale and introduce jj conflicts. Surface these consequences; do not automatically execute downstream nodes.
+- Agent conversations stay in existing harnesses. A phase may use fresh scoped context or explicitly continue an upstream conversation; Waypoints does not archive transcripts.
+
+## Project, workflow, and node example
+
+```text
+Project folder
+└── Workflow
+    └── Interfaces + placeholders
+        ├── Authentication
+        ├── Image uploading
+        └── Settings
+```
+
+The three implementation nodes branch from the interfaces node's code. Each can evolve independently, and the user can return to the interfaces node or any implementation node to refine it. Combining sibling results is an explicit action, not an automatic consequence of sharing a parent.
+
+Each node should let the user browse its native code revisions. Viewing an old revision is read-only; continuing from it is an explicit native jj operation whose exact behavior must be validated. Code history does not rewind conversation memory or automatically preserve the prompt text used at that time.
+
+Use **workflow**, not a new application-level "session," for the sidebar item. Session IDs, when needed for integration, refer to harness-owned agent conversations.
 
 ## ComfyUI-style ideas worth borrowing
 
-- Nodes are steps; edges pass one step's output into the next prompt.
+- Nodes are scoped assignments; connections describe selected upstream inputs and intended dependencies.
 - Live streaming inside each node (watching output is a key value).
-- Caching: change one node and only it and its dependents re-run.
+- Reuse existing results; when a node changes, show affected downstream work and let the user decide what to revisit.
 - Gates: a node can pause for approval before passing output on.
 - Fan-out and fan-in: try two approaches, then compare or merge.
 - Graphs saved as plain files, so they can be diffed and shared.
