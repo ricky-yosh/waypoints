@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/waypoints-app",
+    "crates/waypoints-core",
+]
+default-members = ["crates/waypoints-app"]
+resolver = "3"

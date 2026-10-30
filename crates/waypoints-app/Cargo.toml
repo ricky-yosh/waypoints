@@ -1,0 +1,9 @@
+[package]
+name = "waypoints-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+gpui-kit = { version = "=0.8.1", features = ["inspector"] }
+waypoints-core = { version = "0.1.0", path = "../waypoints-core" }
