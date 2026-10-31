@@ -6,11 +6,13 @@ compile_error!("The initial Waypoints backend requires Unix sockets (macOS or Li
 mod client;
 mod config;
 mod protocol;
+mod runs;
 mod server;
 
 pub use client::Client;
 pub use config::Config;
 pub use protocol::BackendInfo;
+pub use runs::{Permission, PermissionOption, RunEvent, RunEventOrigin, RunEvents, RunStatus};
 pub use server::serve;
 
 use std::error::Error;

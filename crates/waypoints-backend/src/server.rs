@@ -13,10 +13,12 @@ use waypoints_core::storage::Storage;
 
 use crate::config::sidecar;
 use crate::protocol::{
-    AssociateParams, ConnectParams, CreateChangeParams, CreateNodeParams, CreateParams,
-    CreateWorkspaceParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION, ProjectParams, TIMEOUT,
-    UpdateNodeParams, WorkflowParams, read_frame,
+    AssociateParams, ConnectParams, ContinueRunParams, CreateChangeParams, CreateNodeParams,
+    CreateParams, CreateWorkspaceParams, HistoryParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
+    PermissionParams, ProjectParams, RecoverRunParams, RunEventsParams, RunParams, StartRunParams,
+    TIMEOUT, UpdateNodeParams, WorkflowParams, read_frame,
 };
+use crate::runs::Runs;
 use crate::{BackendError, BackendInfo, Config};
 
 /// Runs the local server until a shutdown request or Ctrl+C.
@@ -54,6 +56,8 @@ async fn run(config: &Config) -> anyhow::Result<()> {
         Err(error) => return Err(error).context("checking socket path"),
     }
     let mut storage = Storage::open(&config.database).await?;
+    storage.interrupt_runs().await?;
+    let mut runs = Runs::new();
     let listener = UnixListener::bind(&config.socket).context("binding backend socket")?;
     let _socket_cleanup = SocketCleanup(config.socket.clone());
     fs::set_permissions(&config.socket, fs::Permissions::from_mode(0o600))
@@ -63,19 +67,34 @@ async fn run(config: &Config) -> anyhow::Result<()> {
         database: config.database.clone(),
         protocol_version: PROTOCOL_VERSION,
     };
-    loop {
-        let stream = tokio::select! {
-            incoming = listener.accept() => incoming.context("accepting backend connection")?.0,
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("waiting for shutdown signal")?;
+    let serving = async {
+        loop {
+            let stream = tokio::select! {
+                Some((id, update)) = runs.rx.recv() => {
+                    runs.apply(id, update, &mut storage).await?;
+                    continue;
+                }
+                incoming = listener.accept() => incoming.context("accepting backend connection")?.0,
+                signal = tokio::signal::ctrl_c() => {
+                    signal.context("waiting for shutdown signal")?;
+                    break;
+                }
+            };
+            // Bad, disconnected, oversized, and slow clients cannot terminate the server.
+            if matches!(
+                handle(stream, &mut storage, &info, &mut runs).await,
+                Ok(true)
+            ) {
                 break;
             }
-        };
-        // Bad, disconnected, oversized, and slow clients cannot terminate the server.
-        if matches!(handle(stream, &mut storage, &info).await, Ok(true)) {
-            break;
         }
+        Ok::<_, anyhow::Error>(())
     }
+    .await;
+    // Keep ownership locks until all owned tasks/processes are stopped.
+    let cleanup = runs.shutdown(&mut storage).await;
+    serving?;
+    cleanup?;
     Ok(())
 }
 
@@ -106,13 +125,14 @@ async fn handle(
     stream: UnixStream,
     storage: &mut Storage,
     info: &BackendInfo,
+    runs: &mut Runs,
 ) -> anyhow::Result<bool> {
     let mut stream = BufReader::new(stream);
     let bytes = timeout(TIMEOUT, read_frame(&mut stream))
         .await
         .context("client request timed out")??;
     let (response, stop) = match serde_json::from_slice::<Value>(&bytes) {
-        Ok(request) => dispatch(request, storage, info).await,
+        Ok(request) => dispatch(request, storage, info, runs).await,
         Err(_) => (Some(error(Value::Null, -32700, "parse error")), false),
     };
     if let Some(response) = response {
@@ -141,6 +161,7 @@ async fn dispatch(
     request: Value,
     storage: &mut Storage,
     info: &BackendInfo,
+    runs: &mut Runs,
 ) -> (Option<Value>, bool) {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let valid_id = id.is_null() || id.is_string() || id.is_number();
@@ -165,6 +186,120 @@ async fn dispatch(
                 Ok(json!(info))
             }
         }
+        "run.start" => match parameters::<StartRunParams>(params) {
+            Ok(params) => async {
+                runs.ensure_capacity()?;
+                let run = storage
+                    .create_run(params.workflow_id, params.node_id, &params.executable)
+                    .await?;
+                Ok::<_, anyhow::Error>(json!(runs.start(run)))
+            }
+            .await
+            .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.continue" => match parameters::<ContinueRunParams>(params) {
+            Ok(params) => async {
+                runs.ensure_capacity()?;
+                let run = storage.continue_run(params.run_id, &params.prompt).await?;
+                Ok::<_, anyhow::Error>(json!(runs.start(run)))
+            }
+            .await
+            .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.recovery" => match parameters::<RunParams>(params) {
+            Ok(params) => storage
+                .inspect_run_recovery(params.run_id)
+                .await
+                .map(|inspection| json!(inspection))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.recover" => match parameters::<RecoverRunParams>(params) {
+            Ok(params) => runs
+                .recover(params.run_id, params.confirmation, storage)
+                .await
+                .map(|status| json!(status))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.status" => match parameters::<RunParams>(params) {
+            Ok(params) => storage
+                .run(params.run_id)
+                .await
+                .map(|run| json!(runs.status(run)))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.list" => match parameters::<NodeParams>(params) {
+            Ok(params) => storage
+                .node_runs(params.workflow_id, params.node_id)
+                .await
+                .map(|records| {
+                    json!(
+                        records
+                            .into_iter()
+                            .map(|run| runs.status(run))
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.events" => match parameters::<RunEventsParams>(params) {
+            Ok(params) => runs
+                .events(params.run_id, params.after)
+                .map(|events| json!(events))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.cancel" => match parameters::<RunParams>(params) {
+            Ok(params) => runs
+                .cancel(params.run_id, storage)
+                .await
+                .map(|status| json!(status))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.permission" => match parameters::<PermissionParams>(params) {
+            Ok(params) => runs
+                .respond(
+                    params.run_id,
+                    params.permission_id,
+                    params.option_id,
+                    storage,
+                )
+                .await
+                .map(|status| json!(status))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "history.status" => match parameters::<ProjectParams>(params) {
+            Ok(params) => storage
+                .history_status(&params.project_path)
+                .await
+                .map(|status| json!(status))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "history.undo" | "history.redo" => match parameters::<HistoryParams>(params) {
+            Ok(params) => {
+                let result = if method == "history.undo" {
+                    storage
+                        .undo(&params.project_path, params.expected_edit_id)
+                        .await
+                } else {
+                    storage
+                        .redo(&params.project_path, params.expected_edit_id)
+                        .await
+                };
+                result
+                    .map(|status| json!(status))
+                    .map_err(|error| (-32000, format!("{error:#}")))
+            }
+            Err(error) => Err(error),
+        },
         "workflow.create" => match parameters::<CreateParams>(params) {
             Ok(params) => storage
                 .create_workflow(&params.project_path, &params.name)
@@ -224,6 +359,14 @@ async fn dispatch(
         "node.workspace.create" => match parameters::<CreateWorkspaceParams>(params) {
             Ok(params) => storage
                 .create_node_workspace(params.workflow_id, params.node_id, &params.directory)
+                .await
+                .map(|state| json!(state))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.workspace.verify" => match parameters::<NodeParams>(params) {
+            Ok(params) => storage
+                .verify_node_workspace(params.workflow_id, params.node_id)
                 .await
                 .map(|state| json!(state))
                 .map_err(|error| (-32000, format!("{error:#}"))),

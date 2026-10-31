@@ -16,8 +16,14 @@ directories. Allocation edits the node's existing change, not a new child; it
 refuses changes already edited by another registered workspace. Workspace status
 and repeat allocation requests are read-only, with missing, mismatched, and
 incomplete references retained instead of silently replaced.
+Explicit workspace verification can acknowledge a completed checkout by changing
+only the saved readiness flag; it never repairs native state or overwrites edits.
+Successful agent turns now automatically snapshot their dedicated workspace and
+record an exact revision before releasing the run reservation. Native snapshot
+failures are distinct from agent failures; cancelled/failed turns are not
+automatically snapshotted. See [run finalization](13-agent-run-lifecycle.md#automatic-revision-recording).
 The model below remains the broader design, not a claim that history navigation,
-downstream staleness, or automatic checkpoints are implemented.
+downstream staleness, or workflow-level checkpoints are implemented.
 
 ## Model
 

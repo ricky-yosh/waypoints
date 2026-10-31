@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::jj::{self, ChangeAssociation, ChangeState};
 
+mod history;
+mod runs;
 mod workspaces;
+
+pub use history::{HistoryEntry, HistoryStatus};
 
 /// A workflow saved for a canonical project directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +197,10 @@ impl Storage {
             )
             .await
             .context("initializing node workspace schema")?;
-        Ok(Self { database })
+        let storage = Self { database };
+        storage.initialize_runs().await?;
+        storage.initialize_history().await?;
+        Ok(storage)
     }
 
     /// Saves a named workflow for an existing project directory.
@@ -282,26 +289,7 @@ impl Storage {
         prompt: &str,
     ) -> Result<Node, StorageError> {
         validate_prompt(prompt)?;
-        let connection = self
-            .database
-            .connect()
-            .context("connecting to workflow database")?;
-        let changed = connection
-            .execute(
-                "INSERT INTO nodes (workflow_id, prompt)
-                 SELECT id, ?2 FROM workflows WHERE id = ?1",
-                turso::params![workflow_id, prompt],
-            )
-            .await
-            .context("creating node")?;
-        if changed != 1 {
-            return Err(anyhow::anyhow!("workflow {workflow_id} not found").into());
-        }
-        Ok(Node {
-            id: connection.last_insert_rowid(),
-            workflow_id,
-            prompt: prompt.to_owned(),
-        })
+        Ok(self.create_node_with_history(workflow_id, prompt).await?)
     }
 
     /// Replaces a node's prompt without changing its identifier or connections.
@@ -317,28 +305,9 @@ impl Storage {
         prompt: &str,
     ) -> Result<Node, StorageError> {
         validate_prompt(prompt)?;
-        let connection = self
-            .database
-            .connect()
-            .context("connecting to workflow database")?;
-        let changed = connection
-            .execute(
-                "UPDATE nodes SET prompt = ?3 WHERE workflow_id = ?1 AND id = ?2
-                 AND EXISTS (SELECT 1 FROM workflows WHERE id = ?1)",
-                turso::params![workflow_id, node_id, prompt],
-            )
-            .await
-            .context("updating node")?;
-        if changed != 1 {
-            return Err(
-                anyhow::anyhow!("node {node_id} not found in workflow {workflow_id}").into(),
-            );
-        }
-        Ok(Node {
-            id: node_id,
-            workflow_id,
-            prompt: prompt.to_owned(),
-        })
+        Ok(self
+            .update_node_with_history(workflow_id, node_id, prompt)
+            .await?)
     }
 
     /// Loads a node only when it belongs to the requested workflow.
@@ -387,6 +356,7 @@ impl Storage {
         change_id: &str,
     ) -> Result<NodeChange, StorageError> {
         let node = self.node(workflow_id, node_id).await?;
+        self.ensure_node_idle(node_id).await?;
         jj::validate_change_id(change_id)?;
         let project = self.project_for_node(workflow_id, node_id).await?;
         let repository_path = jj::repository_root(&project).await?;
@@ -628,47 +598,9 @@ impl Storage {
         source_id: i64,
         target_id: i64,
     ) -> Result<Connection, StorageError> {
-        let connection = self
-            .database
-            .connect()
-            .context("connecting to workflow database")?;
-        // Validation and insertion share one statement, including across storage handles.
-        // UNION deduplicates reachable nodes in a DAG with converging paths.
-        let changed = connection
-            .execute(
-                "WITH RECURSIVE reachable(id) AS (
-                    SELECT ?3
-                    UNION
-                    SELECT c.target_id FROM connections c JOIN reachable r ON c.source_id = r.id
-                    WHERE c.workflow_id = ?1
-                 )
-                 INSERT INTO connections (workflow_id, source_id, target_id)
-                 SELECT ?1, ?2, ?3
-                 WHERE ?2 <> ?3
-                   AND EXISTS (SELECT 1 FROM workflows WHERE id = ?1)
-                   AND EXISTS (SELECT 1 FROM nodes WHERE workflow_id = ?1 AND id = ?2)
-                   AND EXISTS (SELECT 1 FROM nodes WHERE workflow_id = ?1 AND id = ?3)
-                   AND NOT EXISTS (
-                       SELECT 1 FROM connections
-                       WHERE workflow_id = ?1 AND source_id = ?2 AND target_id = ?3
-                   )
-                   AND NOT EXISTS (SELECT 1 FROM reachable WHERE id = ?2)",
-                [workflow_id, source_id, target_id],
-            )
-            .await
-            .context("connecting nodes")?;
-        if changed != 1 {
-            return Err(anyhow::anyhow!(
-                "invalid connection {source_id} -> {target_id} in workflow {workflow_id}: \
-                 missing workflow or endpoints, self-link, duplicate link, or cycle"
-            )
-            .into());
-        }
-        Ok(Connection {
-            workflow_id,
-            source_id,
-            target_id,
-        })
+        Ok(self
+            .connect_nodes_with_history(workflow_id, source_id, target_id)
+            .await?)
     }
 
     /// Loads a workflow graph with deterministic node and connection ordering.

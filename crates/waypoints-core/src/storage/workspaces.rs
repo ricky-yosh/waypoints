@@ -157,6 +157,103 @@ impl Storage {
         })
     }
 
+    /// Verifies a completed checkout and acknowledges its saved allocation as ready.
+    ///
+    /// Only the database flag changes. Native history, working-copy metadata, dirty
+    /// files, and saved associations are never modified. Repeating verification is
+    /// safe; a clean working directory is not required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for absent allocations, mismatched references, unfinished or
+    /// stale checkouts, unsupported native output, jj failures, or storage failures.
+    /// Failed verification leaves the saved allocation unchanged and needs explicit
+    /// manual inspection, not automatic recreation or checkout.
+    pub async fn verify_node_workspace(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<NodeWorkspace, StorageError> {
+        let node = self.node(workflow_id, node_id).await?;
+        let saved = self.saved_workspace(node_id).await?.context(
+            "no saved workspace allocation; use node workspace create with an explicit directory",
+        )?;
+        let state = tokio::time::timeout(STATUS_TIMEOUT, async {
+            let observed = self.observe_workspace(workflow_id, node_id, &saved.association).await?;
+            let revision = match observed {
+                WorkspaceState::Ready { revision } => revision,
+                WorkspaceState::MissingDirectory => anyhow::bail!(
+                    "verification failed: saved directory is missing; locate the original workspace and inspect jj workspace list before manual recovery"
+                ),
+                WorkspaceState::Mismatched { detail } => anyhow::bail!(
+                    "verification failed: {detail}; inspect node refresh and jj workspace list before manually reconciling the saved workspace"
+                ),
+                _ => anyhow::bail!("verification failed: workspace is not ready for acknowledgement"),
+            };
+            let checked_out = jj::checked_out_revision(&saved.association.directory).await?;
+            anyhow::ensure!(
+                checked_out.commit_id == revision.commit_id && checked_out.change_id == revision.change_id,
+                "verification failed: checkout is unfinished or stale; inspect local files and native jj state, then manually run jj workspace update-stale in this directory if appropriate; verification never updates files"
+            );
+            Ok::<_, anyhow::Error>(WorkspaceState::Ready { revision })
+        }).await.context(
+            "workspace verification timed out; no readiness update was made; retry verification after checking jj availability"
+        )??;
+        if !saved.ready {
+            let connection = self
+                .database
+                .connect()
+                .context("connecting to workspace database")?;
+            let changed = connection
+                .execute(
+                    "UPDATE node_workspaces SET ready = 1
+                 WHERE node_id = ?1 AND repository_path = ?2 AND change_id = ?3
+                   AND name = ?4 AND directory = ?5 AND ready = 0",
+                    turso::params![
+                        node_id,
+                        saved
+                            .association
+                            .repository_path
+                            .to_str()
+                            .context("repository path must be UTF-8")?,
+                        saved.association.change_id.as_str(),
+                        saved.association.name.as_str(),
+                        saved
+                            .association
+                            .directory
+                            .to_str()
+                            .context("workspace path must be UTF-8")?
+                    ],
+                )
+                .await
+                .context("acknowledging verified workspace allocation")?;
+            if changed != 1 {
+                return Err(anyhow::anyhow!(
+                    "workspace allocation changed during verification; inspect workspace status before verifying again"
+                ).into());
+            }
+        }
+        Ok(NodeWorkspace {
+            node,
+            workspace: Some(saved.association),
+            state,
+        })
+    }
+
+    pub(super) async fn require_ready_workspace(&self, node_id: i64) -> Result<(), StorageError> {
+        let saved = self
+            .saved_workspace(node_id)
+            .await?
+            .context("node has no saved workspace; allocate one before starting an agent")?;
+        if !saved.ready {
+            return Err(anyhow::anyhow!(
+                "workspace allocation is incomplete; explicitly verify it before starting an agent"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     async fn saved_workspace(&self, node_id: i64) -> Result<Option<SavedWorkspace>, StorageError> {
         let connection = self
             .database

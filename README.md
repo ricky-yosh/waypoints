@@ -4,8 +4,18 @@ Status: early implementation. Persistent workflows, prompt nodes, branching
 connections, explicit jj associations, and empty-change creation on a selected
 base work through an automatically started backend and CLI on macOS/Linux.
 Native status refresh is read-only. Nodes can allocate dedicated jj workspaces at
-explicit directories without changing the original working copy. GUI integration
-and agent execution are not connected yet.
+explicit directories without changing the original working copy. A first
+backend-owned ACP run lifecycle supports polling, approvals, and cancellation,
+with fresh runs and explicit saved-session continuation manually validated
+against Codex. Successful turns now automatically record an exact jj revision
+before releasing the workspace, also manually validated against Codex.
+Interrupted runs have explicit read-only inspection and confirmed reservation
+recovery, fake-agent/native-jj tested without signalling saved PIDs or replaying work.
+Node creation, saved prompt edits, and connection creation support persistent
+[metadata undo/redo](docs/14-workflow-history.md), never code or conversation rewind.
+GUI integration remains pending.
+An explicit workspace verification command can acknowledge a completed allocation
+after an interrupted creation, without changing local files or native history.
 
 ## Try the CLI
 
@@ -49,6 +59,9 @@ Waypoints turns a plan into a graph of phases. Each phase runs in a coding agent
 | `07-spikes-and-build-order.md` | Throwaway experiments to run first, build order, open questions |
 | `08-proa-and-web.md` | What Proa is and where it could fit (optional web side) |
 | `09-ideas-explored.md` | Other project ideas considered along the way, and why they were set aside |
+| [`12-codex-acp-spike.md`](docs/12-codex-acp-spike.md) | Tested Codex ACP behavior, setup, caveats, and the next production slice |
+| [`13-agent-run-lifecycle.md`](docs/13-agent-run-lifecycle.md) | Implemented background-run checkpoint, commands, bounds, cleanup, and remaining work |
+| [`14-workflow-history.md`](docs/14-workflow-history.md) | Persistent metadata undo/redo, CLI/RPC, native-history boundary, and validation |
 
 ## Decisions so far
 

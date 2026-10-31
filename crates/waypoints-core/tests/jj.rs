@@ -75,6 +75,99 @@ fn run(test: impl Future<Output = anyhow::Result<()>>) -> anyhow::Result<()> {
 }
 
 #[test]
+fn workspace_verification_preserves_edits_and_rejects_stale_checkouts() -> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        fs::write(repo.project.join("base.txt"), "base\n")?;
+        repo.jj(&["describe", "-m", "Base"])?;
+        let base = repo.value("change_id")?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflows.db")).await?;
+        let workflow = storage
+            .create_workflow(&repo.project, "Verification")
+            .await?;
+        let node = storage.create_node(workflow.id, "Keep prompt").await?;
+        assert!(
+            storage
+                .verify_node_workspace(workflow.id, node.id)
+                .await
+                .is_err()
+        );
+        storage
+            .create_node_change(workflow.id, node.id, &base)
+            .await?;
+        let path = repo.directory.path().join("editing");
+        let workspace = storage
+            .create_node_workspace(workflow.id, node.id, &path)
+            .await?;
+        // Unrelated repository operations do not make this checkout stale.
+        let other = storage.create_node(workflow.id, "Independent").await?;
+        storage
+            .create_node_change(workflow.id, other.id, &base)
+            .await?;
+        fs::write(path.join("base.txt"), "legitimate local modification\n")?;
+        fs::write(path.join("new.txt"), "not snapshotted\n")?;
+        let operation = repo.operation()?;
+        let checkout = fs::read(path.join(".jj/working_copy/checkout"))?;
+        let tree = fs::read(path.join(".jj/working_copy/tree_state"))?;
+        assert_eq!(
+            storage.verify_node_workspace(workflow.id, node.id).await?,
+            workspace
+        );
+        assert_eq!(repo.operation()?, operation);
+        assert_eq!(fs::read(path.join(".jj/working_copy/checkout"))?, checkout);
+        assert_eq!(fs::read(path.join(".jj/working_copy/tree_state"))?, tree);
+        assert_eq!(
+            fs::read_to_string(path.join("base.txt"))?,
+            "legitimate local modification\n"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("new.txt"))?,
+            "not snapshotted\n"
+        );
+        // A local deletion is also legitimate; verification must not restore it.
+        fs::remove_file(path.join("base.txt"))?;
+        assert_eq!(
+            storage.verify_node_workspace(workflow.id, node.id).await?,
+            workspace
+        );
+        assert!(!path.join("base.txt").exists());
+        let saved = workspace.workspace.expect("saved allocation");
+        repo.jj(&[
+            "--ignore-working-copy",
+            "--at-op=@",
+            "describe",
+            "-r",
+            &saved.change_id,
+            "-m",
+            "External rewrite",
+        ])?;
+        let operation = repo.operation()?;
+        let before = storage.node_workspace(workflow.id, node.id).await?;
+        let error = storage
+            .verify_node_workspace(workflow.id, node.id)
+            .await
+            .expect_err("stale checkout must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("checkout is unfinished or stale"),
+            "{error}"
+        );
+        assert_eq!(storage.node_workspace(workflow.id, node.id).await?, before);
+        assert_eq!(repo.operation()?, operation);
+        assert_eq!(fs::read(path.join(".jj/working_copy/checkout"))?, checkout);
+        assert_eq!(fs::read(path.join(".jj/working_copy/tree_state"))?, tree);
+        assert!(!path.join("base.txt").exists());
+        assert_eq!(
+            fs::read_to_string(path.join("new.txt"))?,
+            "not snapshotted\n"
+        );
+        assert!(storage.verify_node_workspace(99999, node.id).await.is_err());
+        Ok(())
+    })
+}
+
+#[test]
 fn workspaces_edit_node_changes_independently_and_survive_restart() -> anyhow::Result<()> {
     run(async {
         let repo = Repository::new()?;
@@ -343,6 +436,12 @@ fn workspace_status_retains_missing_forgotten_and_switched_allocations() -> anyh
         let switched = storage.node_workspace(workflow.id, node.id).await?;
         assert!(matches!(switched.state, WorkspaceState::Mismatched { .. }));
         assert_eq!(switched.workspace, workspace.workspace);
+        assert!(
+            storage
+                .verify_node_workspace(workflow.id, node.id)
+                .await
+                .is_err()
+        );
         assert_eq!(
             storage
                 .create_node_workspace(workflow.id, node.id, &path)
@@ -381,6 +480,12 @@ fn workspace_status_retains_missing_forgotten_and_switched_allocations() -> anyh
         fs::rename(&path, &moved)?;
         let missing = storage.node_workspace(workflow.id, node.id).await?;
         assert!(matches!(missing.state, WorkspaceState::MissingDirectory));
+        assert!(
+            storage
+                .verify_node_workspace(workflow.id, node.id)
+                .await
+                .is_err()
+        );
         assert_eq!(missing.workspace, Some(saved));
         assert_eq!(
             storage

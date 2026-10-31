@@ -1,11 +1,11 @@
 # Spikes, build order, open questions
 
-## Spikes (small throwaway Rust programs, each under a day)
+## Spikes (small throwaway integration programs, each under a day)
 
 These are integration research topics, not an instruction to implement ACP first. Establish the headless core/backend/CLI foundation below first; ACP experiments can follow when adding harness execution.
 
-1. **ACP basics.** Spawn Claude's adapter, send one prompt, log every event. Does it stream? Does it emit diff content for edits? Does it send permission requests you can answer?
-2. **Session reuse.** Read capabilities from `initialize`. Try resume, load, and fork. Try resuming from a different working directory (matters for per-phase jj workspaces).
+1. **ACP basics — Codex spike completed.** Streaming, structured diffs, permission denial/approve-once, and protocol cancellation passed with adapter 2.5.0 using a temporary Python client. The subsequent [backend lifecycle](13-agent-run-lifecycle.md) is fake-peer tested, and its Rust fresh-run path also passed a manual Codex file-edit test. That run used a shell tool without a structured edit diff. See [spike results and integration rules](12-codex-acp-spike.md).
+2. **Session reuse — partially verified.** Same-session follow-up and `session/load` after an adapter restart passed with Codex in the temporary spike, including history replay and conversation-only recall. An unprompted session failed to reload. Rust explicit continuation and automatic post-turn snapshotting also passed manual Codex checks. Interrupted-run recovery is now fake-peer/native-jj tested, preserving partial work without replay. Resume without replay, fork, and different-working-directory loading remain untested.
 3. **jj workflow.** In a scratch repo: change per phase, two parallel workspaces, a merge, then edit an early change and observe rebase and conflicts. Confirm exact commands. Check whether Zed shows a phase's diff in a colocated repo.
 4. **Turso.** Throwaway table, a few async writes, reopen the file. Confirms the crate works as expected; keep SQL plain.
 
@@ -21,6 +21,13 @@ Write down what you learn; it becomes the spec for the real core crate.
 4. Verify the headless workflow end to end: create two workflows and edit them independently. In one, create an interfaces/placeholders node with authentication, image-uploading, and settings children. Exercise separate workspaces for two branches, inspect native revision history, and explicitly continue from an older revision using validated jj operations. Edit the upstream node and refresh ancestry/conflict information. Reopen after a backend restart; confirm client reconnect/refresh and persistent workflow undo/redo.
 5. Once the foundation works, add the GPUI client using the same backend operations. Verify CLI edits appear in the GUI before expanding node interactions.
 6. Evaluate ACP execution integration separately; it is not a prerequisite for establishing branching workflows and native history navigation.
+
+**Current headless checkpoint:** persistent metadata undo/redo now covers node
+creation, prompt edits, and connection creation, including restart and atomic
+failure tests. It does not undo code or agent conversations. Deletion/disconnection,
+native history browsing/continuation, ancestry/context staleness, explicit branch
+combination, and project registration remain unfinished; step 4 above is not yet
+fully satisfied. See [workflow history](14-workflow-history.md).
 
 No MCP adapter, transcript archive, or durable notification replay is required. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli).
 

@@ -7,7 +7,8 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use waypoints_backend::{Client, Config};
 use waypoints_core::jj::ChangeState;
-use waypoints_core::storage::{Node, NodeChange};
+use waypoints_core::run::RecoveryConfirmation;
+use waypoints_core::storage::{HistoryStatus, Node, NodeChange};
 use waypoints_core::workspace::{NodeWorkspace, WorkspaceState};
 
 #[derive(Parser)]
@@ -53,6 +54,104 @@ enum Command {
     Backend {
         #[command(subcommand)]
         command: BackendCommand,
+    },
+    /// Inspect or undo/redo saved workflow metadata; never change code or agent memory.
+    History {
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
+    /// Start or control backend-owned ACP runs; output polling never grants permissions.
+    Run {
+        #[command(subcommand)]
+        command: RunCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum HistoryCommand {
+    /// Show the next undo and redo actions across this project's workflows.
+    Status {
+        #[arg(long)]
+        project: PathBuf,
+    },
+    /// Undo the pending action ID returned by history status.
+    Undo {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        expected: i64,
+    },
+    /// Redo the pending action ID returned by history status.
+    Redo {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        expected: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCommand {
+    /// Capture a node prompt and start an ACP executable in its verified workspace.
+    Start {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        /// Explicit installed executable path; no shell command or arguments.
+        #[arg(long)]
+        executable: PathBuf,
+    },
+    /// Load a stopped run's saved session and send a follow-up, without changing the node prompt.
+    Continue {
+        /// Latest run for the session to continue; no conversation fork or rollback.
+        #[arg(long)]
+        run: i64,
+        #[arg(long)]
+        prompt: String,
+    },
+    List {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
+    Status {
+        #[arg(long)]
+        run: i64,
+    },
+    /// Inspect interrupted-run metadata and read-only workspace checks; never release it.
+    Recovery {
+        #[arg(long)]
+        run: i64,
+    },
+    /// Release an interrupted reservation after fresh checks and explicit confirmation.
+    Recover {
+        #[arg(long)]
+        run: i64,
+        /// Attest the old adapter, tools, and native jj writers stopped; no PID is signalled.
+        #[arg(long, required = true)]
+        confirm_processes_stopped: bool,
+    },
+    /// Poll live updates once; use the returned next cursor for subsequent polls.
+    Events {
+        #[arg(long)]
+        run: i64,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+    },
+    Cancel {
+        #[arg(long)]
+        run: i64,
+    },
+    /// Explicitly answer a pending permission with its advertised single-use option ID.
+    Permission {
+        #[arg(long)]
+        run: i64,
+        #[arg(long)]
+        permission: u64,
+        #[arg(long)]
+        option: String,
     },
 }
 
@@ -131,6 +230,13 @@ enum NodeCommand {
 
 #[derive(Subcommand)]
 enum WorkspaceCommand {
+    /// Verify checkout completion and mark a saved allocation ready; never alter files or jj history.
+    Verify {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
     /// Create a workspace in a new directory; repeat requests report the saved allocation.
     Create {
         #[arg(long)]
@@ -187,6 +293,87 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let config = Config::new(&database, &socket)?;
     match args.command {
         Command::Serve => waypoints_backend::serve(&config).await?,
+        Command::Run { command } => {
+            // Explicit starts/continuations and durable queries may launch the backend.
+            // Live controls must not conceal a restart.
+            let client = if matches!(
+                command,
+                RunCommand::Start { .. }
+                    | RunCommand::Continue { .. }
+                    | RunCommand::List { .. }
+                    | RunCommand::Status { .. }
+                    | RunCommand::Recovery { .. }
+            ) {
+                Client::connect_or_start(&config, &env::current_exe()?).await?
+            } else {
+                Client::connect(&config).await?
+            };
+            let value = match command {
+                RunCommand::Start {
+                    workflow,
+                    node,
+                    executable,
+                } => {
+                    let executable = env::current_dir()?.join(executable);
+                    serde_json::to_value(client.start_run(workflow, node, &executable).await?)?
+                }
+                RunCommand::Continue { run, prompt } => {
+                    serde_json::to_value(client.continue_run(run, &prompt).await?)?
+                }
+                RunCommand::List { workflow, node } => {
+                    serde_json::to_value(client.node_runs(workflow, node).await?)?
+                }
+                RunCommand::Status { run } => serde_json::to_value(client.run_status(run).await?)?,
+                RunCommand::Recovery { run } => {
+                    serde_json::to_value(client.inspect_run_recovery(run).await?)?
+                }
+                RunCommand::Recover {
+                    run,
+                    confirm_processes_stopped,
+                } => {
+                    anyhow::ensure!(
+                        confirm_processes_stopped,
+                        "recovery requires --confirm-processes-stopped"
+                    );
+                    serde_json::to_value(
+                        client
+                            .recover_run(run, RecoveryConfirmation::ProcessesStopped)
+                            .await?,
+                    )?
+                }
+                RunCommand::Events { run, after } => {
+                    serde_json::to_value(client.run_events(run, after).await?)?
+                }
+                RunCommand::Cancel { run } => serde_json::to_value(client.cancel_run(run).await?)?,
+                RunCommand::Permission {
+                    run,
+                    permission,
+                    option,
+                } => serde_json::to_value(
+                    client
+                        .respond_to_permission(run, permission, &option)
+                        .await?,
+                )?,
+            };
+            if args.json {
+                println!("{}", serde_json::to_string(&value)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            }
+        }
+        Command::History { command } => {
+            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let status = match command {
+                HistoryCommand::Status { project } => client.history_status(&project).await?,
+                HistoryCommand::Undo { project, expected } => {
+                    client.undo(&project, expected).await?
+                }
+                HistoryCommand::Redo { project, expected } => {
+                    client.redo(&project, expected).await?
+                }
+            };
+            print_history(status, args.json)?;
+        }
         Command::Backend { command } => {
             let client = Client::connect(&config).await?;
             match command {
@@ -263,6 +450,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
                                 .create_node_workspace(workflow, node, &directory)
                                 .await?
                         }
+                        WorkspaceCommand::Verify { workflow, node } => {
+                            client.verify_node_workspace(workflow, node).await?
+                        }
                         WorkspaceCommand::Status { workflow, node } => {
                             client.node_workspace(workflow, node).await?
                         }
@@ -331,6 +521,24 @@ async fn run(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn print_history(status: HistoryStatus, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&status)?);
+    } else {
+        println!("Project: {}", status.project_path.display());
+        for (direction, entry) in [("Undo", status.undo), ("Redo", status.redo)] {
+            match entry {
+                Some(entry) => println!(
+                    "{direction}: {} (edit {}, workflow {})",
+                    entry.label, entry.id, entry.workflow_id
+                ),
+                None => println!("{direction}: unavailable"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn print_node(node: Node, json: bool) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string(&node)?);
@@ -392,7 +600,7 @@ fn print_node_workspace(value: NodeWorkspace, json: bool) -> anyhow::Result<()> 
                 println!("Commit: {}", revision.commit_id);
             }
             WorkspaceState::Incomplete => println!(
-                "Workspace status: incomplete\nInspect native jj state before manual recovery. No files were removed; creation will not be retried."
+                "Workspace status: incomplete\nIf checkout completed, use node workspace verify to acknowledge it. Otherwise inspect native jj state before manual recovery. No files were removed; creation will not be retried."
             ),
             WorkspaceState::MissingDirectory => println!(
                 "Workspace status: missing_directory\nSaved allocation retained; nothing recreated."

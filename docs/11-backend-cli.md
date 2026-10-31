@@ -54,9 +54,10 @@ Fan-out and fan-in are allowed. Nodes need not be connected.
 
 The database adds `nodes` and `connections` tables when opening an existing
 workflows-only database, preserving saved workflows. Graphs and prompt edits
-survive backend restarts. Prompt updates currently replace the saved text:
-there is **no undo or prompt revision history yet**, and no delete/disconnect
-command in this slice.
+survive backend restarts. Node creation, prompt edits, and connection creation
+now have [persistent metadata undo/redo](14-workflow-history.md), shared across
+the project's workflows. It never reverses code, jj operations, or conversations.
+Existing data forms a non-undoable baseline. No delete/disconnect command exists yet.
 
 After rebuilding, stop any old backend and let the next workflow/node/connection
 command start the new executable. Protocol version 1 is retained for these
@@ -259,10 +260,9 @@ jj --ignore-working-copy --at-op=@ workspace list
 jj --ignore-working-copy --at-op=@ op log
 ```
 
-Native recovery is manual in this slice. No Waypoints finalize, forget, replace,
-or deletion command is implemented; an incomplete allocation remains marked
-incomplete even after manual native repairs. This intentionally favors retaining
-work over automatic cleanup or uncertain retries.
+Native recovery is manual in this slice. No automatic repair, forget, replace,
+or deletion command is implemented. A completed checkout can be acknowledged
+with the explicit verification command below, including after manual native repairs.
 
 Workspace creation has a 110-second total allocation deadline and a 60-second
 limit per mutation subprocess, with the same 1 MiB per-stream output bound.
@@ -273,6 +273,52 @@ requests. Timing out a client never authorizes automatic retry.
 
 Tested with jj 0.46.0, including workspace root templates, `--no-colocate`,
 `--sparse-patterns full`, and `workspace update-stale`.
+
+### Verify a completed workspace allocation
+
+If checkout completed but the backend failed before recording success, run:
+
+```sh
+cargo run -p waypoints-cli -- node workspace verify --workflow 1 --node 2 --json
+```
+
+This verifies the saved directory/name, the node's unique change association,
+the native workspace registry, and the working copy's recorded checkout. On
+success it returns `{node, workspace, state}` with `state.status = "ready"` and
+only changes the database readiness flag. Repeating verification is safe.
+Ordinary `workspace status` and repeated `workspace create` remain observational;
+they never perform this acknowledgement automatically.
+
+Verification does **not** run `jj status`, snapshot files, update the checkout,
+switch changes, create a directory, or delete anything. Modified, added, and
+deleted local files are legitimate edits and are left untouched; a clean working
+directory is not required.
+
+Checking the repository's `@` alone is insufficient: it can point to the intended
+change before files have been materialized. Verification uses read-only
+`jj --ignore-working-copy --at-op=@ debug working-copy` to find the local checkout's
+recorded operation, then resolves that workspace's `@` at the recorded operation
+and compares it to the node's current revision. Unrelated newer repository
+operations are allowed; a stale or unfinished checkout is not acknowledged.
+This relies on jj 0.46.0's local-working-copy debug format. Unsupported output,
+missing operation history, timeouts, or unavailable jj cause an error rather
+than a guessed success. The native-query budget is four seconds, within the
+ordinary five-second RPC deadline.
+
+If a check fails, the command exits nonzero, names the failed check, and leaves
+the saved allocation and files unchanged:
+
+- **No allocation:** use `workspace create` with an explicit new directory.
+- **Missing directory or mismatched identity/target:** inspect `node refresh`,
+  the saved workspace details, and native `jj workspace list` before manual recovery.
+- **Unfinished or stale checkout:** inspect local files and native history first.
+  If appropriate, manually run `jj workspace update-stale` **inside the saved
+  directory**, then verify again. Verification never runs this mutating command.
+- **Unsupported native output:** use the tested jj version; do not edit the
+  database flag to bypass verification.
+
+If uncertain, stop at inspection. There is no automatic retry or cleanup, and
+verification is a point-in-time check, not a lock against future native edits.
 
 ## Data and socket paths
 
@@ -351,6 +397,9 @@ Methods:
 |---|---|---|
 | `backend.info` | `{}` | `{pid, database, protocol_version}` |
 | `backend.shutdown` | `{}` | `null` |
+| `history.status` | `{project_path}` | `{project_path, undo, redo}` with pending edit IDs, workflow IDs, and labels |
+| `history.undo` | `{project_path, expected_edit_id}` | New metadata history status; stale/blocked actions are errors |
+| `history.redo` | `{project_path, expected_edit_id}` | New metadata history status; restores saved values/identities only |
 | `workflow.create` | `{project_path, name}` | `{id, project_path, name}` |
 | `workflow.list` | `{project_path}` | Array of workflows ordered by ID |
 | `workflow.graph` | `{workflow_id}` | `{workflow, nodes, connections}` |
@@ -361,8 +410,33 @@ Methods:
 | `node.create_change` | `{workflow_id, node_id, base}` | `{node, association, state}` for the newly created empty change |
 | `node.workspace.create` | `{workflow_id, node_id, directory}` | `{node, workspace, state}` for a new or already-saved workspace |
 | `node.workspace.status` | `{workflow_id, node_id}` | `{node, workspace, state}` observed without updating files |
+| `node.workspace.verify` | `{workflow_id, node_id}` | `{node, workspace, state}` marked ready only after read-only checkout verification |
 | `node.refresh` | `{workflow_id, node_id}` | `{node, association, state}` with freshly queried native status |
 | `connection.create` | `{workflow_id, source_id, target_id}` | `{workflow_id, source_id, target_id}` |
+| `run.start` | `{workflow_id, node_id, executable}` | `{run, permission}`; returns before ACP initialization finishes |
+| `run.continue` | `{run_id, prompt}` | New `{run, permission}` loading the selected stopped run's saved session; no fresh fallback |
+| `run.list` | `{workflow_id, node_id}` | Array of run statuses ordered by ID |
+| `run.status` | `{run_id}` | `{run, permission}` including any pending live approval |
+| `run.recovery` | `{run_id}` | `{run, workspace}`; read-only recovery checks, not process-exit proof |
+| `run.recover` | `{run_id, confirmation: "processes_stopped"}` | `{run, permission}`; explicitly recovered reservation after fresh checks |
+| `run.events` | `{run_id, after}` | `{status, events, next, gap}` from bounded, transient buffers |
+| `run.permission` | `{run_id, permission_id, option_id}` | Updated status; accepts only an advertised single-use option |
+| `run.cancel` | `{run_id}` | Status acknowledging cancellation, not completed cleanup |
+
+See [agent-run lifecycle](13-agent-run-lifecycle.md) for continuation selection,
+replay/live event markers, commands, limits, crash reservations, and validation. Agent tasks run outside
+request handlers; ordinary requests and metadata writes remain serialized.
+Successful turns enter `finalizing` before `completed`, retaining their workspace
+reservation until a native snapshot outcome is saved. `run.snapshot` reports
+`saved` with an exact revision, `failed` with diagnostic detail, or `not_recorded`.
+There is no client snapshot request; both CLI and future GUI observe the same
+headless lifecycle. An agent-completed run can have a failed snapshot, so inspect
+both outcomes.
+Interrupted runs retain their reservations until [explicit recovery](13-agent-run-lifecycle.md#recovering-interrupted-runs).
+Recovery records `recovered`, retaining the original interruption diagnostic and
+phase (`execution`, `finalization`, or legacy `unknown`). It requires caller
+confirmation that old writers stopped; saved PIDs are never signalled. Inspection
+and release never snapshot, repair, or automatically resume the run.
 
 Example:
 
@@ -394,6 +468,8 @@ when querying dirty working copies.
 ## Deliberately not included
 
 - Windows named pipes (the backend currently requires macOS/Linux).
-- GUI integration, notifications, or durable event replay.
-- Project registration, undo history, jj mutations, or ACP.
+- GUI integration, subscriptions, or durable event replay.
+- Project registration, node deletion/disconnection, or agent-session forks.
+- Retrying or reconstructing failed/interrupted finalization.
+- Automatic process discovery/termination or workspace repair during recovery.
 - General versioned database migrations beyond additive create-if-missing tables.

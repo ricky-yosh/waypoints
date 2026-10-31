@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use waypoints_core::run::RecoveryConfirmation;
 
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 // Bound memory usage even when a client sends a frame without a newline.
@@ -40,6 +40,13 @@ pub(crate) struct ProjectParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct HistoryParams {
+    pub project_path: PathBuf,
+    pub expected_edit_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateParams {
     pub project_path: PathBuf,
     pub name: String,
@@ -56,6 +63,49 @@ pub(crate) struct WorkflowParams {
 pub(crate) struct NodeParams {
     pub workflow_id: i64,
     pub node_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StartRunParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub executable: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContinueRunParams {
+    pub run_id: i64,
+    pub prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RunParams {
+    pub run_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoverRunParams {
+    pub run_id: i64,
+    pub confirmation: RecoveryConfirmation,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RunEventsParams {
+    pub run_id: i64,
+    pub after: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PermissionParams {
+    pub run_id: i64,
+    pub permission_id: u64,
+    pub option_id: String,
 }
 
 #[derive(Deserialize)]
@@ -105,7 +155,9 @@ pub(crate) struct ConnectParams {
     pub target_id: i64,
 }
 
-pub(crate) async fn read_frame(stream: &mut BufReader<UnixStream>) -> anyhow::Result<Vec<u8>> {
+pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
+    stream: &mut BufReader<R>,
+) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     (&mut *stream)
         .take(MAX_FRAME as u64 + 1)

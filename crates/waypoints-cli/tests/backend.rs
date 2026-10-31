@@ -48,12 +48,29 @@ impl Fixture {
 
     fn success(&self, args: &[&str]) -> anyhow::Result<Value> {
         let output = self.command().args(args).output()?;
+        self.json_output(output, &format!("CLI {args:?}"))
+    }
+
+    fn json_output(&self, output: Output, context: &str) -> anyhow::Result<Value> {
         assert!(
             output.status.success(),
-            "CLI failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "{context} failed ({}):\nstdout: {}\nstderr: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            self.startup_diagnostics()
         );
         Ok(serde_json::from_slice(&output.stdout)?)
+    }
+
+    fn startup_diagnostics(&self) -> String {
+        let log = self.directory.path().join("backend.sock.log");
+        format!(
+            "fixture: {}\nsocket metadata: {:?}\nstartup log:\n{}",
+            self.directory.path().display(),
+            fs::symlink_metadata(&self.socket),
+            fs::read_to_string(&log).unwrap_or_else(|error| format!("{}: {error}", log.display()))
+        )
     }
 
     fn list_command(&self) -> Command {
@@ -66,11 +83,7 @@ impl Fixture {
 
     fn start(&self) -> anyhow::Result<()> {
         let output = self.list_command().output()?;
-        assert!(
-            output.status.success(),
-            "startup failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        self.json_output(output, "startup")?;
         Ok(())
     }
 
@@ -99,12 +112,1718 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // TempDir removes the log after this drop; retain it in test output
+            // before cleanup can change the evidence.
+            eprintln!("{}", self.startup_diagnostics());
+        }
         // Clean up the real background process even when an assertion unwinds.
         let _ = self.command().args(["backend", "stop"]).output();
     }
 }
 
 struct OwnedServer(Child);
+
+fn run_fixture(prompt: &str) -> anyhow::Result<(Fixture, PathBuf, PathBuf)> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project = fixture.directory.path().join("project");
+    fs::write(project.join("baseline.txt"), "original\n")?;
+    jj(&project, &["describe", "-m", "Run baseline"])?;
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project.to_str().expect("project path"),
+        "--name",
+        "Runs",
+    ])?;
+    fixture.success(&["node", "create", "--workflow", "1", "--prompt", prompt])?;
+    fixture.success(&[
+        "node",
+        "create-change",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--base",
+        "root()",
+    ])?;
+    let workspace = fixture.directory.path().join("agent-workspace");
+    fixture.success(&[
+        "node",
+        "workspace",
+        "create",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--directory",
+        workspace.to_str().expect("workspace path"),
+    ])?;
+    let agent = fixture.directory.path().join("fake-acp");
+    fs::write(&agent, include_str!("fixtures/acp_agent.py"))?;
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700))?;
+    Ok((fixture, agent, workspace))
+}
+
+fn start_run(fixture: &Fixture, agent: &Path) -> anyhow::Result<Value> {
+    fixture.success(&[
+        "run",
+        "start",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--executable",
+        agent.to_str().expect("agent path"),
+    ])
+}
+
+fn continue_run(fixture: &Fixture, id: &str, prompt: &str) -> anyhow::Result<Value> {
+    fixture.success(&["run", "continue", "--run", id, "--prompt", prompt])
+}
+
+fn agent_requests(agent: &Path) -> anyhow::Result<Vec<Value>> {
+    fs::read_to_string(agent.with_extension("requests.jsonl"))?
+        .lines()
+        .map(|line| Ok(serde_json::from_str(line)?))
+        .collect()
+}
+
+fn intercept_snapshots(fixture: &Fixture, script: &str) -> anyhow::Result<()> {
+    fixture.stop()?;
+    let native = Command::new("/bin/sh")
+        .args(["-c", "command -v jj"])
+        .output()?;
+    assert!(native.status.success());
+    let native = String::from_utf8(native.stdout)?.trim().to_owned();
+    let bin = fixture.directory.path().join("snapshot-bin");
+    fs::create_dir(&bin)?;
+    let wrapper = bin.join("jj");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nnative='{native}'\nfor arg do\n if [ \"$arg\" = snapshot.auto-update-stale=false ]; then\n{script}\n fi\ndone\nexec \"$native\" \"$@\"\n"
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH")?);
+    let output = fixture.list_command().env("PATH", path).output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "file never appeared: {path:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn crash_fixture_backend(fixture: &Fixture) -> anyhow::Result<()> {
+    let pid = fixture.success(&["backend", "status"])?["pid"].to_string();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-KILL", &pid])
+            .status()?
+            .success()
+    );
+    Ok(())
+}
+
+fn stop_fixture_agent_group(workspace: &Path) -> anyhow::Result<()> {
+    // Peers without descendants exit on stdin EOF when their backend dies.
+    // Do not signal an already-exited adapter's former process group.
+    if workspace.join("descendant.pid").exists() {
+        // This fixture's live child retains its freshly launched process group.
+        let pid = fs::read_to_string(workspace.join("adapter.pid"))?;
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{}", pid.trim())])
+            .status()?;
+        assert_process_stopped(&workspace.join("descendant.pid"))?;
+    }
+    assert_process_stopped(&workspace.join("adapter.pid"))
+}
+
+fn recover_run(fixture: &Fixture, id: &str) -> anyhow::Result<Value> {
+    fixture.success(&["run", "recover", "--run", id, "--confirm-processes-stopped"])
+}
+
+fn wait_run(fixture: &Fixture, id: &str, state: &str) -> anyhow::Result<Value> {
+    wait_run_for(fixture, id, state, Duration::from_secs(10))
+}
+
+fn wait_run_for(
+    fixture: &Fixture,
+    id: &str,
+    state: &str,
+    duration: Duration,
+) -> anyhow::Result<Value> {
+    let deadline = Instant::now() + duration;
+    loop {
+        let status = fixture.success(&["run", "status", "--run", id])?;
+        if status["run"]["state"]["status"] == state {
+            return Ok(status);
+        }
+        assert!(Instant::now() < deadline, "expected {state}, got {status}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn assert_process_stopped(pid: &Path) -> anyhow::Result<()> {
+    let pid = fs::read_to_string(pid)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let output = Command::new("ps")
+            .args(["-p", &pid, "-o", "stat="])
+            .output()?;
+        // Orphan descendants may briefly remain as zombies before the OS reaps them.
+        let state = String::from_utf8(output.stdout)?;
+        if !output.status.success() || state.trim().starts_with('Z') {
+            return Ok(());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "process {pid} still running: {state}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn continuation_loads_harness_history_after_restart_without_replacing_node_assignment()
+-> anyhow::Result<()> {
+    let assignment = "remember conversation-only-token-a37c";
+    let (fixture, agent, workspace) = run_fixture(assignment)?;
+    let first = start_run(&fixture, &agent)?;
+    let id = first["run"]["id"].to_string();
+    let completed = wait_run(&fixture, &id, "completed")?;
+    assert!(completed["run"]["continued_from"].is_null());
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    for entry in fs::read_dir(&workspace)? {
+        let path = entry?.path();
+        if path.is_file() {
+            assert!(
+                !fs::read_to_string(&path)?.contains("conversation-only-token-a37c"),
+                "{path:?}"
+            );
+        }
+    }
+    fixture.stop()?;
+    // Continuation itself auto-starts the backend; neither adapter nor event ring survives.
+    let second = continue_run(&fixture, &id, "recall and extend")?;
+    let second_id = second["run"]["id"].to_string();
+    assert_ne!(second_id, id);
+    assert_eq!(second["run"]["continued_from"], first["run"]["id"]);
+    assert_eq!(second["run"]["prompt"], "recall and extend");
+    assert_eq!(second["run"]["session_id"], completed["run"]["session_id"]);
+    assert_eq!(second["run"]["change_id"], completed["run"]["change_id"]);
+    assert_eq!(second["run"]["directory"], completed["run"]["directory"]);
+    let second_done = wait_run(&fixture, &second_id, "completed")?;
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    assert_eq!(
+        fs::read_to_string(workspace.join("hello.txt"))?,
+        "Hello from the first turn.\nExtended in the second turn.\n"
+    );
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", "1", "--node", "1"])?["prompt"],
+        assignment
+    );
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        completed
+    );
+    let events = fixture.success(&["run", "events", "--run", &second_id])?;
+    let items = events["events"].as_array().expect("events");
+    assert_eq!(items.len(), 3, "{events}");
+    assert_eq!(items[0]["origin"], "replay");
+    assert_eq!(items[1]["origin"], "replay");
+    assert_eq!(items[1]["update"]["toolCallId"], "historical-edit");
+    assert_eq!(items[2]["origin"], "live");
+    assert_eq!(
+        items[2]["update"]["content"]["text"],
+        "Recalled: conversation-only-token-a37c"
+    );
+    let cursor = events["next"].to_string();
+    assert_eq!(
+        fixture.success(&["run", "events", "--run", &second_id, "--after", &cursor])?["events"],
+        json!([])
+    );
+    let requests = agent_requests(&agent)?;
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|request| request["method"].as_str().expect("method"))
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "session/new",
+            "session/set_mode",
+            "session/prompt",
+            "initialize",
+            "session/load",
+            "session/set_mode",
+            "session/prompt"
+        ]
+    );
+    // Completion includes an automatic snapshot, without a client-side native mutation.
+    assert_eq!(
+        completed["run"]["snapshot"]["status"], "saved",
+        "{completed}"
+    );
+    assert_eq!(
+        second_done["run"]["snapshot"]["status"], "saved",
+        "{second_done}"
+    );
+    let first_revision = &completed["run"]["snapshot"]["revision"];
+    let second_revision = &second_done["run"]["snapshot"]["revision"];
+    assert_eq!(first_revision["change_id"], second_revision["change_id"]);
+    assert_ne!(first_revision["commit_id"], second_revision["commit_id"]);
+    assert_eq!(
+        jj(
+            &workspace,
+            &[
+                "--ignore-working-copy",
+                "--at-op=@",
+                "file",
+                "show",
+                "-r",
+                first_revision["commit_id"].as_str().expect("commit"),
+                "hello.txt"
+            ]
+        )?,
+        "Hello from the first turn.\n"
+    );
+    assert_eq!(
+        jj(
+            &workspace,
+            &[
+                "--ignore-working-copy",
+                "--at-op=@",
+                "file",
+                "show",
+                "-r",
+                second_revision["commit_id"].as_str().expect("commit"),
+                "hello.txt"
+            ]
+        )?,
+        "Hello from the first turn.\nExtended in the second turn.\n"
+    );
+    let refreshed = fixture.success(&["node", "refresh", "--workflow", "1", "--node", "1"])?;
+    assert_eq!(
+        refreshed["association"]["change_id"],
+        completed["run"]["change_id"]
+    );
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &second_id])?,
+        second_done
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_requires_confirmation_preserves_work_and_allows_explicit_continuation()
+-> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("hang")?;
+    fs::write(workspace.join("keep.txt"), "preserve dirty work\n")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_run(&fixture, &id, "running")?;
+    wait_for_file(&workspace.join("descendant.pid"));
+    crash_fixture_backend(&fixture)?;
+    let interrupted = fixture.success(&["run", "status", "--run", &id])?;
+    assert_eq!(interrupted["run"]["state"]["status"], "interrupted");
+    assert_eq!(interrupted["run"]["state"]["phase"], "execution");
+    let before_commit = recorded_commit(&workspace)?;
+    let before_op = jj(
+        &workspace,
+        &[
+            "--ignore-working-copy",
+            "--at-op=@",
+            "op",
+            "log",
+            "--no-graph",
+            "--limit",
+            "1",
+            "-T",
+            "id",
+        ],
+    )?;
+    let checkout = fs::read(workspace.join(".jj/working_copy/checkout"))?;
+    let tree = fs::read(workspace.join(".jj/working_copy/tree_state"))?;
+    let requests = agent_requests(&agent)?;
+    let inspection = fixture.success(&["run", "recovery", "--run", &id])?;
+    assert_eq!(inspection["run"], interrupted["run"]);
+    assert_eq!(inspection["workspace"]["status"], "verified");
+    // Workspace verification is not evidence old processes stopped.
+    let descendant = fs::read_to_string(workspace.join("descendant.pid"))?;
+    assert!(
+        Command::new("ps")
+            .args(["-p", descendant.trim(), "-o", "stat="])
+            .output()?
+            .status
+            .success()
+    );
+    let omitted = fixture
+        .command()
+        .args(["run", "recover", "--run", &id])
+        .output()?;
+    assert!(!omitted.status.success());
+    assert!(String::from_utf8(omitted.stderr)?.contains("--confirm-processes-stopped"));
+    for params in [
+        json!({"run_id":1}),
+        json!({"run_id":1,"confirmation":false}),
+        json!({"run_id":1,"confirmation":"unchecked"}),
+        json!({"run_id":1,"confirmation":"processes_stopped","force":true}),
+    ] {
+        let response = fixture.rpc(
+            format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","id":1,"method":"run.recover","params":params})
+            )
+            .as_bytes(),
+        )?;
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        interrupted
+    );
+    fixture.stop()?;
+    // Repeated backend restarts retain the first interruption's phase/cause.
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        interrupted
+    );
+    stop_fixture_agent_group(&workspace)?;
+    assert_process_stopped(&workspace.join("descendant.pid"))?;
+    let recovered = recover_run(&fixture, &id)?;
+    assert_eq!(recovered["run"]["state"]["status"], "recovered");
+    assert_eq!(
+        recovered["run"]["state"]["detail"],
+        interrupted["run"]["state"]["detail"]
+    );
+    assert_eq!(recovered["run"]["state"]["phase"], "execution");
+    for field in [
+        "session_id",
+        "process_id",
+        "directory",
+        "change_id",
+        "snapshot",
+        "prompt",
+    ] {
+        assert_eq!(
+            recovered["run"][field], interrupted["run"][field],
+            "{field}"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(workspace.join("keep.txt"))?,
+        "preserve dirty work\n"
+    );
+    assert_eq!(
+        fs::read(workspace.join(".jj/working_copy/checkout"))?,
+        checkout
+    );
+    assert_eq!(
+        fs::read(workspace.join(".jj/working_copy/tree_state"))?,
+        tree
+    );
+    assert_eq!(recorded_commit(&workspace)?, before_commit);
+    assert_eq!(
+        jj(
+            &workspace,
+            &[
+                "--ignore-working-copy",
+                "--at-op=@",
+                "op",
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-T",
+                "id"
+            ]
+        )?,
+        before_op
+    );
+    assert_eq!(
+        agent_requests(&agent)?,
+        requests,
+        "recovery must not replay anything"
+    );
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        recovered
+    );
+    let next = continue_run(&fixture, &id, "permission")?;
+    let next_id = next["run"]["id"].to_string();
+    wait_run(&fixture, &next_id, "awaiting_permission")?;
+    // Retrying an old recovery must not release the new run's reservation.
+    assert_eq!(recover_run(&fixture, &id)?, recovered);
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "run",
+                "start",
+                "--workflow",
+                "1",
+                "--node",
+                "1",
+                "--executable",
+                agent.to_str().expect("agent")
+            ])
+            .output()?
+            .status
+            .success()
+    );
+    fixture.success(&[
+        "run",
+        "permission",
+        "--run",
+        &next_id,
+        "--permission",
+        "1",
+        "--option",
+        "allow",
+    ])?;
+    let next_done = wait_run(&fixture, &next_id, "completed")?;
+    assert_eq!(next_done["run"]["snapshot"]["status"], "saved");
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        recovered,
+        "later work must not fill the interrupted run's snapshot"
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_rechecks_workspace_and_refuses_missing_switched_or_stale_checkout() -> anyhow::Result<()>
+{
+    for failure in ["missing", "switched", "stale"] {
+        let (fixture, agent, workspace) = run_fixture("permission")?;
+        let started = start_run(&fixture, &agent)?;
+        let id = started["run"]["id"].to_string();
+        wait_run(&fixture, &id, "awaiting_permission")?;
+        crash_fixture_backend(&fixture)?;
+        stop_fixture_agent_group(&workspace)?;
+        let interrupted = fixture.success(&["run", "status", "--run", &id])?;
+        assert_eq!(
+            fixture.success(&["run", "recovery", "--run", &id])?["workspace"]["status"],
+            "verified"
+        );
+        let moved = fixture.directory.path().join("moved-workspace");
+        match failure {
+            "missing" => fs::rename(&workspace, &moved)?,
+            "switched" => {
+                jj(&workspace, &["new", "-m", "Externally switched"])?;
+            }
+            "stale" => {
+                let project = fixture.directory.path().join("project");
+                jj(
+                    &project,
+                    &[
+                        "--ignore-working-copy",
+                        "describe",
+                        "-r",
+                        interrupted["run"]["change_id"].as_str().expect("change"),
+                        "-m",
+                        "Rewritten outside workspace",
+                    ],
+                )?;
+            }
+            _ => unreachable!("known failure"),
+        }
+        let directory = if failure == "missing" {
+            &moved
+        } else {
+            &workspace
+        };
+        let checkout = fs::read(directory.join(".jj/working_copy/checkout"))?;
+        let inspection = fixture.success(&["run", "recovery", "--run", &id])?;
+        assert_eq!(
+            inspection["workspace"]["status"], "blocked",
+            "{failure}: {inspection}"
+        );
+        assert!(
+            !fixture
+                .command()
+                .args([
+                    "run",
+                    "recover",
+                    "--run",
+                    &id,
+                    "--confirm-processes-stopped"
+                ])
+                .output()?
+                .status
+                .success()
+        );
+        assert_eq!(
+            fixture.success(&["run", "status", "--run", &id])?,
+            interrupted
+        );
+        assert_eq!(
+            fs::read(directory.join(".jj/working_copy/checkout"))?,
+            checkout
+        );
+        assert!(
+            !fixture
+                .command()
+                .args([
+                    "run",
+                    "start",
+                    "--workflow",
+                    "1",
+                    "--node",
+                    "1",
+                    "--executable",
+                    agent.to_str().expect("agent")
+                ])
+                .output()?
+                .status
+                .success(),
+            "failed recovery must retain reservation"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_without_a_session_allows_fresh_start_but_never_invents_continuation()
+-> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    fs::write(workspace.join("stall-initialize"), "")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_for_file(&workspace.join("adapter.pid"));
+    crash_fixture_backend(&fixture)?;
+    stop_fixture_agent_group(&workspace)?;
+    fixture.success(&["run", "recovery", "--run", &id])?;
+    let recovered = recover_run(&fixture, &id)?;
+    assert!(recovered["run"]["session_id"].is_null());
+    assert!(
+        !fixture
+            .command()
+            .args(["run", "continue", "--run", &id, "--prompt", "complete"])
+            .output()?
+            .status
+            .success()
+    );
+    fs::remove_file(workspace.join("stall-initialize"))?;
+    let next = start_run(&fixture, &agent)?;
+    wait_run(&fixture, &next["run"]["id"].to_string(), "completed")?;
+    assert_eq!(recover_run(&fixture, &id)?, recovered);
+    Ok(())
+}
+
+#[test]
+fn recovery_refuses_active_and_successful_runs_and_inspection_does_not_release()
+-> anyhow::Result<()> {
+    let (fixture, agent, _) = run_fixture("permission")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_run(&fixture, &id, "awaiting_permission")?;
+    for command in ["recovery", "recover"] {
+        let mut args = vec!["run", command, "--run", &id];
+        if command == "recover" {
+            args.push("--confirm-processes-stopped");
+        }
+        assert!(!fixture.command().args(args).output()?.status.success());
+    }
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?["run"]["state"]["status"],
+        "awaiting_permission"
+    );
+    fixture.success(&[
+        "run",
+        "permission",
+        "--run",
+        &id,
+        "--permission",
+        "1",
+        "--option",
+        "allow",
+    ])?;
+    let completed = wait_run(&fixture, &id, "completed")?;
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "run",
+                "recover",
+                "--run",
+                &id,
+                "--confirm-processes-stopped"
+            ])
+            .output()?
+            .status
+            .success()
+    );
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        completed
+    );
+    Ok(())
+}
+
+fn recorded_commit(workspace: &Path) -> anyhow::Result<String> {
+    jj(
+        workspace,
+        &[
+            "--ignore-working-copy",
+            "--at-op=@",
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "commit_id",
+        ],
+    )
+}
+
+#[test]
+fn snapshots_record_exact_revisions_without_client_mutation_and_do_not_repeat() -> anyhow::Result<()>
+{
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let project = fixture.directory.path().join("project");
+    let source_commit = recorded_commit(&project)?;
+    let before = recorded_commit(&workspace)?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let completed = wait_run(&fixture, &id, "completed")?;
+    let snapshot = &completed["run"]["snapshot"];
+    assert_eq!(snapshot["status"], "saved", "{completed}");
+    assert_eq!(
+        snapshot["revision"]["change_id"],
+        completed["run"]["change_id"]
+    );
+    let commit = snapshot["revision"]["commit_id"]
+        .as_str()
+        .expect("saved commit");
+    assert_ne!(commit, before);
+    assert_eq!(recorded_commit(&workspace)?, commit);
+    assert_eq!(
+        jj(
+            &workspace,
+            &[
+                "--ignore-working-copy",
+                "--at-op=@",
+                "file",
+                "show",
+                "-r",
+                commit,
+                "captured-prompt.txt"
+            ]
+        )?,
+        "complete"
+    );
+    assert_eq!(recorded_commit(&project)?, source_commit);
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    fs::write(
+        workspace.join("after-run.txt"),
+        "manual edits are not part of that run\n",
+    )?;
+    fixture.success(&["run", "events", "--run", &id])?;
+    let refreshed = fixture.success(&["node", "refresh", "--workflow", "1", "--node", "1"])?;
+    assert_eq!(refreshed["state"]["revision"], snapshot["revision"]);
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        completed
+    );
+    assert_eq!(recorded_commit(&workspace)?, commit);
+    Ok(())
+}
+
+#[test]
+fn snapshot_failure_is_separate_from_agent_success_and_releases_reservation() -> anyhow::Result<()>
+{
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    intercept_snapshots(&fixture, "echo 'injected snapshot failure' >&2\nexit 1")?;
+    let before = recorded_commit(&workspace)?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let completed = wait_run(&fixture, &id, "completed")?;
+    assert_eq!(
+        completed["run"]["snapshot"]["status"], "failed",
+        "{completed}"
+    );
+    assert!(
+        completed["run"]["snapshot"]["detail"]
+            .as_str()
+            .expect("failure")
+            .contains("injected snapshot failure")
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("captured-prompt.txt"))?,
+        "complete"
+    );
+    assert_eq!(recorded_commit(&workspace)?, before);
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    let next = continue_run(&fixture, &id, "complete")?;
+    wait_run(&fixture, &next["run"]["id"].to_string(), "completed")?;
+    assert_eq!(
+        agent_requests(&agent)?
+            .iter()
+            .filter(|request| request["method"] == "session/prompt")
+            .count(),
+        2,
+        "no automatic agent retry"
+    );
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        completed
+    );
+    Ok(())
+}
+
+#[test]
+fn snapshot_warnings_do_not_silently_claim_all_output_was_recorded() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("large-file")?;
+    // Force a deterministic native new-file limit, independent of user config.
+    intercept_snapshots(
+        &fixture,
+        "\"$native\" --config 'snapshot.max-new-file-size=\"1MiB\"' \"$@\"\nexit $?",
+    )?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let completed = wait_run(&fixture, &id, "completed")?;
+    assert_eq!(
+        completed["run"]["snapshot"]["status"], "failed",
+        "{completed}"
+    );
+    let detail = completed["run"]["snapshot"]["detail"]
+        .as_str()
+        .expect("failure");
+    assert!(
+        detail.contains("large.txt") && detail.contains("diagnostics"),
+        "{detail}"
+    );
+    assert_eq!(
+        fs::metadata(workspace.join("large.txt"))?.len(),
+        2 * 1024 * 1024
+    );
+    Ok(())
+}
+
+#[test]
+fn snapshot_decode_failure_does_not_claim_success_after_a_native_mutation() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    intercept_snapshots(
+        &fixture,
+        "\"$native\" \"$@\" > /dev/null || exit $?\nprintf 'invalid JSON\\n'\nexit 0",
+    )?;
+    let before = recorded_commit(&workspace)?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let completed = wait_run(&fixture, &id, "completed")?;
+    assert_eq!(
+        completed["run"]["snapshot"]["status"], "failed",
+        "{completed}"
+    );
+    assert!(
+        completed["run"]["snapshot"]["detail"]
+            .as_str()
+            .expect("failure")
+            .contains("native snapshot may have succeeded")
+    );
+    assert_ne!(
+        recorded_commit(&workspace)?,
+        before,
+        "native mutation actually happened"
+    );
+    assert_eq!(
+        agent_requests(&agent)?
+            .iter()
+            .filter(|request| request["method"] == "session/prompt")
+            .count(),
+        1
+    );
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        completed
+    );
+    Ok(())
+}
+
+#[test]
+fn crash_during_finalization_retains_reservation_without_repeating_snapshot() -> anyhow::Result<()>
+{
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let entered = fixture.directory.path().join("snapshot-entered");
+    let release = fixture.directory.path().join("snapshot-release");
+    let output = fixture.directory.path().join("snapshot-output");
+    intercept_snapshots(
+        &fixture,
+        &format!(
+            "\"$native\" \"$@\" > '{}' || exit $?\necho $$ > '{}'\nwhile [ ! -f '{}' ]; do /bin/sleep 0.05; done\ncat '{}'\nexit 0",
+            output.display(),
+            entered.display(),
+            release.display(),
+            output.display(),
+        ),
+    )?;
+    let before = recorded_commit(&workspace)?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_for_file(&entered);
+    wait_run(&fixture, &id, "finalizing")?;
+    let unrecorded_commit = recorded_commit(&workspace)?;
+    assert_ne!(
+        unrecorded_commit, before,
+        "native snapshot committed before the crash"
+    );
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    let backend_pid = fixture.success(&["backend", "status"])?["pid"].to_string();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-KILL", &backend_pid])
+            .status()?
+            .success()
+    );
+    // Fixture-owned native wrapper only; never signal a PID recovered from storage.
+    let native_pid = fs::read_to_string(&entered)?;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", native_pid.trim()])
+        .status()?;
+    assert_process_stopped(&entered)?;
+    fs::write(
+        workspace.join("after-crash.txt"),
+        "do not silently snapshot later edits\n",
+    )?;
+    let restarted = fixture.success(&["run", "status", "--run", &id])?;
+    assert_eq!(restarted["run"]["state"]["status"], "interrupted");
+    assert!(
+        restarted["run"]["state"]["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("finalization")
+    );
+    assert_eq!(restarted["run"]["snapshot"]["status"], "not_recorded");
+    assert_eq!(recorded_commit(&workspace)?, unrecorded_commit);
+    assert!(
+        !fixture
+            .command()
+            .args(["run", "continue", "--run", &id, "--prompt", "complete"])
+            .output()?
+            .status
+            .success()
+    );
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "run",
+                "start",
+                "--workflow",
+                "1",
+                "--node",
+                "1",
+                "--executable",
+                agent.to_str().expect("agent")
+            ])
+            .output()?
+            .status
+            .success()
+    );
+    assert_eq!(
+        agent_requests(&agent)?
+            .iter()
+            .filter(|request| request["method"] == "session/prompt")
+            .count(),
+        1
+    );
+    assert_eq!(restarted["run"]["state"]["phase"], "finalization");
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &id])?,
+        restarted
+    );
+    let inspection = fixture.success(&["run", "recovery", "--run", &id])?;
+    assert_eq!(inspection["workspace"]["status"], "verified");
+    let recovered = recover_run(&fixture, &id)?;
+    assert_eq!(recovered["run"]["state"]["status"], "recovered");
+    assert_eq!(recovered["run"]["state"]["phase"], "finalization");
+    assert_eq!(recovered["run"]["snapshot"]["status"], "not_recorded");
+    assert_eq!(
+        recorded_commit(&workspace)?,
+        unrecorded_commit,
+        "recovery must not retry the lost snapshot"
+    );
+    Ok(())
+}
+
+#[test]
+fn finalizing_retains_reservation_and_shutdown_waits_for_snapshot() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let entered = fixture.directory.path().join("snapshot-entered");
+    let release = fixture.directory.path().join("snapshot-release");
+    intercept_snapshots(
+        &fixture,
+        &format!(
+            "echo $$ > '{}'\nwhile [ ! -f '{}' ]; do /bin/sleep 0.05; done",
+            entered.display(),
+            release.display()
+        ),
+    )?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_for_file(&entered);
+    let finalizing = wait_run(&fixture, &id, "finalizing")?;
+    assert_eq!(finalizing["run"]["snapshot"]["status"], "not_recorded");
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    fixture.success(&["backend", "status"])?;
+    assert_eq!(
+        fixture.success(&["run", "cancel", "--run", &id])?["run"]["state"]["status"],
+        "finalizing",
+        "finalization cannot be cancelled"
+    );
+    for args in [
+        vec!["run", "continue", "--run", &id, "--prompt", "complete"],
+        vec![
+            "run",
+            "start",
+            "--workflow",
+            "1",
+            "--node",
+            "1",
+            "--executable",
+            agent.to_str().expect("agent"),
+        ],
+    ] {
+        assert!(
+            !fixture.command().args(args).output()?.status.success(),
+            "workspace must remain reserved"
+        );
+    }
+    fixture.success(&["backend", "stop"])?;
+    // Shutdown acknowledges immediately, but keeps locks while snapshotting.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        fixture.socket.exists(),
+        "backend exited before native finalization"
+    );
+    fs::write(&release, "")?;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while fixture.socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "backend did not finish snapshot on shutdown"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let completed = fixture.success(&["run", "status", "--run", &id])?;
+    assert_eq!(completed["run"]["state"]["status"], "completed");
+    assert_eq!(
+        completed["run"]["snapshot"]["status"], "saved",
+        "{completed}"
+    );
+    Ok(())
+}
+
+#[test]
+fn snapshot_preflight_refuses_switched_workspaces_and_cancelled_runs_do_not_snapshot()
+-> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("permission")?;
+    let before = recorded_commit(&workspace)?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_run(&fixture, &id, "awaiting_permission")?;
+    fixture.success(&["run", "cancel", "--run", &id])?;
+    let cancelled = wait_run(&fixture, &id, "cancelled")?;
+    assert_eq!(cancelled["run"]["snapshot"]["status"], "not_recorded");
+    assert_eq!(recorded_commit(&workspace)?, before);
+    let next = continue_run(&fixture, &id, "permission")?;
+    let id = next["run"]["id"].to_string();
+    wait_run(&fixture, &id, "awaiting_permission")?;
+    jj(&workspace, &["new", "-m", "Switched while agent waiting"])?;
+    let switched = recorded_commit(&workspace)?;
+    fixture.success(&[
+        "run",
+        "permission",
+        "--run",
+        &id,
+        "--permission",
+        "1",
+        "--option",
+        "allow",
+    ])?;
+    let completed = wait_run(&fixture, &id, "completed")?;
+    assert_eq!(
+        completed["run"]["snapshot"]["status"], "failed",
+        "{completed}"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("approved.txt"))?,
+        "approved once\n"
+    );
+    assert_eq!(
+        recorded_commit(&workspace)?,
+        switched,
+        "wrong change must not be snapshotted or repaired"
+    );
+    Ok(())
+}
+
+#[test]
+fn continuation_protocol_failures_never_create_a_fresh_session_or_send_a_prompt()
+-> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let first = start_run(&fixture, &agent)?;
+    let mut id = first["run"]["id"].to_string();
+    wait_run(&fixture, &id, "completed")?;
+    for (flag, contents, expected) in [
+        ("load-capabilities.json", "{}", "loadSession"),
+        (
+            "load-capabilities.json",
+            r#"{"loadSession":false}"#,
+            "loadSession",
+        ),
+        ("load-error", "", "no rollout found"),
+        ("load-malformed", "", "must be an object"),
+        ("load-wrong-session", "", "different session"),
+        ("load-wrong-update", "", "wrong session"),
+        ("mode-error", "", "unsupported mode"),
+    ] {
+        let before = agent_requests(&agent)?.len();
+        fs::write(workspace.join(flag), contents)?;
+        let started = continue_run(&fixture, &id, "must not be sent")?;
+        id = started["run"]["id"].to_string();
+        let failed = wait_run(&fixture, &id, "failed")?;
+        assert!(
+            failed["run"]["state"]["detail"]
+                .as_str()
+                .expect("failure")
+                .contains(expected),
+            "{failed}"
+        );
+        assert_process_stopped(&workspace.join("adapter.pid"))?;
+        let requests = agent_requests(&agent)?;
+        for request in &requests[before..] {
+            assert_ne!(request["method"], "session/new", "{requests:?}");
+            assert_ne!(request["method"], "session/prompt", "{requests:?}");
+        }
+        fs::remove_file(workspace.join(flag))?;
+        fixture.success(&["backend", "status"])?;
+    }
+    // Explicit retry after fixing the cause uses the same session, not a fallback.
+    let retry = continue_run(&fixture, &id, "complete")?;
+    wait_run(&fixture, &retry["run"]["id"].to_string(), "completed")?;
+    Ok(())
+}
+
+#[test]
+fn continuation_reuses_permissions_cancellation_and_bounded_replay() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let first = start_run(&fixture, &agent)?;
+    let mut id = first["run"]["id"].to_string();
+    wait_run(&fixture, &id, "completed")?;
+    fs::write(workspace.join("load-flood"), "")?;
+    for option in ["deny", "allow"] {
+        let started = continue_run(&fixture, &id, "permission")?;
+        id = started["run"]["id"].to_string();
+        wait_run(&fixture, &id, "awaiting_permission")?;
+        let events = fixture.success(&["run", "events", "--run", &id])?;
+        assert_eq!(events["gap"], true);
+        assert!(events["events"].as_array().expect("events").len() <= 128);
+        assert_eq!(events["events"][0]["origin"], "replay");
+        assert_eq!(
+            events["events"]
+                .as_array()
+                .expect("events")
+                .last()
+                .expect("last")["origin"],
+            "live"
+        );
+        assert_eq!(events["status"]["permission"]["id"], 1);
+        fixture.success(&["backend", "status"])?;
+        let before = agent_requests(&agent)?.len();
+        let overlap = fixture
+            .command()
+            .args(["run", "continue", "--run", &id, "--prompt", "complete"])
+            .output()?;
+        assert!(!overlap.status.success());
+        assert_eq!(agent_requests(&agent)?.len(), before);
+        fixture.success(&[
+            "run",
+            "permission",
+            "--run",
+            &id,
+            "--permission",
+            "1",
+            "--option",
+            option,
+        ])?;
+        wait_run(
+            &fixture,
+            &id,
+            if option == "allow" {
+                "completed"
+            } else {
+                "cancelled"
+            },
+        )?;
+        assert_eq!(workspace.join("approved.txt").exists(), option == "allow");
+    }
+    fs::remove_file(workspace.join("load-flood"))?;
+    let started = continue_run(&fixture, &id, "hang")?;
+    id = started["run"]["id"].to_string();
+    wait_run(&fixture, &id, "running")?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !workspace.join("descendant.pid").exists() {
+        assert!(Instant::now() < deadline, "descendant never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fixture.success(&["run", "cancel", "--run", &id])?;
+    wait_run(&fixture, &id, "cancelled")?;
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    assert_process_stopped(&workspace.join("descendant.pid"))?;
+    // Loading itself is cancellable, before any follow-up is sent.
+    fs::write(workspace.join("stall-load"), "")?;
+    let started = continue_run(&fixture, &id, "must not be sent")?;
+    id = started["run"]["id"].to_string();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fixture.success(&["run", "events", "--run", &id])?["next"] == 0 {
+        assert!(Instant::now() < deadline, "load never replayed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fixture.success(&["run", "cancel", "--run", &id])?;
+    wait_run(&fixture, &id, "cancelled")?;
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    assert_eq!(
+        fs::read_to_string(workspace.join("captured-prompt.txt"))?,
+        "hang"
+    );
+    Ok(())
+}
+
+#[test]
+fn continuation_preflight_rejects_invalid_sources_prompts_and_native_changes_before_launch()
+-> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let first = start_run(&fixture, &agent)?;
+    let id = first["run"]["id"].to_string();
+    wait_run(&fixture, &id, "completed")?;
+    let before = agent_requests(&agent)?.len();
+    for params in [
+        json!({"run_id":1}),
+        json!({"run_id":1,"prompt":"complete","executable":agent}),
+        json!({"run_id":1,"prompt":false}),
+    ] {
+        let response = fixture.rpc(
+            format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","id":1,"method":"run.continue","params":params})
+            )
+            .as_bytes(),
+        )?;
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    for params in [
+        json!({"run_id":999,"prompt":"complete"}),
+        json!({"run_id":1,"prompt":" \n\t"}),
+        json!({"run_id":1,"prompt":"x".repeat(128 * 1024 + 1)}),
+    ] {
+        let response = fixture.rpc(
+            format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","id":1,"method":"run.continue","params":params})
+            )
+            .as_bytes(),
+        )?;
+        assert_eq!(response["error"]["code"], -32000);
+    }
+    assert_eq!(agent_requests(&agent)?.len(), before);
+    // A stale source cannot pretend to fork an already advanced harness session.
+    let second = continue_run(&fixture, &id, "complete")?;
+    let second_id = second["run"]["id"].to_string();
+    wait_run(&fixture, &second_id, "completed")?;
+    let relocated_agent = agent.with_extension("relocated");
+    fs::rename(&agent, &relocated_agent)?;
+    std::os::unix::fs::symlink(&relocated_agent, &agent)?;
+    let redirected = fixture
+        .command()
+        .args([
+            "run", "continue", "--run", &second_id, "--prompt", "complete",
+        ])
+        .output()?;
+    assert!(!redirected.status.success());
+    assert!(String::from_utf8(redirected.stderr)?.contains("will not switch adapters"));
+    fs::remove_file(&agent)?;
+    fs::rename(&relocated_agent, &agent)?;
+    let old = fixture
+        .command()
+        .args(["run", "continue", "--run", &id, "--prompt", "complete"])
+        .output()?;
+    assert!(!old.status.success());
+    assert!(String::from_utf8(old.stderr)?.contains("newer run"));
+    jj(&workspace, &["new", "-m", "Externally switched"])?;
+    let before = agent_requests(&agent)?.len();
+    let switched = fixture
+        .command()
+        .args([
+            "run", "continue", "--run", &second_id, "--prompt", "complete",
+        ])
+        .output()?;
+    assert!(!switched.status.success());
+    assert_eq!(agent_requests(&agent)?.len(), before);
+    assert_eq!(
+        fixture
+            .success(&["run", "list", "--workflow", "1", "--node", "1"])?
+            .as_array()
+            .expect("runs")
+            .len(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn runs_remain_controllable_and_permissions_are_explicit_single_use() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("permission")?;
+    let started = start_run(&fixture, &agent)?;
+    assert_eq!(started["run"]["state"]["status"], "starting");
+    let id = started["run"]["id"].to_string();
+    let status = wait_run(&fixture, &id, "awaiting_permission")?;
+    assert_eq!(status["run"]["session_id"], "test-session");
+    assert_eq!(
+        status["permission"]["options"]
+            .as_array()
+            .expect("options")
+            .len(),
+        2
+    );
+    assert!(
+        !workspace.join("approved.txt").exists(),
+        "no implicit approval"
+    );
+    assert!(fixture.success(&["backend", "status"])?["pid"].is_number());
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?["nodes"]
+            .as_array()
+            .expect("nodes")
+            .len(),
+        1
+    );
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "run",
+                "start",
+                "--workflow",
+                "1",
+                "--node",
+                "1",
+                "--executable",
+                agent.to_str().expect("agent"),
+            ])
+            .output()?
+            .status
+            .success(),
+        "overlapping run must be refused"
+    );
+    let listing = fixture.success(&["run", "list", "--workflow", "1", "--node", "1"])?;
+    assert_eq!(listing.as_array().expect("runs").len(), 1);
+    let page = fixture.success(&["run", "events", "--run", &id])?;
+    assert_eq!(page["events"][0]["update"]["content"]["text"], "event-0");
+    let cursor = page["next"].to_string();
+    assert_eq!(
+        fixture.success(&["run", "events", "--run", &id, "--after", &cursor])?["events"],
+        json!([])
+    );
+    for (permission, option) in [("999", "allow"), ("1", "blanket"), ("1", "unknown")] {
+        assert!(
+            !fixture
+                .command()
+                .args([
+                    "run",
+                    "permission",
+                    "--run",
+                    &id,
+                    "--permission",
+                    permission,
+                    "--option",
+                    option,
+                ])
+                .output()?
+                .status
+                .success()
+        );
+    }
+    fixture.success(&[
+        "node",
+        "update",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--prompt",
+        "new prompt",
+    ])?;
+    assert_eq!(
+        fs::read_to_string(workspace.join("captured-prompt.txt"))?,
+        "permission"
+    );
+    assert_eq!(
+        status["run"]["prompt"], "permission",
+        "prompt captured at start"
+    );
+    fixture.success(&[
+        "run",
+        "permission",
+        "--run",
+        &id,
+        "--permission",
+        "1",
+        "--option",
+        "deny",
+    ])?;
+    wait_run(&fixture, &id, "cancelled")?;
+    assert!(!workspace.join("approved.txt").exists());
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "run",
+                "permission",
+                "--run",
+                &id,
+                "--permission",
+                "1",
+                "--option",
+                "allow",
+            ])
+            .output()?
+            .status
+            .success(),
+        "duplicate reply must fail"
+    );
+    fixture.success(&[
+        "node",
+        "update",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--prompt",
+        "permission",
+    ])?;
+    let second = start_run(&fixture, &agent)?;
+    let second = second["run"]["id"].to_string();
+    wait_run(&fixture, &second, "awaiting_permission")?;
+    fixture.success(&[
+        "run",
+        "permission",
+        "--run",
+        &second,
+        "--permission",
+        "1",
+        "--option",
+        "allow",
+    ])?;
+    wait_run(&fixture, &second, "completed")?;
+    assert_eq!(
+        fs::read_to_string(workspace.join("approved.txt"))?,
+        "approved once\n"
+    );
+    fixture.stop()?;
+    let saved = fixture.success(&["run", "status", "--run", &second])?;
+    assert_eq!(saved["run"]["state"]["status"], "completed");
+    assert!(saved["permission"].is_null());
+    assert!(
+        !fixture
+            .command()
+            .args(["run", "events", "--run", &second])
+            .output()?
+            .status
+            .success(),
+        "live output must not masquerade as durable history"
+    );
+    Ok(())
+}
+
+#[test]
+fn cancellation_and_shutdown_kill_the_owned_process_group() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("hang")?;
+    for stop_backend in [false, true] {
+        let started = start_run(&fixture, &agent)?;
+        let id = started["run"]["id"].to_string();
+        wait_run(&fixture, &id, "running")?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !workspace.join("descendant.pid").exists() {
+            assert!(Instant::now() < deadline, "descendant never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if stop_backend {
+            fixture.stop()?;
+        } else {
+            let cancelling = fixture.success(&["run", "cancel", "--run", &id])?;
+            assert_eq!(cancelling["run"]["state"]["status"], "cancelling");
+            wait_run(&fixture, &id, "cancelled")?;
+        }
+        assert_process_stopped(&workspace.join("adapter.pid"))?;
+        assert_process_stopped(&workspace.join("descendant.pid"))?;
+        assert_eq!(
+            fixture.success(&["run", "status", "--run", &id])?["run"]["state"]["status"],
+            "cancelled"
+        );
+        fs::remove_file(workspace.join("descendant.pid"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn unanswered_permission_expires_without_granting_access() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("permission")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_run(&fixture, &id, "awaiting_permission")?;
+    fixture.success(&["backend", "status"])?;
+    wait_run_for(&fixture, &id, "cancelled", Duration::from_secs(70))?;
+    assert!(!workspace.join("approved.txt").exists());
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    // Reservation released only after confirmed process cleanup.
+    let next = start_run(&fixture, &agent)?;
+    let next = next["run"]["id"].to_string();
+    wait_run(&fixture, &next, "awaiting_permission")?;
+    fixture.success(&["run", "cancel", "--run", &next])?;
+    wait_run(&fixture, &next, "cancelled")?;
+    Ok(())
+}
+
+#[test]
+fn backend_crash_retains_uncertain_run_reservation_without_replaying_prompt() -> anyhow::Result<()>
+{
+    let (fixture, agent, workspace) = run_fixture("permission")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let waiting = wait_run(&fixture, &id, "awaiting_permission")?;
+    assert!(waiting["run"]["process_id"].is_number());
+    let backend_pid = fixture.success(&["backend", "status"])?["pid"].to_string();
+    let killed = Command::new("/bin/kill")
+        .args(["-KILL", &backend_pid])
+        .status()?;
+    assert!(killed.success(), "failed to kill owned test backend");
+    // Test cleanup, not application recovery: stop only this fixture's known group.
+    let agent_pid = fs::read_to_string(workspace.join("adapter.pid"))?;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{agent_pid}")])
+        .status()?;
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    let restarted = fixture.success(&["run", "status", "--run", &id])?;
+    assert_eq!(restarted["run"]["state"]["status"], "interrupted");
+    assert_eq!(restarted["run"]["session_id"], waiting["run"]["session_id"]);
+    assert_eq!(restarted["run"]["process_id"], waiting["run"]["process_id"]);
+    assert!(restarted["permission"].is_null());
+    assert!(!workspace.join("approved.txt").exists());
+    let continuation = fixture
+        .command()
+        .args(["run", "continue", "--run", &id, "--prompt", "complete"])
+        .output()?;
+    assert!(
+        !continuation.status.success(),
+        "interrupted runs must not resume editing"
+    );
+    assert!(String::from_utf8(continuation.stderr)?.contains("confirmed cleanup"));
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "run",
+                "start",
+                "--workflow",
+                "1",
+                "--node",
+                "1",
+                "--executable",
+                agent.to_str().expect("agent"),
+            ])
+            .output()?
+            .status
+            .success(),
+        "restart must not free an uncertain reservation"
+    );
+    assert_eq!(
+        fixture
+            .success(&["run", "list", "--workflow", "1", "--node", "1"])?
+            .as_array()
+            .expect("runs")
+            .len(),
+        1,
+        "no prompt automatically replayed"
+    );
+    Ok(())
+}
+
+#[test]
+fn bounded_events_report_gaps_and_bad_agents_fail_without_blocking_backend() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("flood")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    wait_run(&fixture, &id, "awaiting_permission")?;
+    let events = fixture.success(&["run", "events", "--run", &id])?;
+    assert_eq!(events["gap"], true);
+    assert!(events["events"].as_array().expect("events").len() <= 128);
+    assert_eq!(events["next"], 300);
+    assert_eq!(events["status"]["permission"]["id"], 1);
+    fixture.success(&["run", "cancel", "--run", &id])?;
+    wait_run(&fixture, &id, "cancelled")?;
+    for prompt in ["malformed", "exit", "oversize", "complete"] {
+        fixture.success(&[
+            "node",
+            "update",
+            "--workflow",
+            "1",
+            "--node",
+            "1",
+            "--prompt",
+            prompt,
+        ])?;
+        let before = recorded_commit(&workspace)?;
+        let started = start_run(&fixture, &agent)?;
+        let id = started["run"]["id"].to_string();
+        let stopped = wait_run(
+            &fixture,
+            &id,
+            if prompt == "complete" {
+                "completed"
+            } else {
+                "failed"
+            },
+        )?;
+        if prompt != "complete" {
+            assert_eq!(stopped["run"]["snapshot"]["status"], "not_recorded");
+            assert_eq!(
+                recorded_commit(&workspace)?,
+                before,
+                "failed agent must not snapshot"
+            );
+        }
+        fixture.success(&["backend", "status"])?;
+    }
+    let invalid = fixture.rpc(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run.cancel\",\"params\":{\"run_id\":1,\"extra\":true}}\n")?;
+    assert_eq!(invalid["error"]["code"], -32602);
+    Ok(())
+}
+
+#[test]
+fn run_start_validates_before_launch_and_setup_can_be_cancelled() -> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let wrong_workflow = fixture
+        .command()
+        .args([
+            "run",
+            "start",
+            "--workflow",
+            "999",
+            "--node",
+            "1",
+            "--executable",
+            agent.to_str().expect("agent"),
+        ])
+        .output()?;
+    assert!(!wrong_workflow.status.success());
+    let invalid_path = fixture.rpc(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run.start\",\"params\":{\"workflow_id\":1,\"node_id\":1,\"executable\":\"relative\"}}\n")?;
+    assert_eq!(invalid_path["error"]["code"], -32000);
+    let long_prompt = "x".repeat(128 * 1024 + 1);
+    let mut request = serde_json::to_vec(&json!({
+        "jsonrpc":"2.0", "id":1, "method":"node.update",
+        "params":{"workflow_id":1,"node_id":1,"prompt":long_prompt}
+    }))?;
+    request.push(b'\n');
+    assert!(fixture.rpc(&request)?.get("result").is_some());
+    let oversized = fixture
+        .command()
+        .args([
+            "run",
+            "start",
+            "--workflow",
+            "1",
+            "--node",
+            "1",
+            "--executable",
+            agent.to_str().expect("agent"),
+        ])
+        .output()?;
+    assert!(!oversized.status.success());
+    assert!(String::from_utf8(oversized.stderr)?.contains("128 KiB"));
+    assert_eq!(
+        fixture.success(&["run", "list", "--workflow", "1", "--node", "1"])?,
+        json!([])
+    );
+    assert!(
+        !workspace.join("adapter.pid").exists(),
+        "invalid starts never launch"
+    );
+    fixture.success(&[
+        "node",
+        "update",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--prompt",
+        "complete",
+    ])?;
+    fs::write(workspace.join("stall-initialize"), "")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !workspace.join("adapter.pid").exists() {
+        assert!(Instant::now() < deadline, "adapter never initialized");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fixture.success(&["backend", "status"])?;
+    fixture.success(&["run", "cancel", "--run", &id])?;
+    wait_run(&fixture, &id, "cancelled")?;
+    assert_process_stopped(&workspace.join("adapter.pid"))?;
+    fs::remove_file(workspace.join("stall-initialize"))?;
+    let before = agent_requests(&agent)?.len();
+    let continuation = fixture
+        .command()
+        .args(["run", "continue", "--run", &id, "--prompt", "complete"])
+        .output()?;
+    assert!(!continuation.status.success());
+    assert!(String::from_utf8(continuation.stderr)?.contains("no saved ACP session"));
+    assert_eq!(agent_requests(&agent)?.len(), before);
+    let next = start_run(&fixture, &agent)?;
+    wait_run(&fixture, &next["run"]["id"].to_string(), "completed")?;
+    jj(&workspace, &["new", "-m", "Switched externally"])?;
+    let switched = fixture
+        .command()
+        .args([
+            "run",
+            "start",
+            "--workflow",
+            "1",
+            "--node",
+            "1",
+            "--executable",
+            agent.to_str().expect("agent"),
+        ])
+        .output()?;
+    assert!(
+        !switched.status.success(),
+        "switched workspace must be refused"
+    );
+    Ok(())
+}
 
 fn jj(project: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("jj")
@@ -315,6 +2034,11 @@ fn cli_allocates_node_workspace_at_client_relative_path_and_reuses_it() -> anyho
             "node.workspace.status",
             json!({"workflow_id": 1, "node_id": 1, "extra": true}),
         ),
+        (
+            "node.workspace.verify",
+            json!({"workflow_id": 1, "node_id": 1, "extra": true}),
+        ),
+        ("node.workspace.verify", json!({"workflow_id": 1})),
     ] {
         let response = fixture.rpc(
             format!(
@@ -348,7 +2072,7 @@ fn cli_allocates_node_workspace_at_client_relative_path_and_reuses_it() -> anyho
         .args([
             "node",
             "workspace",
-            "status",
+            "verify",
             "--workflow",
             &workflow,
             "--node",
@@ -370,19 +2094,27 @@ fn interrupted_workspace_allocation_remains_inspectable_and_never_retries() -> a
         .output()?;
     assert!(native.status.success());
     let native = String::from_utf8(native.stdout)?.trim().to_owned();
-    for fail_at in ["add", "checkout"] {
+    for fail_at in ["add", "checkout", "completed"] {
         let fixture = Fixture::new()?;
         jj(fixture.directory.path(), &["git", "init", "project"])?;
         let project = fixture.directory.path().join("project");
+        fs::write(project.join("base.txt"), "base contents\n")?;
         jj(&project, &["describe", "-m", "Original"])?;
+        let base = jj(
+            &project,
+            &["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+        )?;
         let bin = fixture.directory.path().join("bin");
         fs::create_dir(&bin)?;
         let wrapper = bin.join("jj");
         let injected = if fail_at == "add" {
             "case \" $* \" in *' workspace add '*) \"$NATIVE_JJ\" \"$@\"; echo 'injected add failure' >&2; exit 1;; esac"
-        } else {
+        } else if fail_at == "checkout" {
             // Exceed the ordinary five-second RPC timeout to verify the workspace deadline.
             "case \" $* \" in *' workspace update-stale '*) /bin/sleep 6; echo 'injected checkout failure' >&2; exit 1;; esac"
+        } else {
+            // Checkout succeeds, but the backend never receives a success outcome.
+            "case \" $* \" in *' workspace update-stale '*) \"$NATIVE_JJ\" \"$@\"; echo 'injected completion failure' >&2; exit 1;; esac"
         };
         fs::write(
             &wrapper,
@@ -424,7 +2156,7 @@ fn interrupted_workspace_allocation_remains_inspectable_and_never_retries() -> a
             "--node",
             &node,
             "--base",
-            "root()",
+            &base,
         ])?;
         let destination = fixture.directory.path().join("workspace");
         let args = [
@@ -529,6 +2261,102 @@ fn interrupted_workspace_allocation_remains_inspectable_and_never_retries() -> a
                 .status
                 .code()
                 .is_some_and(|code| code != 0)
+        );
+        let verify_args = [
+            "node",
+            "workspace",
+            "verify",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node,
+        ];
+        let checkout = fs::read(destination.join(".jj/working_copy/checkout"))?;
+        let tree_state = fs::read(destination.join(".jj/working_copy/tree_state"))?;
+        let verification = fixture.command().args(verify_args).output()?;
+        if fail_at == "completed" {
+            assert!(
+                verification.status.success(),
+                "{}",
+                String::from_utf8_lossy(&verification.stderr)
+            );
+            let verified: Value = serde_json::from_slice(&verification.stdout)?;
+            assert_eq!(verified["state"]["status"], "ready");
+            assert_eq!(verified["workspace"], pending["workspace"]);
+            assert_eq!(
+                fs::read_to_string(destination.join("base.txt"))?,
+                "base contents\n"
+            );
+            assert_eq!(
+                fixture.success(&verify_args)?,
+                verified,
+                "verification is idempotent"
+            );
+            fixture.stop()?;
+            assert_eq!(
+                fixture.success(&[
+                    "node",
+                    "workspace",
+                    "status",
+                    "--workflow",
+                    &workflow,
+                    "--node",
+                    &node,
+                ])?,
+                verified
+            );
+        } else {
+            assert!(
+                !verification.status.success(),
+                "must reject incomplete {fail_at}"
+            );
+            let error = String::from_utf8_lossy(&verification.stderr);
+            assert!(
+                error.contains("inspect") || error.contains("checkout"),
+                "{error}"
+            );
+            assert_eq!(
+                fixture.success(&[
+                    "node",
+                    "workspace",
+                    "status",
+                    "--workflow",
+                    &workflow,
+                    "--node",
+                    &node,
+                ])?,
+                pending,
+                "failed verification must leave readiness unchanged"
+            );
+        }
+        assert_eq!(
+            fs::read(destination.join(".jj/working_copy/checkout"))?,
+            checkout
+        );
+        assert_eq!(
+            fs::read(destination.join(".jj/working_copy/tree_state"))?,
+            tree_state
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("keep.txt"))?,
+            "do not delete or overwrite\n"
+        );
+        assert_eq!(
+            jj(
+                &project,
+                &[
+                    "--ignore-working-copy",
+                    "op",
+                    "log",
+                    "--no-graph",
+                    "--limit",
+                    "1",
+                    "-T",
+                    "id",
+                ]
+            )?,
+            operation,
+            "verification must not mutate jj history"
         );
         fixture.stop()?;
     }
@@ -1385,6 +3213,231 @@ impl Drop for OwnedServer {
 }
 
 #[test]
+fn metadata_history_is_shared_persistent_and_rejects_stale_cli_and_rpc_actions()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let project = fixture.directory.path().to_str().expect("temporary path");
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "First",
+    ])?;
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Second",
+    ])?;
+    fixture.success(&["node", "create", "--workflow", "1", "--prompt", "Original"])?;
+    fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        "2",
+        "--prompt",
+        "Other workflow",
+    ])?;
+    let pending = fixture.success(&["history", "status", "--project", project])?;
+    assert_eq!(pending["undo"]["workflow_id"], 2);
+    let id = pending["undo"]["id"].to_string();
+    fixture.success(&["history", "undo", "--project", project, "--expected", &id])?;
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "2"])?["nodes"],
+        json!([])
+    );
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", "1", "--node", "1"])?["prompt"],
+        "Original"
+    );
+    fixture.stop()?;
+    let reopened = fixture.success(&["history", "status", "--project", project])?;
+    assert_eq!(reopened["redo"], pending["undo"]);
+    let mut frame = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "history.redo",
+        "params": {"project_path": project, "expected_edit_id": pending["undo"]["id"]}
+    }))?;
+    frame.push(b'\n');
+    let redo = fixture.rpc(&frame)?;
+    assert_eq!(redo["result"], pending);
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", "2", "--node", "2"])?["prompt"],
+        "Other workflow"
+    );
+    fixture.success(&[
+        "node",
+        "update",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--prompt",
+        "Newer edit",
+    ])?;
+    let stale = fixture
+        .command()
+        .args(["history", "undo", "--project", project, "--expected", &id])
+        .output()?;
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("history changed"));
+    for params in [
+        json!({"project_path": project}),
+        json!({"project_path": project, "expected_edit_id": 1, "force": true}),
+    ] {
+        let mut frame = serde_json::to_vec(
+            &json!({"jsonrpc":"2.0", "id":2, "method":"history.undo", "params":params}),
+        )?;
+        frame.push(b'\n');
+        assert_eq!(fixture.rpc(&frame)?["error"]["code"], -32602);
+    }
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", "1", "--node", "1"])?["prompt"],
+        "Newer edit"
+    );
+    Ok(())
+}
+
+#[test]
+fn metadata_undo_never_rewinds_code_runs_or_conversation_and_blocks_referenced_creation()
+-> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("permission")?;
+    let project_path = fixture.directory.path().join("project");
+    let project = project_path.to_str().expect("project path");
+    let creation = fixture.success(&["history", "status", "--project", project])?;
+    let create_id = creation["undo"]["id"].to_string();
+    fs::write(workspace.join("manual.txt"), "Keep these dirty edits\n")?;
+    let commit = recorded_commit(&workspace)?;
+    let operation = jj(
+        &workspace,
+        &[
+            "--ignore-working-copy",
+            "--at-op=@",
+            "op",
+            "log",
+            "--limit",
+            "1",
+            "--no-graph",
+            "-T",
+            "id",
+        ],
+    )?;
+    let checkout = fs::read(workspace.join(".jj/working_copy/tree_state"))?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let waiting = wait_run(&fixture, &id, "awaiting_permission")?;
+    fixture.success(&[
+        "node",
+        "update",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--prompt",
+        "Revised saved assignment",
+    ])?;
+    let edited = fixture.success(&["history", "status", "--project", project])?;
+    let edit_id = edited["undo"]["id"].to_string();
+    let requests = agent_requests(&agent)?;
+    fixture.success(&[
+        "history",
+        "undo",
+        "--project",
+        project,
+        "--expected",
+        &edit_id,
+    ])?;
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", "1", "--node", "1"])?["prompt"],
+        "permission"
+    );
+    fixture.success(&[
+        "history",
+        "redo",
+        "--project",
+        project,
+        "--expected",
+        &edit_id,
+    ])?;
+    assert_eq!(fixture.success(&["run", "status", "--run", &id])?, waiting);
+    assert_eq!(agent_requests(&agent)?, requests);
+    assert_eq!(
+        fs::read_to_string(workspace.join("manual.txt"))?,
+        "Keep these dirty edits\n"
+    );
+    assert_eq!(recorded_commit(&workspace)?, commit);
+    assert_eq!(
+        jj(
+            &workspace,
+            &[
+                "--ignore-working-copy",
+                "--at-op=@",
+                "op",
+                "log",
+                "--limit",
+                "1",
+                "--no-graph",
+                "-T",
+                "id"
+            ]
+        )?,
+        operation
+    );
+    assert_eq!(
+        fs::read(workspace.join(".jj/working_copy/tree_state"))?,
+        checkout
+    );
+    fixture.success(&[
+        "history",
+        "undo",
+        "--project",
+        project,
+        "--expected",
+        &edit_id,
+    ])?;
+    let before = fixture.success(&["history", "status", "--project", project])?;
+    let blocked = fixture
+        .command()
+        .args([
+            "history",
+            "undo",
+            "--project",
+            project,
+            "--expected",
+            &create_id,
+        ])
+        .output()?;
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("references depend on it"));
+    assert_eq!(
+        fixture.success(&["history", "status", "--project", project])?,
+        before
+    );
+    assert_eq!(fixture.success(&["run", "status", "--run", &id])?, waiting);
+    fixture.success(&["run", "cancel", "--run", &id])?;
+    wait_run(&fixture, &id, "cancelled")?;
+    let blocked = fixture
+        .command()
+        .args([
+            "history",
+            "undo",
+            "--project",
+            project,
+            "--expected",
+            &create_id,
+        ])
+        .output()?;
+    assert!(
+        !blocked.status.success(),
+        "even stopped run/native references must be retained"
+    );
+    Ok(())
+}
+
+#[test]
 fn cli_autostarts_reuses_and_restarts_persistent_backend() -> anyhow::Result<()> {
     let fixture = Fixture::new()?;
     let mut create = fixture.command();
@@ -1425,6 +3478,169 @@ fn cli_autostarts_reuses_and_restarts_persistent_backend() -> anyhow::Result<()>
         fixture.success(&["backend", "status"])?["pid"]
     );
     fixture.stop()?;
+    Ok(())
+}
+
+#[test]
+fn immediate_restarts_preserve_graph_across_repeated_shutdowns() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let project = fixture.directory.path().to_str().expect("temporary path");
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Restart perimeter",
+    ])?;
+    for prompt in ["Original assignment", "Dependent assignment"] {
+        fixture.success(&["node", "create", "--workflow", "1", "--prompt", prompt])?;
+    }
+    fixture.success(&[
+        "connection",
+        "create",
+        "--workflow",
+        "1",
+        "--source",
+        "1",
+        "--target",
+        "2",
+    ])?;
+    let expected = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    let mut previous = fixture.success(&["backend", "status"])?;
+
+    // No retry or settling delay after socket removal: exercise the same handoff
+    // as the intermittent graph test, repeatedly within one test invocation.
+    for cycle in 1..=20 {
+        fixture.stop()?;
+        let output = fixture
+            .command()
+            .args(["workflow", "graph", "--workflow", "1"])
+            .output()?;
+        let graph = fixture.json_output(output, &format!("immediate restart cycle {cycle}"))?;
+        assert_eq!(graph, expected, "saved graph changed on cycle {cycle}");
+        let current = fixture.success(&["backend", "status"])?;
+        assert_ne!(
+            current["pid"], previous["pid"],
+            "cycle {cycle} did not restart"
+        );
+        assert_eq!(current, fixture.success(&["backend", "status"])?);
+        previous = current;
+    }
+    Ok(())
+}
+
+#[test]
+fn simultaneous_restarts_preserve_saved_workflow() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let output = fixture
+        .command()
+        .args([
+            "workflow",
+            "create",
+            "--name",
+            "Concurrent restarts",
+            "--project",
+        ])
+        .arg(fixture.directory.path())
+        .output()?;
+    let saved = fixture.json_output(output, "create workflow")?;
+    let mut previous = fixture.success(&["backend", "status"])?;
+
+    for cycle in 1..=8 {
+        fixture.stop()?;
+        let mut children = Vec::new();
+        for _ in 0..4 {
+            children.push(
+                fixture
+                    .list_command()
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?,
+            );
+        }
+        // Collect every child before asserting so a failed starter cannot leave
+        // other CLI processes running against a fixture being removed.
+        let outputs = children
+            .into_iter()
+            .map(Child::wait_with_output)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        for (client, output) in outputs.into_iter().enumerate() {
+            let list = fixture.json_output(
+                output,
+                &format!("simultaneous restart cycle {cycle}, client {client}"),
+            )?;
+            assert_eq!(
+                list,
+                json!([saved.clone()]),
+                "cycle {cycle}, client {client}"
+            );
+        }
+        let current = fixture.success(&["backend", "status"])?;
+        assert_ne!(
+            current["pid"], previous["pid"],
+            "cycle {cycle} did not restart"
+        );
+        assert_eq!(current, fixture.success(&["backend", "status"])?);
+        previous = current;
+    }
+    Ok(())
+}
+
+#[test]
+fn unavailable_owner_is_not_bypassed_and_startup_works_after_release() -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    for lock_name in ["workflow.db.lock", "backend.sock.lock"] {
+        let fixture = Fixture::new()?;
+        let lock_path = fixture.directory.path().join(lock_name);
+        let owner = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        owner.try_lock()?;
+        let inode = owner.metadata()?.ino();
+        // Model a still-owned database/socket with no listener available yet.
+        // Startup must fail rather than replace the lock or open the database.
+        let output = fixture.list_command().output()?;
+        assert!(
+            !output.status.success(),
+            "{lock_name}: startup bypassed owner"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("backend did not become ready"),
+            "{lock_name}: unexpected failure: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fixture
+                .startup_diagnostics()
+                .contains("backend ownership unavailable"),
+            "{}",
+            fixture.startup_diagnostics()
+        );
+        assert!(
+            !fixture.database.exists(),
+            "{lock_name}: database was opened"
+        );
+        assert!(!fixture.socket.exists(), "{lock_name}: socket was bound");
+        assert_eq!(
+            fs::metadata(&lock_path)?.ino(),
+            inode,
+            "{lock_name}: lock replaced"
+        );
+        drop(owner);
+
+        fixture.start()?;
+        assert_eq!(
+            fs::metadata(&lock_path)?.ino(),
+            inode,
+            "{lock_name}: lock replaced"
+        );
+        fixture.stop()?;
+    }
     Ok(())
 }
 

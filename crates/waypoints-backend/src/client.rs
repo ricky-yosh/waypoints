@@ -11,12 +11,16 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep, timeout};
-use waypoints_core::storage::{Connection, Node, NodeChange, Workflow, WorkflowGraph};
+use waypoints_core::run::{RecoveryConfirmation, RunRecovery};
+use waypoints_core::storage::{
+    Connection, HistoryStatus, Node, NodeChange, Workflow, WorkflowGraph,
+};
 use waypoints_core::workspace::NodeWorkspace;
 
 use crate::config::sidecar;
 use crate::protocol::{MAX_FRAME, PROTOCOL_VERSION, TIMEOUT, read_frame};
 use crate::{BackendError, BackendInfo, Config};
+use crate::{RunEvents, RunStatus};
 
 /// A client that talks only to the local backend, never directly to its database.
 #[derive(Debug)]
@@ -123,6 +127,59 @@ impl Client {
     /// Returns the identity checked when this client connected.
     pub fn info(&self) -> &BackendInfo {
         &self.info
+    }
+
+    /// Inspects the next undo/redo metadata actions across a project's workflows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an inaccessible project, unsupported history, or RPC failure.
+    pub async fn history_status(&self, project: &Path) -> Result<HistoryStatus, BackendError> {
+        let project = project
+            .canonicalize()
+            .context("resolving project directory")?;
+        self.call("history.status", json!({"project_path": project}))
+            .await
+    }
+
+    /// Undoes the selected pending metadata edit, refusing a stale action ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unavailable/blocked/stale history or RPC failure.
+    pub async fn undo(
+        &self,
+        project: &Path,
+        expected_edit_id: i64,
+    ) -> Result<HistoryStatus, BackendError> {
+        let project = project
+            .canonicalize()
+            .context("resolving project directory")?;
+        self.call(
+            "history.undo",
+            json!({"project_path": project, "expected_edit_id": expected_edit_id}),
+        )
+        .await
+    }
+
+    /// Redoes the selected pending metadata edit without repeating native side effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unavailable/blocked/stale history or RPC failure.
+    pub async fn redo(
+        &self,
+        project: &Path,
+        expected_edit_id: i64,
+    ) -> Result<HistoryStatus, BackendError> {
+        let project = project
+            .canonicalize()
+            .context("resolving project directory")?;
+        self.call(
+            "history.redo",
+            json!({"project_path": project, "expected_edit_id": expected_edit_id}),
+        )
+        .await
     }
 
     /// Creates a workflow through the backend.
@@ -291,6 +348,24 @@ impl Client {
         .await
     }
 
+    /// Verifies checkout completion and marks a saved allocation ready without changing native state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing/mismatched allocations, unfinished or stale
+    /// checkouts, unsupported jj output, native/storage failures, or transport errors.
+    pub async fn verify_node_workspace(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<NodeWorkspace, BackendError> {
+        self.call(
+            "node.workspace.verify",
+            json!({"workflow_id": workflow_id, "node_id": node_id}),
+        )
+        .await
+    }
+
     /// Queries current native state without snapshotting or changing the repository.
     ///
     /// # Errors
@@ -324,6 +399,135 @@ impl Client {
             json!({
                 "workflow_id": workflow_id, "source_id": source_id, "target_id": target_id
             }),
+        )
+        .await
+    }
+
+    /// Starts a backend-owned ACP run and returns before adapter initialization finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unready/reserved workspace, invalid executable,
+    /// storage failure, or transport failure. Never automatically retry a start.
+    pub async fn start_run(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        executable: &Path,
+    ) -> Result<RunStatus, BackendError> {
+        self.call(
+            "run.start",
+            json!({"workflow_id":workflow_id,"node_id":node_id,"executable":executable}),
+        )
+        .await
+    }
+
+    /// Starts an explicit follow-up by loading a stopped run's saved ACP session.
+    ///
+    /// The new run captures the follow-up without changing the node assignment.
+    /// It reuses the saved executable and workspace. A load failure never creates
+    /// a fresh session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an ineligible source, invalid prompt, unready/reserved
+    /// workspace, or request failure. Never automatically retry an uncertain response.
+    pub async fn continue_run(&self, run_id: i64, prompt: &str) -> Result<RunStatus, BackendError> {
+        self.call("run.continue", json!({"run_id":run_id,"prompt":prompt}))
+            .await
+    }
+
+    /// Inspects interrupted/recovered metadata and read-only workspace checks.
+    ///
+    /// A verified workspace does not prove old processes stopped. This call never
+    /// releases reservations, signals saved PIDs, or records a run revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown/ineligible run or request failure.
+    pub async fn inspect_run_recovery(&self, run_id: i64) -> Result<RunRecovery, BackendError> {
+        self.call("run.recovery", json!({"run_id":run_id})).await
+    }
+
+    /// Explicitly recovers a reservation after caller attestation and fresh workspace checks.
+    ///
+    /// Does not execute, snapshot, or repair anything. Repeating recovery returns
+    /// its original outcome without releasing a newer run's reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for ineligible/live runs, failed verification, or request failure.
+    pub async fn recover_run(
+        &self,
+        run_id: i64,
+        confirmation: RecoveryConfirmation,
+    ) -> Result<RunStatus, BackendError> {
+        self.call(
+            "run.recover",
+            json!({"run_id":run_id,"confirmation":confirmation}),
+        )
+        .await
+    }
+
+    /// Reads a durable run outcome and any live approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown run or request failure.
+    pub async fn run_status(&self, run_id: i64) -> Result<RunStatus, BackendError> {
+        self.call("run.status", json!({"run_id":run_id})).await
+    }
+
+    /// Lists a node's runs, including those from earlier backend instances.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership or request failure.
+    pub async fn node_runs(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<Vec<RunStatus>, BackendError> {
+        self.call(
+            "run.list",
+            json!({"workflow_id":workflow_id,"node_id":node_id}),
+        )
+        .await
+    }
+
+    /// Polls bounded live output; callers must surface a reported event gap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for expired run buffers, invalid cursors, or request failures.
+    pub async fn run_events(&self, run_id: i64, after: u64) -> Result<RunEvents, BackendError> {
+        self.call("run.events", json!({"run_id":run_id,"after":after}))
+            .await
+    }
+
+    /// Requests cancellation without waiting for process cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a run not owned by this backend or request failure.
+    pub async fn cancel_run(&self, run_id: i64) -> Result<RunStatus, BackendError> {
+        self.call("run.cancel", json!({"run_id":run_id})).await
+    }
+
+    /// Answers exactly one pending approval using an advertised single-use option.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale/unknown permissions or options, or request failures.
+    pub async fn respond_to_permission(
+        &self,
+        run_id: i64,
+        permission_id: u64,
+        option_id: &str,
+    ) -> Result<RunStatus, BackendError> {
+        self.call(
+            "run.permission",
+            json!({"run_id":run_id,"permission_id":permission_id,"option_id":option_id}),
         )
         .await
     }

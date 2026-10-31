@@ -28,6 +28,13 @@ CLI -----------+
 - **Human-paced execution:** a workflow connection does not automatically run the next phase.
 - **UI debugging is separate:** the native GPUI inspector helps develop the GUI. Agents do not need to click the GUI to perform workflow operations. Screenshots, when useful for visual verification, need not be stored persistently.
 
+**Implemented background-run checkpoint:** ACP tasks own their subprocesses outside
+short request handlers. Start returns a run ID; clients poll bounded transient
+events and explicitly answer permissions or cancel. Database writes remain
+backend-owned and serialized. Uncertain runs retain reservations after a crash;
+no prompt is automatically replayed. See [scope and validation](13-agent-run-lifecycle.md).
+This uses polling rather than subscriptions for the initial update transport.
+
 Recommended starting topology: one backend per open repository, shared by its clients, using local IPC (Unix-domain sockets or Windows named pipes), not a public HTTP endpoint. Restrict access to the owning user. A GUI or CLI may start or connect to it; an always-running background service is not required. Backend lifetime and IPC details still need implementation validation.
 
 **Current implementation priority: headless core and CLI first; GUI later.** Establish project-folder registration, multiple branching workflows, node editing, and persistence through the local backend and CLI before implementing the node view. Workflows are the sidebar items grouped by project; do not introduce a separate application-level "session" entity. Agent session references belong to existing harnesses. AI execution integration is not a prerequisite. This supersedes the earlier UI-first milestone, without changing the shared-backend architecture. See [build order](07-spikes-and-build-order.md).
@@ -57,6 +64,21 @@ Implement a small, project-owned undo/redo system rather than adopting a dedicat
 - **Feedback:** expose what undo/redo will do, such as "Undo delete phase," to both clients.
 - **Upgrades:** migrate stored history formats or explicitly invalidate incompatible history without deleting the current workflow; never silently misinterpret old records.
 
+**Implemented first slice:** node creation, saved prompt edits, and connection
+creation have transactional, persistent undo/redo through the backend and CLI.
+History is shared across workflows in one canonical project folder, with explicit
+expected edit IDs to reject stale clients. Native/run references block undoing a
+node's creation rather than being deleted. Existing data is a non-undoable baseline.
+Deletion/disconnection, ordering, and layout remain future slices. Code and agent
+conversation state are never part of this history. See [commands and validation](14-workflow-history.md).
+
+**Future connection decision:** code-changing connect/disconnect operations will
+require explicit undo-boundary acknowledgement (a noninteractive CLI flag, not
+an implicit rebase). Workflow Undo will not cross that boundary or reverse native
+code. This extends the metadata-only connection model; existing operations are
+unchanged. See the [decision and remaining design work](14-workflow-history.md#decision-acknowledge-future-code-changing-connections)
+before implementing native dependency editing.
+
 ## Sessions: when does a node keep an ACP session?
 
 The following ACP execution sketches are for later harness integration, not requirements for the first slice. Any session references point to harness-owned conversations; they do not imply a Waypoints chat or transcript store.
@@ -84,6 +106,9 @@ Plus: failed, stale (an upstream phase changed), conflicted (jj reports a confli
 
 Refining a phase can evolve the same node's native jj change through multiple commit revisions. Do not assume every turn creates a new child change or an application-owned code snapshot. Preserve exact native revision references where needed to identify inputs. Users explicitly choose whether to continue a change or create an alternative; follow native jj ancestry and surface divergence, conflicts, and stale downstream context. See [jj snapshots](04-jj-snapshots.md).
 
-## Context fallback
+## Unavailable saved context
 
-Because session reuse is optional per agent, always keep a working fallback: start a fresh session whose first prompt contains the plan text plus a summary of earlier phases.
+Session reuse is optional per agent. An explicit continuation must report unsupported
+loading or missing history, never silently start fresh. Users may explicitly start
+a fresh session with the saved node assignment. Seeding a different phase with plan
+text or earlier-phase context is a separate future action, not a load-failure fallback.

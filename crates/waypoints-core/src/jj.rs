@@ -189,6 +189,98 @@ pub(crate) async fn current_revision(repository: &Path) -> anyhow::Result<Revisi
     Ok(revisions.remove(0))
 }
 
+pub(crate) async fn snapshot_workspace(
+    workspace: &crate::workspace::WorkspaceAssociation,
+    expected: &Revision,
+) -> anyhow::Result<Revision> {
+    anyhow::ensure!(
+        repository_root(&workspace.directory).await? == workspace.directory,
+        "snapshot directory no longer resolves to its saved workspace root"
+    );
+    let current = current_revision(&workspace.directory).await?;
+    let checked_out = checked_out_revision(&workspace.directory).await?;
+    anyhow::ensure!(
+        current == *expected && checked_out == *expected,
+        "workspace changed or checkout became stale before snapshotting"
+    );
+    ensure_mutable(&workspace.directory, expected).await?;
+    // Query @ in the same command that snapshots, rather than querying a moving
+    // operation head afterwards. @ refuses divergent operations; stale checkouts
+    // must fail instead of updating files to a different revision.
+    let output = run_command(
+        &workspace.directory,
+        &[
+            "--at-op=@",
+            "--config",
+            "snapshot.auto-update-stale=false",
+            "--quiet",
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            REVISION_TEMPLATE,
+        ],
+        WorkingCopy::Update,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    anyhow::ensure!(
+        output.stderr.is_empty(),
+        "jj snapshot reported diagnostics; some files may not have been recorded; inspect native jj state: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let revision: Revision = serde_json::from_slice(&output.stdout)
+        .context("decoding snapshotted revision; native snapshot may have succeeded")?;
+    anyhow::ensure!(
+        revision.change_id == workspace.change_id,
+        "snapshot did not retain the run's change; inspect native jj state"
+    );
+    Ok(revision)
+}
+
+pub(crate) async fn checked_out_revision(repository: &Path) -> anyhow::Result<Revision> {
+    // Registry @ can already point at the intended change before its files are
+    // materialized. The working copy's own operation records the completed checkout.
+    // Do not run status/update-stale: those would snapshot or alter local files.
+    let output = query(repository, &["debug", "working-copy"]).await?;
+    let operation = checkout_operation(std::str::from_utf8(&output)?)?;
+    let revset = format!("at_operation({operation}, @)");
+    let mut revisions = revision_set(repository, &revset).await.context(
+        "cannot resolve the recorded checkout; inspect this workspace with native jj before manual recovery",
+    )?;
+    anyhow::ensure!(
+        revisions.len() == 1,
+        "cannot identify one checked-out revision"
+    );
+    Ok(revisions.remove(0))
+}
+
+fn checkout_operation(output: &str) -> anyhow::Result<&str> {
+    anyhow::ensure!(
+        output
+            .lines()
+            .filter(|line| *line == "Type: \"local\"")
+            .count()
+            == 1,
+        "cannot verify checkout: unsupported jj working-copy type or debug output"
+    );
+    let mut operations = output.lines().filter_map(|line| {
+        line.strip_prefix("Current operation: OperationId(\"")?
+            .strip_suffix("\")")
+    });
+    let operation = operations
+        .next()
+        .context("cannot verify checkout: jj debug working-copy did not report its operation")?;
+    anyhow::ensure!(
+        operations.next().is_none()
+            && operation.len() == 128
+            && operation.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "cannot verify checkout: unsupported jj working-copy operation format"
+    );
+    Ok(operation)
+}
+
 pub(crate) async fn ensure_mutable(repository: &Path, revision: &Revision) -> anyhow::Result<()> {
     let output = query(
         repository,
@@ -322,7 +414,27 @@ async fn read_output(stream: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_OUTPUT, read_output, validate_change_id};
+    use super::{MAX_OUTPUT, checkout_operation, read_output, validate_change_id};
+
+    #[test]
+    fn checkout_operation_parser_fails_closed() -> anyhow::Result<()> {
+        let operation = "a".repeat(128);
+        let valid = format!(
+            "Type: \"local\"\nCurrent operation: OperationId(\"{operation}\")\nCurrent tree: ignored\n"
+        );
+        assert_eq!(checkout_operation(&valid)?, operation);
+        for invalid in [
+            String::new(),
+            valid.replace("\"local\"", "\"other\""),
+            valid.replace("Current operation:", "Changed format:"),
+            valid.replace(&operation, "abc"),
+            valid.replace(&operation, &"z".repeat(128)),
+            format!("{valid}Current operation: OperationId(\"{operation}\")\n"),
+        ] {
+            assert!(checkout_operation(&invalid).is_err(), "{invalid}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn query_output_is_bounded() -> anyhow::Result<()> {
