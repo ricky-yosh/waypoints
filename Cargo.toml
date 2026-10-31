@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/waypoints-app",
+    "crates/waypoints-backend",
+    "crates/waypoints-cli",
     "crates/waypoints-core",
 ]
 default-members = ["crates/waypoints-app"]

@@ -1,6 +1,29 @@
 # Waypoints: plan-driven agent workflows
 
-Status: design stage (notes written October 2026). Nothing here is built yet.
+Status: early implementation. Local workflow storage, an automatically started
+backend, and create/list CLI commands work on macOS/Linux. The GUI and jj/agent
+integration are not connected yet.
+
+## Try the CLI
+
+From this repository, create a workflow for the current project:
+
+```sh
+cargo run -p waypoints-cli -- workflow create --project . --name "First workflow"
+cargo run -p waypoints-cli -- workflow list --project . --json
+```
+
+The first workflow command starts the local backend automatically. Later commands
+reuse it; the CLI never opens the database directly.
+
+```sh
+cargo run -p waypoints-cli -- backend status --json
+cargo run -p waypoints-cli -- backend stop
+```
+
+Stopping the backend preserves saved workflows. The next workflow command starts
+it again. See [backend and CLI usage](docs/11-backend-cli.md) for paths, isolated
+test data, the local protocol, and current limitations.
 
 ## One line
 
