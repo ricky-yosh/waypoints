@@ -1,4 +1,4 @@
-//! Native jj queries and explicit empty-change creation; no application-owned code history.
+//! Native jj queries and explicit change/workspace creation; no application-owned history.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -56,6 +56,8 @@ pub enum ChangeState {
 
 // Bound each subprocess; creation also has a total deadline in storage.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+// Materializing a real repository can take longer than a read-only query.
+const WORKSPACE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_OUTPUT: u64 = 1024 * 1024;
 const REVISION_TEMPLATE: &str = r#""{\"change_id\":" ++ json(change_id) ++ ",\"commit_id\":" ++ json(commit_id) ++ ",\"description\":" ++ json(description) ++ ",\"conflicted\":" ++ json(conflict) ++ "}\n""#;
 
@@ -165,21 +167,123 @@ async fn query(repository: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     Ok(run(repository, args).await?.stdout)
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct NativeWorkspace {
+    pub name: String,
+    pub directory: Option<PathBuf>,
+    pub change_id: String,
+}
+
+pub(crate) async fn workspaces(repository: &Path) -> anyhow::Result<Vec<NativeWorkspace>> {
+    let template = r#""{\"name\":" ++ json(name) ++ ",\"directory\":" ++ json(root) ++ ",\"change_id\":" ++ json(target.change_id()) ++ "}\n""#;
+    let output = query(repository, &["workspace", "list", "-T", template]).await?;
+    serde_json::Deserializer::from_slice(&output)
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .context("decoding jj workspaces (requires workspace root templates)")
+}
+
+pub(crate) async fn current_revision(repository: &Path) -> anyhow::Result<Revision> {
+    let mut revisions = revision_set(repository, "@").await?;
+    anyhow::ensure!(revisions.len() == 1, "expected one working-copy revision");
+    Ok(revisions.remove(0))
+}
+
+pub(crate) async fn ensure_mutable(repository: &Path, revision: &Revision) -> anyhow::Result<()> {
+    let output = query(
+        repository,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            &revision.commit_id,
+            "-T",
+            "immutable",
+        ],
+    )
+    .await?;
+    anyhow::ensure!(
+        output == b"false",
+        "cannot edit an immutable revision in a node workspace"
+    );
+    Ok(())
+}
+
+pub(crate) async fn create_workspace(
+    association: &crate::workspace::WorkspaceAssociation,
+    revision: &Revision,
+) -> anyhow::Result<()> {
+    let directory = association
+        .directory
+        .to_str()
+        .context("workspace path must be UTF-8")?;
+    run_command(
+        &association.repository_path,
+        &[
+            "workspace",
+            "add",
+            "--name",
+            &association.name,
+            "--no-colocate",
+            "--sparse-patterns",
+            "full",
+            "-r",
+            &revision.commit_id,
+            "--",
+            directory,
+        ],
+        WorkingCopy::Ignore,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    // add -r makes a temporary empty child. edit selects the node's actual change
+    // and lets jj discard that empty child. Neither command snapshots the source.
+    run_command(
+        &association.directory,
+        &["edit", &revision.commit_id],
+        WorkingCopy::Ignore,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    // Only the new directory is updated. With --ignore-working-copy, add/edit
+    // deliberately left its filesystem at the initial empty checkout.
+    run_command(
+        &association.directory,
+        &["workspace", "update-stale"],
+        WorkingCopy::Update,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 struct CommandOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
 async fn run(repository: &Path, args: &[&str]) -> anyhow::Result<CommandOutput> {
+    run_command(repository, args, WorkingCopy::Ignore, QUERY_TIMEOUT).await
+}
+
+enum WorkingCopy {
+    Ignore,
+    Update,
+}
+
+async fn run_command(
+    repository: &Path,
+    args: &[&str],
+    working_copy: WorkingCopy,
+    deadline: Duration,
+) -> anyhow::Result<CommandOutput> {
     let mut command = Command::new("jj");
+    if matches!(working_copy, WorkingCopy::Ignore) {
+        command.args(["--ignore-working-copy", "--at-op=@"]);
+    }
     command
         .current_dir(repository)
-        .args([
-            "--ignore-working-copy",
-            "--at-op=@",
-            "--color=never",
-            "--no-pager",
-        ])
+        .args(["--color=never", "--no-pager"])
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -187,7 +291,7 @@ async fn run(repository: &Path, args: &[&str]) -> anyhow::Result<CommandOutput> 
         .kill_on_drop(true);
     // @ pins the current operation head and refuses concurrent operation heads instead
     // of merging them. --ignore-working-copy prevents automatic snapshots and Git import.
-    timeout(QUERY_TIMEOUT, async {
+    timeout(deadline, async {
         let mut child = command
             .spawn()
             .context("running jj; install jj and ensure it is on the backend's PATH")?;

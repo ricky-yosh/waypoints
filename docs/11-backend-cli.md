@@ -120,9 +120,9 @@ two-second timeout and a 1 MiB limit per output stream; slow/oversized queries
 return an error. The owning process is terminated on timeout.
 
 Associations survive backend restarts. Neither association nor refresh creates
-changes. Explicit creation is described below; working-copy switching, workspace
-allocation, revision-history browsing, code restoration, downstream staleness, and
-agent execution are not implemented.
+changes. Explicit change and workspace creation are described below.
+Switching existing working copies, revision-history browsing, code restoration,
+downstream staleness, and agent execution are not implemented.
 
 ## Create a change for an unassociated node
 
@@ -173,6 +173,106 @@ Creation is tested with jj 0.46.0. It overrides jj's commit-summary template wit
 marked JSON to capture the identity from **that creation command**, rather than
 guessing from the newest repository head. Unsupported output produces an error
 and retains the guard instead of guessing.
+
+## Allocate a node's editing workspace
+
+Workspace allocation is **explicit and on demand**, not automatic for every node.
+First associate or create the node's change. Then choose a new directory with an
+existing parent, outside other jj workspaces:
+
+```sh
+cargo run -p waypoints-cli -- node workspace create --workflow 1 --node 2 --directory ../my-app-auth --json
+cargo run -p waypoints-cli -- node workspace status --workflow 1 --node 2 --json
+```
+
+Relative destinations are resolved from the CLI's current directory, never the
+background backend's working directory. The core and RPC require an absolute
+path; the existing parent is canonicalized before saving. Destinations that
+already exist (even empty directories, files, or dangling symlinks), missing
+parents, and nesting within an existing jj workspace are refused. Waypoints
+atomically claims the new directory after saving the allocation; it never clears
+or adopts an occupied destination.
+
+The node must have one visible, mutable native revision. Missing, divergent,
+unassociated, or immutable changes cannot be opened this way. A registered
+workspace already editing the same change is also refused, including the original
+working copy. Use that existing workspace directly, or select a different change.
+These checks do not lock out independent native jj users; the repository history
+is still shared.
+
+The returned shape is `{node, workspace, state}`. `workspace` is null or contains
+`{repository_path, change_id, name, directory}`. The generated native name and
+explicit directory are saved in `node_workspaces`, and survive backend restarts.
+
+| `state.status` | Meaning |
+|---|---|
+| `unallocated` | No workspace has been requested; no native query is needed |
+| `ready` | Registry and recorded working-copy revision match the node; `state.revision` contains the native revision |
+| `incomplete` | Creation was reserved but not confirmed complete; directory/name remain available for inspection |
+| `missing_directory` | The saved directory disappeared; nothing is recreated |
+| `mismatched` | A workspace was forgotten, switched, or replaced, or the node's association changed; `state.detail` explains |
+
+`ready` describes **recorded jj state**, not a claim that dirty files were
+snapshotted or that a checkout affected by external rewrites is fresh. Status
+does not run `jj status` or `workspace update-stale`. Native access/permission
+errors and unavailable jj remain errors, not missing-directory indications.
+Repository replacement at the same path is not independently tracked.
+
+Open the returned directory in your editor or existing harness. Native jj use
+there records edits into the node's existing change:
+
+```sh
+cd ../my-app-auth
+# Edit files here, then explicitly ask jj to record them.
+jj status
+# Run Waypoints with your normal database/socket configuration:
+waypoints node refresh --workflow 1 --node 2 --json
+```
+
+Waypoints does not launch an editor or agent. Two node workspaces on sibling
+changes have separate files, but native ancestry and operation history are shared;
+rewriting an ancestor can still rebase descendants or introduce conflicts.
+
+### Repeat requests and partial creation
+
+Repeating `workspace create` for the same node and directory **only reports the
+saved allocation and current status**. It does not snapshot, update, repair, or
+retry native work, even if the directory is missing or creation is incomplete.
+A different directory is refused. Reassociating the node does not retarget or
+discard its saved workspace.
+
+Creation has three explicit native steps: add a non-colocated, full-tree
+workspace; edit the selected exact node revision; and materialize the new
+directory with `workspace update-stale`. `workspace add -r` alone would edit a
+new child, which is not the desired behavior. Add/edit ignore the original
+working copy; only the final command updates files, in the **new** directory.
+The temporary empty child is discarded by native jj during edit.
+
+The allocation is saved as incomplete **before** any directory/native creation.
+jj and Turso cannot commit atomically. Failed checkout, timeout, process crash,
+or failed final database write therefore retains the path, native name, and any
+partial files. Inspect them rather than deleting or blindly recreating:
+
+```sh
+waypoints node workspace status --workflow 1 --node 2 --json
+jj --ignore-working-copy --at-op=@ workspace list
+jj --ignore-working-copy --at-op=@ op log
+```
+
+Native recovery is manual in this slice. No Waypoints finalize, forget, replace,
+or deletion command is implemented; an incomplete allocation remains marked
+incomplete even after manual native repairs. This intentionally favors retaining
+work over automatic cleanup or uncertain retries.
+
+Workspace creation has a 110-second total allocation deadline and a 60-second
+limit per mutation subprocess, with the same 1 MiB per-stream output bound.
+The client allows 120 seconds for this method; ordinary requests keep their
+five-second deadline. Workspace status has a four-second native-query budget.
+The backend still serializes requests, so a long checkout can delay other
+requests. Timing out a client never authorizes automatic retry.
+
+Tested with jj 0.46.0, including workspace root templates, `--no-colocate`,
+`--sparse-patterns full`, and `workspace update-stale`.
 
 ## Data and socket paths
 
@@ -239,7 +339,9 @@ commands or access the database.
 
 Transport: a local Unix socket, one newline-delimited JSON-RPC 2.0 request per
 connection. Clients reconnect for each request. The backend serializes requests.
-Frames are limited to 1 MiB, and socket reads/writes have five-second timeouts.
+Frames are limited to 1 MiB. The server's frame reads/response writes have
+five-second timeouts. Clients allow five seconds for ordinary requests and
+120 seconds for `node.workspace.create`.
 Storage mutations are not cancelled by a server-side transport timeout. Requests
 are not automatically retried: a lost response may follow a successful mutation.
 
@@ -257,6 +359,8 @@ Methods:
 | `node.update` | `{workflow_id, node_id, prompt}` | Updated node, with the same ID |
 | `node.associate` | `{workflow_id, node_id, change_id}` | `{node, association, state}` with the selected current revision |
 | `node.create_change` | `{workflow_id, node_id, base}` | `{node, association, state}` for the newly created empty change |
+| `node.workspace.create` | `{workflow_id, node_id, directory}` | `{node, workspace, state}` for a new or already-saved workspace |
+| `node.workspace.status` | `{workflow_id, node_id}` | `{node, workspace, state}` observed without updating files |
 | `node.refresh` | `{workflow_id, node_id}` | `{node, association, state}` with freshly queried native status |
 | `connection.create` | `{workflow_id, source_id, target_id}` | `{workflow_id, source_id, target_id}` |
 

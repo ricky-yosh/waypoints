@@ -3,8 +3,9 @@
 Status: early implementation. Persistent workflows, prompt nodes, branching
 connections, explicit jj associations, and empty-change creation on a selected
 base work through an automatically started backend and CLI on macOS/Linux.
-Native status refresh is read-only. Creation leaves the working copy unchanged;
-workspace allocation, GUI integration, and agent execution are not connected yet.
+Native status refresh is read-only. Nodes can allocate dedicated jj workspaces at
+explicit directories without changing the original working copy. GUI integration
+and agent execution are not connected yet.
 
 ## Try the CLI
 

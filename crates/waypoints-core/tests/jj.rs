@@ -6,6 +6,7 @@ use std::process::Command;
 use tempfile::TempDir;
 use waypoints_core::jj::ChangeState;
 use waypoints_core::storage::Storage;
+use waypoints_core::workspace::WorkspaceState;
 
 struct Repository {
     directory: TempDir,
@@ -71,6 +72,328 @@ fn run(test: impl Future<Output = anyhow::Result<()>>) -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(test)
+}
+
+#[test]
+fn workspaces_edit_node_changes_independently_and_survive_restart() -> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        fs::write(repo.project.join("interfaces.txt"), "shared interface\n")?;
+        repo.jj(&["describe", "-m", "Interfaces"])?;
+        let base = repo.value("change_id")?;
+        let original = repo.value("commit_id")?;
+        let database = repo.directory.path().join("workflows.db");
+        let mut storage = Storage::open(&database).await?;
+        let workflow = storage
+            .create_workflow(&repo.project, "Parallel work")
+            .await?;
+        let auth = storage.create_node(workflow.id, "Authentication").await?;
+        let images = storage.create_node(workflow.id, "Image uploads").await?;
+        let auth_change = storage
+            .create_node_change(workflow.id, auth.id, &base)
+            .await?;
+        let image_change = storage
+            .create_node_change(workflow.id, images.id, &base)
+            .await?;
+        assert!(matches!(
+            storage.node_workspace(workflow.id, auth.id).await?.state,
+            WorkspaceState::Unallocated
+        ));
+        fs::write(repo.project.join("dirty.txt"), "original dirty contents\n")?;
+        let count = repo.jj(&["--ignore-working-copy", "log", "-r", "all()", "--count"])?;
+        let auth_path = repo.directory.path().join("auth");
+        let images_path = repo.directory.path().join("images");
+        let auth_workspace = storage
+            .create_node_workspace(workflow.id, auth.id, &auth_path)
+            .await?;
+        let image_workspace = storage
+            .create_node_workspace(workflow.id, images.id, &images_path)
+            .await?;
+        assert!(
+            matches!(auth_workspace.state, WorkspaceState::Ready { .. }),
+            "{auth_workspace:?}"
+        );
+        assert!(
+            matches!(image_workspace.state, WorkspaceState::Ready { .. }),
+            "{image_workspace:?}"
+        );
+        assert_eq!(auth_workspace.node, auth);
+        assert_eq!(
+            fs::read_to_string(auth_path.join("interfaces.txt"))?,
+            "shared interface\n"
+        );
+        assert_eq!(
+            fs::read_to_string(images_path.join("interfaces.txt"))?,
+            "shared interface\n"
+        );
+        assert_eq!(
+            repo.jj(&["--ignore-working-copy", "log", "-r", "all()", "--count"])?,
+            count,
+            "workspace allocation must not leave extra child changes"
+        );
+        assert_eq!(
+            repo.jj(&[
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                "commit_id"
+            ])?,
+            original
+        );
+        assert_eq!(
+            fs::read_to_string(repo.project.join("dirty.txt"))?,
+            "original dirty contents\n"
+        );
+        assert!(!auth_path.join("dirty.txt").exists());
+        let operation = repo.operation()?;
+        assert_eq!(
+            storage
+                .create_node_workspace(workflow.id, auth.id, &auth_path)
+                .await?,
+            auth_workspace
+        );
+        assert!(
+            storage
+                .create_node_workspace(workflow.id, auth.id, &repo.directory.path().join("other"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repo.operation()?,
+            operation,
+            "repeat requests must be observational"
+        );
+        fs::write(
+            auth_path.join("auth.txt"),
+            "authentication implementation\n",
+        )?;
+        // Explicit native jj use records edits. Waypoints status/refresh never snapshots.
+        repo.jj_at(&auth_path, &["status"])?;
+        let updated = storage.refresh_node(workflow.id, auth.id).await?;
+        assert_eq!(updated.association, auth_change.association);
+        assert_ne!(updated.state, auth_change.state);
+        assert_eq!(
+            storage.refresh_node(workflow.id, images.id).await?,
+            image_change
+        );
+        assert!(!images_path.join("auth.txt").exists());
+        assert!(!repo.project.join("auth.txt").exists());
+        assert_eq!(
+            repo.jj(&[
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                "commit_id"
+            ])?,
+            original
+        );
+        let auth_status = storage.node_workspace(workflow.id, auth.id).await?;
+        let operation = repo.operation()?;
+        fs::write(auth_path.join("not-recorded.txt"), "keep dirty\n")?;
+        assert_eq!(
+            storage.node_workspace(workflow.id, auth.id).await?,
+            auth_status
+        );
+        assert_eq!(repo.operation()?, operation);
+        drop(storage);
+        let storage = Storage::open(&database).await?;
+        assert_eq!(
+            storage.node_workspace(workflow.id, auth.id).await?,
+            auth_status
+        );
+        assert_eq!(
+            storage.node_workspace(workflow.id, images.id).await?,
+            image_workspace
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn workspace_creation_rejects_unsafe_destinations_and_shared_changes() -> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflows.db")).await?;
+        let workflow = storage.create_workflow(&repo.project, "Validation").await?;
+        let node = storage.create_node(workflow.id, "Prompt").await?;
+        let destination = repo.directory.path().join("new");
+        assert!(
+            storage
+                .create_node_workspace(workflow.id, node.id, &destination)
+                .await
+                .is_err()
+        );
+        assert!(!destination.exists());
+        let original = repo.value("change_id")?;
+        storage
+            .associate_node(workflow.id, node.id, &original)
+            .await?;
+        let operation = repo.operation()?;
+        assert!(
+            storage
+                .create_node_workspace(workflow.id, node.id, &destination)
+                .await
+                .is_err(),
+            "must not edit the original workspace's change"
+        );
+        assert_eq!(repo.operation()?, operation);
+        let node = storage.create_node(workflow.id, "Dedicated").await?;
+        storage
+            .create_node_change(workflow.id, node.id, "root()")
+            .await?;
+        let operation_after_setup = repo.operation()?;
+        let occupied = repo.directory.path().join("occupied");
+        fs::create_dir(&occupied)?;
+        let file = repo.directory.path().join("file");
+        fs::write(&file, "preserved")?;
+        for invalid in [
+            occupied.clone(),
+            file.clone(),
+            repo.project.join("nested"),
+            repo.directory.path().join("missing-parent").join("new"),
+            PathBuf::from("relative"),
+        ] {
+            assert!(
+                storage
+                    .create_node_workspace(workflow.id, node.id, &invalid)
+                    .await
+                    .is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert!(
+            storage
+                .create_node_workspace(99999, node.id, &destination)
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(file)?, "preserved");
+        assert_eq!(fs::read_dir(occupied)?.count(), 0);
+        #[cfg(unix)]
+        {
+            let link = repo.directory.path().join("dangling");
+            std::os::unix::fs::symlink(repo.directory.path().join("absent"), &link)?;
+            assert!(
+                storage
+                    .create_node_workspace(workflow.id, node.id, &link)
+                    .await
+                    .is_err()
+            );
+            assert!(fs::symlink_metadata(link)?.file_type().is_symlink());
+        }
+        let immutable = storage.create_node(workflow.id, "Immutable").await?;
+        storage
+            .associate_node(
+                workflow.id,
+                immutable.id,
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            )
+            .await?;
+        assert!(
+            storage
+                .create_node_workspace(workflow.id, immutable.id, &destination)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            storage
+                .node_workspace(workflow.id, immutable.id)
+                .await?
+                .state,
+            WorkspaceState::Unallocated
+        ));
+        assert!(!destination.exists());
+        assert_eq!(repo.operation()?, operation_after_setup);
+        assert_ne!(operation_after_setup, operation);
+        assert!(matches!(
+            storage.node_workspace(workflow.id, node.id).await?.state,
+            WorkspaceState::Unallocated
+        ));
+        storage
+            .create_node_workspace(workflow.id, node.id, &destination)
+            .await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn workspace_status_retains_missing_forgotten_and_switched_allocations() -> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflows.db")).await?;
+        let workflow = storage
+            .create_workflow(&repo.project, "External changes")
+            .await?;
+        let node = storage.create_node(workflow.id, "Prompt").await?;
+        storage
+            .create_node_change(workflow.id, node.id, "root()")
+            .await?;
+        let path = repo.directory.path().join("workspace");
+        let workspace = storage
+            .create_node_workspace(workflow.id, node.id, &path)
+            .await?;
+        repo.jj_at(&path, &["new"])?;
+        let operation = repo.operation()?;
+        let switched = storage.node_workspace(workflow.id, node.id).await?;
+        assert!(matches!(switched.state, WorkspaceState::Mismatched { .. }));
+        assert_eq!(switched.workspace, workspace.workspace);
+        assert_eq!(
+            storage
+                .create_node_workspace(workflow.id, node.id, &path)
+                .await?,
+            switched
+        );
+        assert_eq!(repo.operation()?, operation);
+        let saved = workspace.workspace.expect("saved workspace");
+        let original = repo.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "change_id",
+        ])?;
+        storage
+            .associate_node(workflow.id, node.id, &original)
+            .await?;
+        let reassociated = storage.node_workspace(workflow.id, node.id).await?;
+        assert!(matches!(
+            reassociated.state,
+            WorkspaceState::Mismatched { .. }
+        ));
+        assert_eq!(reassociated.workspace.as_ref(), Some(&saved));
+        storage
+            .associate_node(workflow.id, node.id, &saved.change_id)
+            .await?;
+        repo.jj(&["--ignore-working-copy", "workspace", "forget", &saved.name])?;
+        assert!(matches!(
+            storage.node_workspace(workflow.id, node.id).await?.state,
+            WorkspaceState::Mismatched { .. }
+        ));
+        let moved = repo.directory.path().join("moved");
+        fs::rename(&path, &moved)?;
+        let missing = storage.node_workspace(workflow.id, node.id).await?;
+        assert!(matches!(missing.state, WorkspaceState::MissingDirectory));
+        assert_eq!(missing.workspace, Some(saved));
+        assert_eq!(
+            storage
+                .create_node_workspace(workflow.id, node.id, &path)
+                .await?,
+            missing
+        );
+        assert!(
+            !path.exists(),
+            "repeat must not recreate a removed directory"
+        );
+        Ok(())
+    })
 }
 
 #[test]

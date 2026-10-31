@@ -11,8 +11,13 @@ An unassociated node can also explicitly create an empty jj change on a selected
 base revision, without moving or snapshotting the working copy. Workflow
 connections do not choose that base. Existing associations, including missing ones,
 are refused; uncertain creation outcomes require manual inspection and association.
-The model below remains the broader design, not a claim that workspace creation,
-history navigation, downstream staleness, or automatic checkpoints are implemented.
+Nodes can allocate dedicated native workspaces on demand, at explicit new
+directories. Allocation edits the node's existing change, not a new child; it
+refuses changes already edited by another registered workspace. Workspace status
+and repeat allocation requests are read-only, with missing, mismatched, and
+incomplete references retained instead of silently replaced.
+The model below remains the broader design, not a claim that history navigation,
+downstream staleness, or automatic checkpoints are implemented.
 
 ## Model
 

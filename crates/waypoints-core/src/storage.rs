@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::jj::{self, ChangeAssociation, ChangeState};
 
+mod workspaces;
+
 /// A workflow saved for a canonical project directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -177,6 +179,20 @@ impl Storage {
             )
             .await
             .context("initializing change creation guards")?;
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS node_workspaces (
+                    node_id INTEGER PRIMARY KEY REFERENCES nodes(id),
+                    repository_path TEXT NOT NULL,
+                    change_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    directory TEXT NOT NULL UNIQUE,
+                    ready INTEGER NOT NULL DEFAULT 0 CHECK (ready IN (0, 1))
+                )",
+                (),
+            )
+            .await
+            .context("initializing node workspace schema")?;
         Ok(Self { database })
     }
 

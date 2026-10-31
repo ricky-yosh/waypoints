@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use waypoints_backend::{Client, Config};
 use waypoints_core::jj::ChangeState;
 use waypoints_core::storage::{Node, NodeChange};
+use waypoints_core::workspace::{NodeWorkspace, WorkspaceState};
 
 #[derive(Parser)]
 #[command(
@@ -75,6 +76,11 @@ enum WorkflowCommand {
 
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Allocate or inspect a dedicated native workspace for this node's change.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
     Create {
         #[arg(long)]
         workflow: i64,
@@ -116,6 +122,27 @@ enum NodeCommand {
     },
     /// Query the node's current native revision without snapshotting the working copy.
     Refresh {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCommand {
+    /// Create a workspace in a new directory; repeat requests report the saved allocation.
+    Create {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        /// New directory, relative to this CLI's current directory or absolute.
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Inspect the saved workspace without snapshotting, switching, or repairing it.
+    Status {
         #[arg(long)]
         workflow: i64,
         #[arg(long)]
@@ -224,6 +251,24 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::Node { command } => {
             let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
             match command {
+                NodeCommand::Workspace { command } => {
+                    let value = match command {
+                        WorkspaceCommand::Create {
+                            workflow,
+                            node,
+                            directory,
+                        } => {
+                            let directory = env::current_dir()?.join(directory);
+                            client
+                                .create_node_workspace(workflow, node, &directory)
+                                .await?
+                        }
+                        WorkspaceCommand::Status { workflow, node } => {
+                            client.node_workspace(workflow, node).await?
+                        }
+                    };
+                    print_node_workspace(value, args.json)?;
+                }
                 NodeCommand::Associate {
                     workflow,
                     node,
@@ -325,6 +370,37 @@ fn print_node_change(value: NodeChange, json: bool) -> anyhow::Result<()> {
             ),
             ChangeState::Unassociated => println!("jj status: unassociated"),
             _ => println!("jj status: unknown"),
+        }
+    }
+    Ok(())
+}
+
+fn print_node_workspace(value: NodeWorkspace, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        print_node(value.node, false)?;
+        if let Some(workspace) = value.workspace {
+            println!("Workspace: {}", workspace.name);
+            println!("Directory: {}", workspace.directory.display());
+            println!("Change: {}", workspace.change_id);
+        }
+        match value.state {
+            WorkspaceState::Unallocated => println!("Workspace status: unallocated"),
+            WorkspaceState::Ready { revision } => {
+                println!("Workspace status: ready (recorded jj state; files not snapshotted)");
+                println!("Commit: {}", revision.commit_id);
+            }
+            WorkspaceState::Incomplete => println!(
+                "Workspace status: incomplete\nInspect native jj state before manual recovery. No files were removed; creation will not be retried."
+            ),
+            WorkspaceState::MissingDirectory => println!(
+                "Workspace status: missing_directory\nSaved allocation retained; nothing recreated."
+            ),
+            WorkspaceState::Mismatched { detail } => {
+                println!("Workspace status: mismatched\n{detail}")
+            }
+            _ => println!("Workspace status: unknown"),
         }
     }
     Ok(())

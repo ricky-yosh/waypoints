@@ -12,6 +12,7 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep, timeout};
 use waypoints_core::storage::{Connection, Node, NodeChange, Workflow, WorkflowGraph};
+use waypoints_core::workspace::NodeWorkspace;
 
 use crate::config::sidecar;
 use crate::protocol::{MAX_FRAME, PROTOCOL_VERSION, TIMEOUT, read_frame};
@@ -253,6 +254,43 @@ impl Client {
         .await
     }
 
+    /// Allocates a native workspace at an explicit absolute directory, or reports its saved allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership/selection/destination, native or storage
+    /// failures, or transport errors. Inspect workspace status after uncertain outcomes.
+    pub async fn create_node_workspace(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        directory: &Path,
+    ) -> Result<NodeWorkspace, BackendError> {
+        self.call(
+            "node.workspace.create",
+            json!({"workflow_id": workflow_id, "node_id": node_id, "directory": directory}),
+        )
+        .await
+    }
+
+    /// Reads saved allocation and native status without snapshotting or updating files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership, inaccessible repositories, native
+    /// failures, or transport errors.
+    pub async fn node_workspace(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<NodeWorkspace, BackendError> {
+        self.call(
+            "node.workspace.status",
+            json!({"workflow_id": workflow_id, "node_id": node_id}),
+        )
+        .await
+    }
+
     /// Queries current native state without snapshotting or changing the repository.
     ///
     /// # Errors
@@ -304,7 +342,7 @@ impl Client {
         method: &str,
         params: Value,
     ) -> Result<T, BackendError> {
-        Ok(timeout(TIMEOUT, async {
+        Ok(timeout(crate::protocol::request_timeout(method), async {
             let stream = UnixStream::connect(&self.config.socket)
                 .await
                 .context("connecting to backend")?;
@@ -327,7 +365,7 @@ async fn exchange<T: DeserializeOwned>(
     method: &str,
     params: Value,
 ) -> anyhow::Result<T> {
-    timeout(TIMEOUT, async {
+    timeout(crate::protocol::request_timeout(method), async {
         let mut stream = BufReader::new(stream);
         let mut request = serde_json::to_vec(&json!({
             "jsonrpc": "2.0", "id": 1, "method": method, "params": params

@@ -13,9 +13,9 @@ use waypoints_core::storage::Storage;
 
 use crate::config::sidecar;
 use crate::protocol::{
-    AssociateParams, ConnectParams, CreateChangeParams, CreateNodeParams, CreateParams, MAX_FRAME,
-    NodeParams, PROTOCOL_VERSION, ProjectParams, TIMEOUT, UpdateNodeParams, WorkflowParams,
-    read_frame,
+    AssociateParams, ConnectParams, CreateChangeParams, CreateNodeParams, CreateParams,
+    CreateWorkspaceParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION, ProjectParams, TIMEOUT,
+    UpdateNodeParams, WorkflowParams, read_frame,
 };
 use crate::{BackendError, BackendInfo, Config};
 
@@ -216,6 +216,22 @@ async fn dispatch(
         "node.create_change" => match parameters::<CreateChangeParams>(params) {
             Ok(params) => storage
                 .create_node_change(params.workflow_id, params.node_id, &params.base)
+                .await
+                .map(|state| json!(state))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.workspace.create" => match parameters::<CreateWorkspaceParams>(params) {
+            Ok(params) => storage
+                .create_node_workspace(params.workflow_id, params.node_id, &params.directory)
+                .await
+                .map(|state| json!(state))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.workspace.status" => match parameters::<NodeParams>(params) {
+            Ok(params) => storage
+                .node_workspace(params.workflow_id, params.node_id)
                 .await
                 .map(|state| json!(state))
                 .map_err(|error| (-32000, format!("{error:#}"))),

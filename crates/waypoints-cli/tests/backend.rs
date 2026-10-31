@@ -129,6 +129,413 @@ fn jj(project: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 #[test]
+fn cli_allocates_node_workspace_at_client_relative_path_and_reuses_it() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project = fixture.directory.path().join("project");
+    fs::write(project.join("interfaces.txt"), "base interface\n")?;
+    jj(&project, &["describe", "-m", "Base"])?;
+    let original = jj(
+        &project,
+        &["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+    )?;
+    let workflow = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project.to_str().expect("project path"),
+        "--name",
+        "Workspace",
+    ])?["id"]
+        .to_string();
+    let node = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &workflow,
+        "--prompt",
+        "Authentication",
+    ])?;
+    let node_id = node["id"].to_string();
+    assert_eq!(
+        fixture.success(&[
+            "node",
+            "workspace",
+            "status",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id,
+        ])?["state"]["status"],
+        "unallocated"
+    );
+    let change = fixture.success(&[
+        "node",
+        "create-change",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+        "--base",
+        &original,
+    ])?;
+    fs::write(project.join("dirty.txt"), "keep dirty\n")?;
+    // The already-running backend has a different cwd. The CLI must resolve this.
+    let args = [
+        "node",
+        "workspace",
+        "create",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+        "--directory",
+        "../authentication",
+    ];
+    let output = fixture
+        .command()
+        .current_dir(&project)
+        .args(args)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let created: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(created["node"], node);
+    assert_eq!(created["state"]["status"], "ready");
+    assert_eq!(
+        created["workspace"]["change_id"],
+        change["association"]["change_id"]
+    );
+    let path = fixture
+        .directory
+        .path()
+        .join("authentication")
+        .canonicalize()?;
+    assert_eq!(
+        created["workspace"]["directory"],
+        path.to_str().expect("workspace path")
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("interfaces.txt"))?,
+        "base interface\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("dirty.txt"))?,
+        "keep dirty\n"
+    );
+    assert_eq!(
+        jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                "commit_id"
+            ]
+        )?,
+        original
+    );
+    let operation = jj(
+        &project,
+        &[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "--limit",
+            "1",
+            "-T",
+            "id",
+        ],
+    )?;
+    let repeat = fixture
+        .command()
+        .current_dir(&project)
+        .args(args)
+        .output()?;
+    assert!(repeat.status.success());
+    assert_eq!(serde_json::from_slice::<Value>(&repeat.stdout)?, created);
+    assert_eq!(
+        jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-T",
+                "id"
+            ]
+        )?,
+        operation
+    );
+    fs::write(path.join("auth.txt"), "implementation\n")?;
+    jj(&path, &["status"])?;
+    let refreshed = fixture.success(&[
+        "node",
+        "refresh",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+    ])?;
+    assert_eq!(refreshed["association"], change["association"]);
+    assert_ne!(
+        refreshed["state"]["revision"]["commit_id"],
+        change["state"]["revision"]["commit_id"]
+    );
+    let status = fixture.success(&[
+        "node",
+        "workspace",
+        "status",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+    ])?;
+    assert_eq!(status["state"]["revision"], refreshed["state"]["revision"]);
+    for (method, params) in [
+        (
+            "node.workspace.create",
+            json!({"workflow_id": 1, "node_id": 1}),
+        ),
+        (
+            "node.workspace.create",
+            json!({"workflow_id": 1, "node_id": 1, "directory": "/tmp/not-created", "extra": true}),
+        ),
+        (
+            "node.workspace.status",
+            json!({"workflow_id": 1, "node_id": 1, "extra": true}),
+        ),
+    ] {
+        let response = fixture.rpc(
+            format!(
+                "{}\n",
+                json!({
+                    "jsonrpc":"2.0", "id":1, "method":method, "params":params,
+                })
+            )
+            .as_bytes(),
+        )?;
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&[
+            "node",
+            "workspace",
+            "status",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id
+        ])?,
+        status
+    );
+    let human = Command::new(env!("CARGO_BIN_EXE_waypoints"))
+        .arg("--database")
+        .arg(&fixture.database)
+        .arg("--socket")
+        .arg(&fixture.socket)
+        .args([
+            "node",
+            "workspace",
+            "status",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id,
+        ])
+        .output()?;
+    assert!(human.status.success());
+    let stdout = String::from_utf8(human.stdout)?;
+    assert!(stdout.contains("Workspace status: ready"));
+    assert!(stdout.contains(path.to_str().expect("workspace path")));
+    fixture.stop()?;
+    Ok(())
+}
+
+#[test]
+fn interrupted_workspace_allocation_remains_inspectable_and_never_retries() -> anyhow::Result<()> {
+    let native = Command::new("/bin/sh")
+        .args(["-c", "command -v jj"])
+        .output()?;
+    assert!(native.status.success());
+    let native = String::from_utf8(native.stdout)?.trim().to_owned();
+    for fail_at in ["add", "checkout"] {
+        let fixture = Fixture::new()?;
+        jj(fixture.directory.path(), &["git", "init", "project"])?;
+        let project = fixture.directory.path().join("project");
+        jj(&project, &["describe", "-m", "Original"])?;
+        let bin = fixture.directory.path().join("bin");
+        fs::create_dir(&bin)?;
+        let wrapper = bin.join("jj");
+        let injected = if fail_at == "add" {
+            "case \" $* \" in *' workspace add '*) \"$NATIVE_JJ\" \"$@\"; echo 'injected add failure' >&2; exit 1;; esac"
+        } else {
+            // Exceed the ordinary five-second RPC timeout to verify the workspace deadline.
+            "case \" $* \" in *' workspace update-stale '*) /bin/sleep 6; echo 'injected checkout failure' >&2; exit 1;; esac"
+        };
+        fs::write(
+            &wrapper,
+            format!("#!/bin/sh\n{injected}\nexec \"$NATIVE_JJ\" \"$@\"\n"),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        assert!(
+            fixture
+                .list_command()
+                .env("PATH", &bin)
+                .env("NATIVE_JJ", &native)
+                .output()?
+                .status
+                .success()
+        );
+        let workflow = fixture.success(&[
+            "workflow",
+            "create",
+            "--project",
+            project.to_str().expect("project path"),
+            "--name",
+            "Interrupted",
+        ])?["id"]
+            .to_string();
+        let node = fixture.success(&[
+            "node",
+            "create",
+            "--workflow",
+            &workflow,
+            "--prompt",
+            "Keep prompt",
+        ])?["id"]
+            .to_string();
+        fixture.success(&[
+            "node",
+            "create-change",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node,
+            "--base",
+            "root()",
+        ])?;
+        let destination = fixture.directory.path().join("workspace");
+        let args = [
+            "node",
+            "workspace",
+            "create",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node,
+            "--directory",
+            destination.to_str().expect("destination path"),
+        ];
+        let failure = fixture.command().args(args).output()?;
+        assert!(!failure.status.success());
+        let error = String::from_utf8(failure.stderr)?;
+        assert!(error.contains("workspace creation incomplete"), "{error}");
+        assert!(
+            error.contains("injected"),
+            "workspace RPC must wait for native outcome: {error}"
+        );
+        assert!(
+            destination.join(".jj").exists(),
+            "native artifacts must be preserved"
+        );
+        fs::write(destination.join("keep.txt"), "do not delete or overwrite\n")?;
+        let operation = jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-T",
+                "id",
+            ],
+        )?;
+        let pending = fixture.success(&[
+            "node",
+            "workspace",
+            "status",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node,
+        ])?;
+        assert_eq!(pending["state"]["status"], "incomplete");
+        assert!(
+            pending["workspace"]["name"]
+                .as_str()
+                .expect("saved name")
+                .starts_with("waypoints-")
+        );
+        fixture.stop()?;
+        assert_eq!(
+            fixture.success(&args)?,
+            pending,
+            "repeat reports allocation without retrying native work"
+        );
+        assert_eq!(
+            jj(
+                &project,
+                &[
+                    "--ignore-working-copy",
+                    "op",
+                    "log",
+                    "--no-graph",
+                    "--limit",
+                    "1",
+                    "-T",
+                    "id"
+                ]
+            )?,
+            operation
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("keep.txt"))?,
+            "do not delete or overwrite\n"
+        );
+        assert!(
+            fixture
+                .command()
+                .args([
+                    "node",
+                    "workspace",
+                    "create",
+                    "--workflow",
+                    &workflow,
+                    "--node",
+                    &node,
+                    "--directory",
+                    fixture
+                        .directory
+                        .path()
+                        .join("replacement")
+                        .to_str()
+                        .expect("replacement path"),
+                ])
+                .output()?
+                .status
+                .code()
+                .is_some_and(|code| code != 0)
+        );
+        fixture.stop()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn cli_creates_a_change_without_switching_and_retains_it_after_restart() -> anyhow::Result<()> {
     let fixture = Fixture::new()?;
     jj(fixture.directory.path(), &["git", "init", "project"])?;

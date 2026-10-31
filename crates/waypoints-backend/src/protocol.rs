@@ -11,6 +11,15 @@ pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const MAX_FRAME: usize = 1024 * 1024;
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 
+// Workspace checkout can materialize a repository; ordinary requests keep their short deadline.
+pub(crate) fn request_timeout(method: &str) -> Duration {
+    if method == "node.workspace.create" {
+        Duration::from_secs(120)
+    } else {
+        TIMEOUT
+    }
+}
+
 /// The identity returned by a running backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -63,6 +72,14 @@ pub(crate) struct CreateChangeParams {
     pub workflow_id: i64,
     pub node_id: i64,
     pub base: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateWorkspaceParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub directory: PathBuf,
 }
 
 #[derive(Deserialize)]
