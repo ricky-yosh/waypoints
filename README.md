@@ -1,8 +1,8 @@
 # Waypoints: plan-driven agent workflows
 
-Status: early implementation. Local workflow storage, an automatically started
-backend, and create/list CLI commands work on macOS/Linux. The GUI and jj/agent
-integration are not connected yet.
+Status: early implementation. Persistent workflows, prompt nodes, branching
+connections, and graph retrieval work through an automatically started backend
+and CLI on macOS/Linux. The GUI and jj/agent integration are not connected yet.
 
 ## Try the CLI
 

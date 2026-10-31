@@ -17,6 +17,50 @@ duplicated, but it must not be blank. Projects must be existing directories; bot
 clients and storage resolve their paths so relative paths don't depend on the
 background server's working directory.
 
+## Save a branching workflow
+
+Nodes currently contain a prompt, not a jj association or an agent conversation.
+Connections are directed saved relationships: they do not execute work or change
+jj ancestry. All commands below use the backend, never the database directly.
+
+First create or list workflows to find the workflow ID. For a new empty database
+the first workflow has ID 1; use the actual IDs returned by your commands.
+
+```sh
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Interfaces + placeholders"
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Authentication"
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Image uploading"
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Settings"
+```
+
+Using the returned node IDs (1–4 in a new database):
+
+```sh
+cargo run -p waypoints-cli -- connection create --workflow 1 --source 1 --target 2
+cargo run -p waypoints-cli -- connection create --workflow 1 --source 1 --target 3
+cargo run -p waypoints-cli -- connection create --workflow 1 --source 1 --target 4
+cargo run -p waypoints-cli -- node update --workflow 1 --node 2 --prompt "Implement authentication and tests"
+cargo run -p waypoints-cli -- node get --workflow 1 --node 2 --json
+cargo run -p waypoints-cli -- workflow graph --workflow 1 --json
+```
+
+Graph JSON contains `workflow`, `nodes`, and `connections`. Nodes are ordered by
+ID; connections by source then target ID. Node IDs are database-local and stable
+when prompts are edited. Prompts are preserved verbatim, but blank/whitespace-only
+prompts are rejected. Missing workflows/nodes, cross-workflow links, self-links,
+duplicate links, and directed cycles return errors without changing the graph.
+Fan-out and fan-in are allowed. Nodes need not be connected.
+
+The database adds `nodes` and `connections` tables when opening an existing
+workflows-only database, preserving saved workflows. Graphs and prompt edits
+survive backend restarts. Prompt updates currently replace the saved text:
+there is **no undo or prompt revision history yet**, and no delete/disconnect
+command in this slice.
+
+After rebuilding, stop any old backend and let the next workflow/node/connection
+command start the new executable. Protocol version 1 is retained for these
+additive methods; an older running backend reports "method not found" for them.
+
 ## Data and socket paths
 
 Defaults:
@@ -94,6 +138,11 @@ Methods:
 | `backend.shutdown` | `{}` | `null` |
 | `workflow.create` | `{project_path, name}` | `{id, project_path, name}` |
 | `workflow.list` | `{project_path}` | Array of workflows ordered by ID |
+| `workflow.graph` | `{workflow_id}` | `{workflow, nodes, connections}` |
+| `node.create` | `{workflow_id, prompt}` | `{id, workflow_id, prompt}` |
+| `node.get` | `{workflow_id, node_id}` | `{id, workflow_id, prompt}` |
+| `node.update` | `{workflow_id, node_id, prompt}` | Updated node, with the same ID |
+| `connection.create` | `{workflow_id, source_id, target_id}` | `{workflow_id, source_id, target_id}` |
 
 Example:
 
@@ -123,5 +172,5 @@ temporary databases, then stop the backend during cleanup.
 
 - Windows named pipes (the backend currently requires macOS/Linux).
 - GUI integration, notifications, or durable event replay.
-- Project registration, workflow nodes/links, undo history, jj mutations, or ACP.
-- Database migrations beyond the initial create-if-missing schema.
+- Project registration, undo history, jj mutations, or ACP.
+- General versioned database migrations beyond additive create-if-missing tables.

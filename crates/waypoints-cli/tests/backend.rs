@@ -106,6 +106,240 @@ impl Drop for Fixture {
 
 struct OwnedServer(Child);
 
+#[test]
+fn branching_graph_survives_restart_and_rejects_invalid_edits() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let project = fixture
+        .directory
+        .path()
+        .to_str()
+        .expect("temporary path is UTF-8");
+    let first = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "First",
+    ])?;
+    let second = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Second",
+    ])?;
+    let workflow = first["id"].to_string();
+    let other = second["id"].to_string();
+    let root = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &workflow,
+        "--prompt",
+        "Interfaces + placeholders",
+    ])?;
+    let source = root["id"].to_string();
+    let mut children = Vec::new();
+    let mut connections = Vec::new();
+    for prompt in ["Authentication", "Image uploading", "Settings"] {
+        let child = fixture.success(&[
+            "node",
+            "create",
+            "--workflow",
+            &workflow,
+            "--prompt",
+            prompt,
+        ])?;
+        let target = child["id"].to_string();
+        connections.push(fixture.success(&[
+            "connection",
+            "create",
+            "--workflow",
+            &workflow,
+            "--source",
+            &source,
+            "--target",
+            &target,
+        ])?);
+        children.push(child);
+    }
+    let target = children[0]["id"].to_string();
+    let prompt = "  Authentication\nUse bound SQL: '); DROP TABLE nodes; --  ";
+    let updated = fixture.success(&[
+        "node",
+        "update",
+        "--workflow",
+        &workflow,
+        "--node",
+        &target,
+        "--prompt",
+        prompt,
+    ])?;
+    assert_eq!(updated["prompt"], prompt);
+    assert_eq!(updated["id"], children[0]["id"]);
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", &workflow, "--node", &target,])?,
+        updated
+    );
+    let other_node = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &other,
+        "--prompt",
+        "Separate",
+    ])?;
+    let foreign = other_node["id"].to_string();
+    let graph = fixture.success(&["workflow", "graph", "--workflow", &workflow])?;
+    assert_eq!(
+        graph,
+        json!({
+            "workflow": first,
+            "nodes": [root, updated, children[1], children[2]],
+            "connections": connections,
+        })
+    );
+    let other_graph = fixture.success(&["workflow", "graph", "--workflow", &other])?;
+    assert_eq!(
+        other_graph,
+        json!({"workflow": second, "nodes": [other_node], "connections": []})
+    );
+
+    let invalid_commands = [
+        vec![
+            "node",
+            "create",
+            "--workflow",
+            &workflow,
+            "--prompt",
+            " \t\n",
+        ],
+        vec![
+            "node",
+            "update",
+            "--workflow",
+            &workflow,
+            "--node",
+            &target,
+            "--prompt",
+            " ",
+        ],
+        vec![
+            "node",
+            "update",
+            "--workflow",
+            &workflow,
+            "--node",
+            &foreign,
+            "--prompt",
+            "Wrong",
+        ],
+        vec!["node", "get", "--workflow", &other, "--node", &source],
+        vec!["workflow", "graph", "--workflow", "999999"],
+        vec![
+            "connection",
+            "create",
+            "--workflow",
+            &workflow,
+            "--source",
+            &source,
+            "--target",
+            &foreign,
+        ],
+        vec![
+            "connection",
+            "create",
+            "--workflow",
+            &workflow,
+            "--source",
+            &source,
+            "--target",
+            &source,
+        ],
+        vec![
+            "connection",
+            "create",
+            "--workflow",
+            &workflow,
+            "--source",
+            &source,
+            "--target",
+            &target,
+        ],
+        vec![
+            "connection",
+            "create",
+            "--workflow",
+            &workflow,
+            "--source",
+            &target,
+            "--target",
+            &source,
+        ],
+    ];
+    for args in invalid_commands {
+        let output = fixture.command().args(&args).output()?;
+        assert!(
+            !output.status.success(),
+            "invalid operation succeeded: {args:?}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "errors must not contaminate JSON stdout"
+        );
+        assert!(
+            !output.stderr.is_empty(),
+            "invalid operation must explain failure"
+        );
+    }
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", &workflow])?,
+        graph
+    );
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", &other, "--node", &foreign])?,
+        other_node
+    );
+    for (method, params) in [
+        ("node.create", json!({"workflow_id": first["id"]})),
+        (
+            "node.get",
+            json!({"workflow_id": first["id"], "node_id": "bad"}),
+        ),
+        (
+            "node.update",
+            json!({"workflow_id": first["id"], "node_id": root["id"], "prompt": null}),
+        ),
+        (
+            "connection.create",
+            json!({"workflow_id": first["id"], "source_id": root["id"]}),
+        ),
+        (
+            "workflow.graph",
+            json!({"workflow_id": first["id"], "unexpected": true}),
+        ),
+    ] {
+        let mut request = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+        }))?;
+        request.push(b'\n');
+        assert_eq!(fixture.rpc(&request)?["error"]["code"], -32602, "{method}");
+    }
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", &workflow])?,
+        graph
+    );
+    assert_eq!(
+        fixture.success(&["node", "get", "--workflow", &other, "--node", &foreign])?,
+        other_node
+    );
+    fixture.stop()?;
+    Ok(())
+}
+
 impl Drop for OwnedServer {
     fn drop(&mut self) {
         let _ = self.0.kill();

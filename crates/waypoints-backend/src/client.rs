@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep, timeout};
-use waypoints_core::storage::Workflow;
+use waypoints_core::storage::{Connection, Node, Workflow, WorkflowGraph};
 
 use crate::config::sidecar;
 use crate::protocol::{MAX_FRAME, PROTOCOL_VERSION, TIMEOUT, read_frame};
@@ -155,6 +155,82 @@ impl Client {
             .context("resolving project directory")?;
         self.call("workflow.list", json!({"project_path": project}))
             .await
+    }
+
+    /// Reads a workflow and its saved graph in deterministic order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing workflow, server error, or transport failure.
+    pub async fn workflow_graph(&self, workflow_id: i64) -> Result<WorkflowGraph, BackendError> {
+        self.call("workflow.graph", json!({"workflow_id": workflow_id}))
+            .await
+    }
+
+    /// Saves a prompt node in an existing workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input, server errors, or transport failures.
+    pub async fn create_node(&self, workflow_id: i64, prompt: &str) -> Result<Node, BackendError> {
+        self.call(
+            "node.create",
+            json!({"workflow_id": workflow_id, "prompt": prompt}),
+        )
+        .await
+    }
+
+    /// Reads a node belonging to the selected workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing node, wrong workflow, or request failure.
+    pub async fn node(&self, workflow_id: i64, node_id: i64) -> Result<Node, BackendError> {
+        self.call(
+            "node.get",
+            json!({"workflow_id": workflow_id, "node_id": node_id}),
+        )
+        .await
+    }
+
+    /// Replaces a node's saved prompt without changing its identity or links.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input, server errors, or transport failures.
+    pub async fn update_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        prompt: &str,
+    ) -> Result<Node, BackendError> {
+        self.call(
+            "node.update",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id, "prompt": prompt
+            }),
+        )
+        .await
+    }
+
+    /// Saves a directed connection between two nodes in one workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid, duplicate, or cyclic links, or request failures.
+    pub async fn connect_nodes(
+        &self,
+        workflow_id: i64,
+        source_id: i64,
+        target_id: i64,
+    ) -> Result<Connection, BackendError> {
+        self.call(
+            "connection.create",
+            json!({
+                "workflow_id": workflow_id, "source_id": source_id, "target_id": target_id
+            }),
+        )
+        .await
     }
 
     /// Requests orderly backend shutdown without deleting saved workflows.

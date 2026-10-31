@@ -31,10 +31,20 @@ struct Args {
 enum Command {
     /// Run the backend in the foreground (normally started automatically).
     Serve,
-    /// Create or list saved workflows.
+    /// Create, list, or inspect saved workflows.
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommand,
+    },
+    /// Create, read, or edit saved prompt nodes.
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
+    /// Save directed workflow connections (not jj ancestry or execution).
+    Connection {
+        #[command(subcommand)]
+        command: ConnectionCommand,
     },
     /// Inspect or stop an existing backend without starting one.
     Backend {
@@ -54,6 +64,46 @@ enum WorkflowCommand {
     List {
         #[arg(long)]
         project: PathBuf,
+    },
+    Graph {
+        #[arg(long)]
+        workflow: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum NodeCommand {
+    Create {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        prompt: String,
+    },
+    Get {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
+    Update {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        #[arg(long)]
+        prompt: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConnectionCommand {
+    Create {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        source: i64,
+        #[arg(long)]
+        target: i64,
     },
 }
 
@@ -125,6 +175,62 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         for workflow in workflows {
                             println!("{}\t{}", workflow.id, workflow.name);
                         }
+                    }
+                }
+                WorkflowCommand::Graph { workflow } => {
+                    let graph = client.workflow_graph(workflow).await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&graph)?);
+                    } else {
+                        println!("Workflow {}: {}", graph.workflow.id, graph.workflow.name);
+                        for node in graph.nodes {
+                            println!("Node {}: {}", node.id, node.prompt);
+                        }
+                        for connection in graph.connections {
+                            println!("{} -> {}", connection.source_id, connection.target_id);
+                        }
+                    }
+                }
+            }
+        }
+        Command::Node { command } => {
+            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let node = match command {
+                NodeCommand::Create { workflow, prompt } => {
+                    client.create_node(workflow, &prompt).await?
+                }
+                NodeCommand::Get { workflow, node } => client.node(workflow, node).await?,
+                NodeCommand::Update {
+                    workflow,
+                    node,
+                    prompt,
+                } => client.update_node(workflow, node, &prompt).await?,
+            };
+            if args.json {
+                println!("{}", serde_json::to_string(&node)?);
+            } else {
+                println!(
+                    "Node {} (workflow {}): {}",
+                    node.id, node.workflow_id, node.prompt
+                );
+            }
+        }
+        Command::Connection { command } => {
+            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            match command {
+                ConnectionCommand::Create {
+                    workflow,
+                    source,
+                    target,
+                } => {
+                    let connection = client.connect_nodes(workflow, source, target).await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&connection)?);
+                    } else {
+                        println!(
+                            "Connected {} -> {} in workflow {}",
+                            connection.source_id, connection.target_id, connection.workflow_id
+                        );
                     }
                 }
             }

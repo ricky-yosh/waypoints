@@ -13,7 +13,8 @@ use waypoints_core::storage::Storage;
 
 use crate::config::sidecar;
 use crate::protocol::{
-    CreateParams, MAX_FRAME, PROTOCOL_VERSION, ProjectParams, TIMEOUT, read_frame,
+    ConnectParams, CreateNodeParams, CreateParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
+    ProjectParams, TIMEOUT, UpdateNodeParams, WorkflowParams, read_frame,
 };
 use crate::{BackendError, BackendInfo, Config};
 
@@ -176,6 +177,46 @@ async fn dispatch(
                 .list_workflows(&params.project_path)
                 .await
                 .map(|workflows| json!(workflows))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "workflow.graph" => match parameters::<WorkflowParams>(params) {
+            Ok(params) => storage
+                .workflow_graph(params.workflow_id)
+                .await
+                .map(|graph| json!(graph))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.create" => match parameters::<CreateNodeParams>(params) {
+            Ok(params) => storage
+                .create_node(params.workflow_id, &params.prompt)
+                .await
+                .map(|node| json!(node))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.get" => match parameters::<NodeParams>(params) {
+            Ok(params) => storage
+                .node(params.workflow_id, params.node_id)
+                .await
+                .map(|node| json!(node))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.update" => match parameters::<UpdateNodeParams>(params) {
+            Ok(params) => storage
+                .update_node(params.workflow_id, params.node_id, &params.prompt)
+                .await
+                .map(|node| json!(node))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "connection.create" => match parameters::<ConnectParams>(params) {
+            Ok(params) => storage
+                .connect_nodes(params.workflow_id, params.source_id, params.target_id)
+                .await
+                .map(|connection| json!(connection))
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },

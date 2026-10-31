@@ -36,6 +36,42 @@ pub(crate) struct CreateParams {
     pub name: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowParams {
+    pub workflow_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NodeParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateNodeParams {
+    pub workflow_id: i64,
+    pub prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateNodeParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConnectParams {
+    pub workflow_id: i64,
+    pub source_id: i64,
+    pub target_id: i64,
+}
+
 pub(crate) async fn read_frame(stream: &mut BufReader<UnixStream>) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     (&mut *stream)

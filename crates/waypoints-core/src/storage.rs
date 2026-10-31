@@ -20,6 +20,42 @@ pub struct Workflow {
     pub name: String,
 }
 
+/// A prompt-bearing node belonging to one workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Node {
+    /// The database-local node identifier.
+    pub id: i64,
+    /// The workflow containing this node.
+    pub workflow_id: i64,
+    /// The user-provided prompt, preserved verbatim.
+    pub prompt: String,
+}
+
+/// A directed edge between nodes in the same workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Connection {
+    /// The workflow containing both endpoints.
+    pub workflow_id: i64,
+    /// The upstream node identifier.
+    pub source_id: i64,
+    /// The downstream node identifier.
+    pub target_id: i64,
+}
+
+/// A workflow and its directed acyclic graph, ordered by node and endpoint identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WorkflowGraph {
+    /// The saved workflow metadata.
+    pub workflow: Workflow,
+    /// Nodes in ascending identifier order.
+    pub nodes: Vec<Node>,
+    /// Connections in ascending source, then target identifier order.
+    pub connections: Vec<Connection>,
+}
+
 /// A failure to validate workflow input or access local storage.
 #[derive(Debug)]
 pub struct StorageError {
@@ -80,6 +116,33 @@ impl Storage {
             )
             .await
             .context("initializing workflow schema")?;
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS nodes (
+                    id INTEGER PRIMARY KEY,
+                    workflow_id INTEGER NOT NULL REFERENCES workflows(id),
+                    prompt TEXT NOT NULL,
+                    UNIQUE (workflow_id, id)
+                )",
+                (),
+            )
+            .await
+            .context("initializing node schema")?;
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS connections (
+                    workflow_id INTEGER NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    PRIMARY KEY (workflow_id, source_id, target_id),
+                    CHECK (source_id <> target_id),
+                    FOREIGN KEY (workflow_id, source_id) REFERENCES nodes(workflow_id, id),
+                    FOREIGN KEY (workflow_id, target_id) REFERENCES nodes(workflow_id, id)
+                )",
+                (),
+            )
+            .await
+            .context("initializing connection schema")?;
         Ok(Self { database })
     }
 
@@ -157,6 +220,238 @@ impl Storage {
         }
         Ok(workflows)
     }
+
+    /// Creates a node, preserving all nonblank prompt text verbatim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a blank prompt, a missing workflow, or a database failure.
+    pub async fn create_node(
+        &mut self,
+        workflow_id: i64,
+        prompt: &str,
+    ) -> Result<Node, StorageError> {
+        validate_prompt(prompt)?;
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let changed = connection
+            .execute(
+                "INSERT INTO nodes (workflow_id, prompt)
+                 SELECT id, ?2 FROM workflows WHERE id = ?1",
+                turso::params![workflow_id, prompt],
+            )
+            .await
+            .context("creating node")?;
+        if changed != 1 {
+            return Err(anyhow::anyhow!("workflow {workflow_id} not found").into());
+        }
+        Ok(Node {
+            id: connection.last_insert_rowid(),
+            workflow_id,
+            prompt: prompt.to_owned(),
+        })
+    }
+
+    /// Replaces a node's prompt without changing its identifier or connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a blank prompt, a missing workflow or node, a node in
+    /// another workflow, or a database failure.
+    pub async fn update_node(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+        prompt: &str,
+    ) -> Result<Node, StorageError> {
+        validate_prompt(prompt)?;
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let changed = connection
+            .execute(
+                "UPDATE nodes SET prompt = ?3 WHERE workflow_id = ?1 AND id = ?2
+                 AND EXISTS (SELECT 1 FROM workflows WHERE id = ?1)",
+                turso::params![workflow_id, node_id, prompt],
+            )
+            .await
+            .context("updating node")?;
+        if changed != 1 {
+            return Err(
+                anyhow::anyhow!("node {node_id} not found in workflow {workflow_id}").into(),
+            );
+        }
+        Ok(Node {
+            id: node_id,
+            workflow_id,
+            prompt: prompt.to_owned(),
+        })
+    }
+
+    /// Loads a node only when it belongs to the requested workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing workflow or node, a node in another workflow,
+    /// or a database failure.
+    pub async fn node(&self, workflow_id: i64, node_id: i64) -> Result<Node, StorageError> {
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let mut rows = connection
+            .query(
+                "SELECT id, workflow_id, prompt FROM nodes
+                 WHERE workflow_id = ?1 AND id = ?2
+                 AND EXISTS (SELECT 1 FROM workflows WHERE id = ?1)",
+                [workflow_id, node_id],
+            )
+            .await
+            .context("querying node")?;
+        let row = rows
+            .next()
+            .await
+            .context("reading node row")?
+            .with_context(|| format!("node {node_id} not found in workflow {workflow_id}"))?;
+        Ok(decode_node(&row)?)
+    }
+
+    /// Adds a directed connection while preserving an acyclic workflow graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing or foreign endpoints, a missing workflow,
+    /// a self-link, duplicate link, cycle, or database failure.
+    pub async fn connect_nodes(
+        &mut self,
+        workflow_id: i64,
+        source_id: i64,
+        target_id: i64,
+    ) -> Result<Connection, StorageError> {
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        // Validation and insertion share one statement, including across storage handles.
+        // UNION deduplicates reachable nodes in a DAG with converging paths.
+        let changed = connection
+            .execute(
+                "WITH RECURSIVE reachable(id) AS (
+                    SELECT ?3
+                    UNION
+                    SELECT c.target_id FROM connections c JOIN reachable r ON c.source_id = r.id
+                    WHERE c.workflow_id = ?1
+                 )
+                 INSERT INTO connections (workflow_id, source_id, target_id)
+                 SELECT ?1, ?2, ?3
+                 WHERE ?2 <> ?3
+                   AND EXISTS (SELECT 1 FROM workflows WHERE id = ?1)
+                   AND EXISTS (SELECT 1 FROM nodes WHERE workflow_id = ?1 AND id = ?2)
+                   AND EXISTS (SELECT 1 FROM nodes WHERE workflow_id = ?1 AND id = ?3)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM connections
+                       WHERE workflow_id = ?1 AND source_id = ?2 AND target_id = ?3
+                   )
+                   AND NOT EXISTS (SELECT 1 FROM reachable WHERE id = ?2)",
+                [workflow_id, source_id, target_id],
+            )
+            .await
+            .context("connecting nodes")?;
+        if changed != 1 {
+            return Err(anyhow::anyhow!(
+                "invalid connection {source_id} -> {target_id} in workflow {workflow_id}: \
+                 missing workflow or endpoints, self-link, duplicate link, or cycle"
+            )
+            .into());
+        }
+        Ok(Connection {
+            workflow_id,
+            source_id,
+            target_id,
+        })
+    }
+
+    /// Loads a workflow graph with deterministic node and connection ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing workflow or a database query or decoding failure.
+    pub async fn workflow_graph(&self, workflow_id: i64) -> Result<WorkflowGraph, StorageError> {
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let mut rows = connection
+            .query(
+                "SELECT id, project_path, name FROM workflows WHERE id = ?1",
+                [workflow_id],
+            )
+            .await
+            .context("querying workflow")?;
+        let row = rows
+            .next()
+            .await
+            .context("reading workflow row")?
+            .with_context(|| format!("workflow {workflow_id} not found"))?;
+        let workflow = Workflow {
+            id: row.get(0).context("reading workflow identifier")?,
+            project_path: PathBuf::from(
+                row.get::<String>(1)
+                    .context("reading workflow project path")?,
+            ),
+            name: row.get(2).context("reading workflow name")?,
+        };
+        let mut rows = connection
+            .query(
+                "SELECT id, workflow_id, prompt FROM nodes WHERE workflow_id = ?1 ORDER BY id",
+                [workflow_id],
+            )
+            .await
+            .context("listing nodes")?;
+        let mut nodes = Vec::new();
+        while let Some(row) = rows.next().await.context("reading node row")? {
+            nodes.push(decode_node(&row)?);
+        }
+        let mut rows = connection
+            .query(
+                "SELECT workflow_id, source_id, target_id FROM connections
+                 WHERE workflow_id = ?1 ORDER BY source_id, target_id",
+                [workflow_id],
+            )
+            .await
+            .context("listing connections")?;
+        let mut connections = Vec::new();
+        while let Some(row) = rows.next().await.context("reading connection row")? {
+            connections.push(Connection {
+                workflow_id: row
+                    .get(0)
+                    .context("reading connection workflow identifier")?,
+                source_id: row.get(1).context("reading connection source identifier")?,
+                target_id: row.get(2).context("reading connection target identifier")?,
+            });
+        }
+        Ok(WorkflowGraph {
+            workflow,
+            nodes,
+            connections,
+        })
+    }
+}
+
+fn validate_prompt(prompt: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!prompt.trim().is_empty(), "node prompt must not be blank");
+    Ok(())
+}
+
+fn decode_node(row: &turso::Row) -> anyhow::Result<Node> {
+    Ok(Node {
+        id: row.get(0).context("reading node identifier")?,
+        workflow_id: row.get(1).context("reading node workflow identifier")?,
+        prompt: row.get(2).context("reading node prompt")?,
+    })
 }
 
 fn canonical_project(path: &Path) -> anyhow::Result<PathBuf> {
