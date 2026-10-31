@@ -19,7 +19,8 @@ background server's working directory.
 
 ## Save a branching workflow
 
-Nodes currently contain a prompt, not a jj association or an agent conversation.
+Nodes contain saved prompts, with optional explicit associations to existing jj changes.
+They do not store agent conversations.
 Connections are directed saved relationships: they do not execute work or change
 jj ancestry. All commands below use the backend, never the database directly.
 
@@ -60,6 +61,118 @@ command in this slice.
 After rebuilding, stop any old backend and let the next workflow/node/connection
 command start the new executable. Protocol version 1 is retained for these
 additive methods; an older running backend reports "method not found" for them.
+
+## Associate a node with an existing jj change
+
+These commands require `jj` on the **backend's PATH**. Tested with jj 0.46.0;
+older versions need the `json()` template function, `change_id()` revset function,
+and the global flags used below. Basic workflows and graphs do not require jj.
+The workflow's project directory must be inside an existing jj workspace.
+
+First inspect change IDs in that project, without snapshotting dirty files:
+
+```sh
+jj --ignore-working-copy --at-op=@ log
+```
+
+Select one existing change by its change ID (letters k–z), or a unique prefix.
+Replace `CHANGE_ID` and the workflow/node IDs with your actual values:
+
+```sh
+cargo run -p waypoints-cli -- node associate --workflow 1 --node 2 --change CHANGE_ID
+cargo run -p waypoints-cli -- node refresh --workflow 1 --node 2 --json
+```
+
+Commit IDs, bookmarks, `@`, and arbitrary revsets are intentionally not accepted.
+An ambiguous prefix, nonexistent change, or divergent change cannot be selected.
+Selection resolves the full change ID and stores it with the canonical jj workspace
+root in the `node_changes` table. Running `associate` again explicitly replaces that
+node's association; a rejected selection leaves its prior association unchanged.
+Neither selection nor refresh changes workflow connections or jj ancestry.
+
+`node refresh` returns `{node, association, state}`. `association` is either null
+or `{repository_path, change_id}`. `state.status` is:
+
+| Status | Meaning |
+|---|---|
+| `unassociated` | No native change selected; no jj query is needed |
+| `current` | One visible revision; `state.revision` contains full change/commit IDs, description, and `conflicted` |
+| `missing` | No visible revision; the saved node, prompt, links, and association are retained |
+| `divergent` | Multiple visible revisions; `state.revisions` contains two candidates, not an exhaustive history |
+
+Revision details are queried live, not cached or preserved as application-owned
+snapshots. `node get` and `workflow graph` still return only saved prompt/graph
+metadata and do not query jj; use `node refresh` for native status.
+
+After a manual native rewrite (for example `jj describe`), refresh resolves the
+same change ID to the new commit/description/conflict state. After external
+abandonment or squash removes a change, refresh reports `missing`; nothing is
+deleted or resurrected. Repository access failures, a changed workspace root,
+unsupported jj versions, missing jj, and concurrent operation heads are **errors**,
+not evidence that a change disappeared. Resolve native operation-head concurrency
+in jj itself, then retry. An explicitly replaced repository at the same path is
+not identified independently; repository relocation/replacement tracking is deferred.
+
+Queries use `--ignore-working-copy --at-op=@` to avoid automatic working-copy
+snapshots, Git import, and concurrent-operation merging. They therefore reflect
+jj's recorded state, **not unsnapshotted file edits**. Each subprocess has a
+two-second timeout and a 1 MiB limit per output stream; slow/oversized queries
+return an error. The owning process is terminated on timeout.
+
+Associations survive backend restarts. Neither association nor refresh creates
+changes. Explicit creation is described below; working-copy switching, workspace
+allocation, revision-history browsing, code restoration, downstream staleness, and
+agent execution are not implemented.
+
+## Create a change for an unassociated node
+
+Choose a base **explicitly**; workflow connections do not infer jj ancestry.
+`BASE_REVISION` accepts one existing change ID, commit ID, unique ID prefix, or
+`root()`. Bookmarks, `@`, and arbitrary revsets are not accepted. A missing or
+divergent change cannot be a base; select an exact commit ID to disambiguate.
+
+```sh
+cargo run -p waypoints-cli -- node create-change --workflow 1 --node 2 --base BASE_REVISION --json
+cargo run -p waypoints-cli -- node refresh --workflow 1 --node 2 --json
+```
+
+The command resolves the base to an exact commit, runs native `jj new --no-edit`
+with an empty description and `--ignore-working-copy --at-op=@`, and saves the
+new full change ID and workspace root. Its response has the same
+`{node, association, state}` shape as refresh. The node's prompt and connections
+are unchanged. The new change initially has the base's tree, with no added edits.
+Your current working-copy change, recorded commit, and dirty files stay unchanged.
+Two nodes created on the same base are native siblings even if a workflow edge
+connects them.
+
+Creation is refused for **any existing association**, including a missing change.
+It does not replace, resurrect, or switch to an associated change. These
+associations also survive backend restarts.
+
+jj and the workflow database cannot commit atomically. Before invoking native
+creation, Waypoints saves a durable guard in `node_change_creations`. A failed or
+interrupted operation after that point leaves the guard in place, so retrying
+cannot silently create another change. A four-second total native-work deadline
+fits within the five-second client deadline; each subprocess retains its
+two-second timeout and output limits.
+
+If an outcome is uncertain, **inspect jj before doing anything else**:
+
+```sh
+jj --ignore-working-copy --at-op=@ log
+jj --ignore-working-copy --at-op=@ op log
+```
+
+If the new change exists, use `node associate --workflow … --node … --change …`
+to explicitly attach it. Successful association clears the guard. If creation
+never happened, you can manually create the intended change in jj and associate
+it. There is no automatic rollback or force-retry command. Failure to save an
+association after successful native creation reports the created change ID.
+
+Creation is tested with jj 0.46.0. It overrides jj's commit-summary template with
+marked JSON to capture the identity from **that creation command**, rather than
+guessing from the newest repository head. Unsupported output produces an error
+and retains the guard instead of guessing.
 
 ## Data and socket paths
 
@@ -142,6 +255,9 @@ Methods:
 | `node.create` | `{workflow_id, prompt}` | `{id, workflow_id, prompt}` |
 | `node.get` | `{workflow_id, node_id}` | `{id, workflow_id, prompt}` |
 | `node.update` | `{workflow_id, node_id, prompt}` | Updated node, with the same ID |
+| `node.associate` | `{workflow_id, node_id, change_id}` | `{node, association, state}` with the selected current revision |
+| `node.create_change` | `{workflow_id, node_id, base}` | `{node, association, state}` for the newly created empty change |
+| `node.refresh` | `{workflow_id, node_id}` | `{node, association, state}` with freshly queried native status |
 | `connection.create` | `{workflow_id, source_id, target_id}` | `{workflow_id, source_id, target_id}` |
 
 Example:
@@ -167,6 +283,9 @@ cargo fmt --check
 
 End-to-end tests launch the real executable and background processes with isolated
 temporary databases, then stop the backend during cleanup.
+Native integration tests require `jj` and create disposable repositories. They
+exercise rewrites, abandonment, divergence, conflicts, and unchanged operation IDs
+when querying dirty working copies.
 
 ## Deliberately not included
 

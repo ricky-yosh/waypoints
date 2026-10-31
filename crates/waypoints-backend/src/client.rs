@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep, timeout};
-use waypoints_core::storage::{Connection, Node, Workflow, WorkflowGraph};
+use waypoints_core::storage::{Connection, Node, NodeChange, Workflow, WorkflowGraph};
 
 use crate::config::sidecar;
 use crate::protocol::{MAX_FRAME, PROTOCOL_VERSION, TIMEOUT, read_frame};
@@ -209,6 +209,63 @@ impl Client {
             json!({
                 "workflow_id": workflow_id, "node_id": node_id, "prompt": prompt
             }),
+        )
+        .await
+    }
+
+    /// Explicitly selects an existing native jj change for a saved node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership/selection, jj failures, or request failures.
+    pub async fn associate_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        change_id: &str,
+    ) -> Result<NodeChange, BackendError> {
+        self.call(
+            "node.associate",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id, "change_id": change_id
+            }),
+        )
+        .await
+    }
+
+    /// Creates an empty jj change on an explicit base without switching the working copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership/base, an associated or guarded node,
+    /// jj/storage failures, or transport failures. Inspect native state after an
+    /// uncertain outcome; do not automatically retry creation.
+    pub async fn create_node_change(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        base: &str,
+    ) -> Result<NodeChange, BackendError> {
+        self.call(
+            "node.create_change",
+            json!({"workflow_id": workflow_id, "node_id": node_id, "base": base}),
+        )
+        .await
+    }
+
+    /// Queries current native state without snapshotting or changing the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership, unavailable repositories/jj, or request failures.
+    pub async fn refresh_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<NodeChange, BackendError> {
+        self.call(
+            "node.refresh",
+            json!({"workflow_id": workflow_id, "node_id": node_id}),
         )
         .await
     }

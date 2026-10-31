@@ -51,6 +51,22 @@ pub(crate) struct NodeParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct AssociateParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub change_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateChangeParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub base: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateNodeParams {
     pub workflow_id: i64,
     pub prompt: String,

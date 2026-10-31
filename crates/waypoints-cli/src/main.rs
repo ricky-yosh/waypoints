@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use waypoints_backend::{Client, Config};
+use waypoints_core::jj::ChangeState;
+use waypoints_core::storage::{Node, NodeChange};
 
 #[derive(Parser)]
 #[command(
@@ -92,6 +94,32 @@ enum NodeCommand {
         node: i64,
         #[arg(long)]
         prompt: String,
+    },
+    /// Associate an existing jj change by change ID (or unique prefix), not a revset.
+    Associate {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        #[arg(long)]
+        change: String,
+    },
+    /// Create an empty jj change on an explicit base, without switching the working copy.
+    CreateChange {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        /// Change ID, commit ID, unique prefix, or root(); not an arbitrary revset.
+        #[arg(long)]
+        base: String,
+    },
+    /// Query the node's current native revision without snapshotting the working copy.
+    Refresh {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
     },
 }
 
@@ -195,24 +223,43 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
         Command::Node { command } => {
             let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
-            let node = match command {
-                NodeCommand::Create { workflow, prompt } => {
-                    client.create_node(workflow, &prompt).await?
+            match command {
+                NodeCommand::Associate {
+                    workflow,
+                    node,
+                    change,
+                } => {
+                    let status = client.associate_node(workflow, node, &change).await?;
+                    print_node_change(status, args.json)?;
                 }
-                NodeCommand::Get { workflow, node } => client.node(workflow, node).await?,
+                NodeCommand::CreateChange {
+                    workflow,
+                    node,
+                    base,
+                } => {
+                    let status = client.create_node_change(workflow, node, &base).await?;
+                    print_node_change(status, args.json)?;
+                }
+                NodeCommand::Refresh { workflow, node } => {
+                    let status = client.refresh_node(workflow, node).await?;
+                    print_node_change(status, args.json)?;
+                }
+                NodeCommand::Create { workflow, prompt } => {
+                    print_node(client.create_node(workflow, &prompt).await?, args.json)?;
+                }
+                NodeCommand::Get { workflow, node } => {
+                    print_node(client.node(workflow, node).await?, args.json)?;
+                }
                 NodeCommand::Update {
                     workflow,
                     node,
                     prompt,
-                } => client.update_node(workflow, node, &prompt).await?,
-            };
-            if args.json {
-                println!("{}", serde_json::to_string(&node)?);
-            } else {
-                println!(
-                    "Node {} (workflow {}): {}",
-                    node.id, node.workflow_id, node.prompt
-                );
+                } => {
+                    print_node(
+                        client.update_node(workflow, node, &prompt).await?,
+                        args.json,
+                    )?;
+                }
             }
         }
         Command::Connection { command } => {
@@ -234,6 +281,50 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn print_node(node: Node, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&node)?);
+    } else {
+        println!(
+            "Node {} (workflow {}): {}",
+            node.id, node.workflow_id, node.prompt
+        );
+    }
+    Ok(())
+}
+
+fn print_node_change(value: NodeChange, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        print_node(value.node, false)?;
+        if let Some(association) = value.association {
+            println!(
+                "Change: {} · {}",
+                association.change_id,
+                association.repository_path.display()
+            );
+        }
+        match value.state {
+            ChangeState::Current { revision } => {
+                println!("jj status: current");
+                println!("Commit: {}", revision.commit_id);
+                println!("Conflicted: {}", revision.conflicted);
+                println!("Description: {}", revision.description);
+            }
+            ChangeState::Divergent { .. } => println!(
+                "jj status: divergent\nMultiple native revisions; no revision selected. Use --json to inspect candidates."
+            ),
+            ChangeState::Missing => println!(
+                "jj status: missing\nSaved node retained. No visible revision found; nothing recreated."
+            ),
+            ChangeState::Unassociated => println!("jj status: unassociated"),
+            _ => println!("jj status: unknown"),
         }
     }
     Ok(())

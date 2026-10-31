@@ -106,6 +106,636 @@ impl Drop for Fixture {
 
 struct OwnedServer(Child);
 
+fn jj(project: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("jj")
+        .current_dir(project)
+        .env("JJ_CONFIG", "")
+        .args([
+            "--config",
+            "user.name='Waypoints test'",
+            "--config",
+            "user.email='test@example.invalid'",
+            "--no-pager",
+            "--color=never",
+        ])
+        .args(args)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "jj {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+#[test]
+fn cli_creates_a_change_without_switching_and_retains_it_after_restart() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project = fixture.directory.path().join("project");
+    jj(&project, &["describe", "-m", "Interfaces"])?;
+    let base = jj(
+        &project,
+        &["log", "--no-graph", "-r", "@", "-T", "change_id"],
+    )?;
+    let before = jj(
+        &project,
+        &["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+    )?;
+    fs::write(project.join("dirty.txt"), "untouched\n")?;
+    let workflow = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project.to_str().expect("project path"),
+        "--name",
+        "Creation",
+    ])?["id"]
+        .to_string();
+    let node = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &workflow,
+        "--prompt",
+        "Implement authentication",
+    ])?;
+    let node_id = node["id"].to_string();
+    let created = fixture.success(&[
+        "node",
+        "create-change",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+        "--base",
+        &base,
+    ])?;
+    assert_eq!(created["node"], node);
+    assert_eq!(created["state"]["status"], "current");
+    let id = created["association"]["change_id"]
+        .as_str()
+        .expect("created change ID");
+    assert_ne!(id, base);
+    assert_eq!(
+        jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                "commit_id"
+            ]
+        )?,
+        before
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("dirty.txt"))?,
+        "untouched\n"
+    );
+    let operation = jj(
+        &project,
+        &[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "--limit",
+            "1",
+            "-T",
+            "id",
+        ],
+    )?;
+    let rejected = fixture
+        .command()
+        .args([
+            "node",
+            "create-change",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id,
+            "--base",
+            &base,
+        ])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("already has"));
+    assert_eq!(
+        jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-T",
+                "id"
+            ]
+        )?,
+        operation
+    );
+    for params in [
+        json!({"workflow_id": 1, "node_id": 1}),
+        json!({"workflow_id": 1, "node_id": 1, "base": "root()", "unexpected": true}),
+    ] {
+        let response = fixture.rpc(
+            format!(
+                "{}\n",
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "node.create_change", "params": params,
+                })
+            )
+            .as_bytes(),
+        )?;
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&[
+            "node",
+            "refresh",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id,
+        ])?,
+        created
+    );
+    fixture.stop()?;
+    Ok(())
+}
+
+#[test]
+fn uncertain_creation_is_guarded_across_restart_and_can_be_explicitly_associated()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project = fixture.directory.path().join("project");
+    jj(&project, &["describe", "-m", "Base"])?;
+    let executable = Command::new("/bin/sh")
+        .args(["-c", "command -v jj"])
+        .output()?;
+    assert!(executable.status.success());
+    let native_jj = String::from_utf8(executable.stdout)?.trim().to_owned();
+    let bin = fixture.directory.path().join("bin");
+    fs::create_dir(&bin)?;
+    let wrapper = bin.join("jj");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg do\n if [ \"$arg\" = new ]; then\n  '{native_jj}' \"$@\"\n  exit 1\n fi\ndone\nexec '{native_jj}' \"$@\"\n"
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    // Only the backend receives the injected jj wrapper.
+    assert!(
+        fixture
+            .list_command()
+            .env("PATH", &bin)
+            .output()?
+            .status
+            .success()
+    );
+    let workflow = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project.to_str().expect("project path"),
+        "--name",
+        "Uncertain",
+    ])?["id"]
+        .to_string();
+    let node = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &workflow,
+        "--prompt",
+        "Keep prompt",
+    ])?["id"]
+        .to_string();
+    let args = [
+        "node",
+        "create-change",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node,
+        "--base",
+        "root()",
+    ];
+    let failure = fixture.command().args(args).output()?;
+    assert!(!failure.status.success());
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("may have succeeded"));
+    let operation = jj(
+        &project,
+        &[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "--limit",
+            "1",
+            "-T",
+            "id",
+        ],
+    )?;
+    fixture.stop()?;
+    let retry = fixture.command().args(args).output()?;
+    assert!(!retry.status.success());
+    assert!(String::from_utf8_lossy(&retry.stderr).contains("unfinished creation"));
+    assert_eq!(
+        jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-T",
+                "id"
+            ]
+        )?,
+        operation
+    );
+    let created_id = jj(
+        &project,
+        &[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "heads(all()) ~ @",
+            "-T",
+            "change_id",
+        ],
+    )?;
+    assert_eq!(created_id.len(), 32, "exactly one change was created");
+    let selected = fixture.success(&[
+        "node",
+        "associate",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node,
+        "--change",
+        &created_id,
+    ])?;
+    assert_eq!(selected["association"]["change_id"], created_id);
+    assert_eq!(
+        fixture.success(&["node", "refresh", "--workflow", &workflow, "--node", &node,])?,
+        selected
+    );
+    fixture.stop()?;
+    Ok(())
+}
+
+#[test]
+fn slow_jj_times_out_without_blocking_subsequent_backend_requests() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let bin = fixture.directory.path().join("bin");
+    fs::create_dir(&bin)?;
+    let executable = bin.join("jj");
+    // exec ensures kill-on-drop targets the sleeping process itself, not a wrapper.
+    fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 30\n")?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+    let output = fixture.list_command().env("PATH", &bin).output()?;
+    assert!(output.status.success());
+    let project = fixture
+        .directory
+        .path()
+        .to_str()
+        .expect("temporary path is UTF-8");
+    let workflow = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Slow jj",
+    ])?["id"]
+        .to_string();
+    let node = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &workflow,
+        "--prompt",
+        "Prompt",
+    ])?["id"]
+        .to_string();
+    let output = fixture
+        .command()
+        .args([
+            "node",
+            "associate",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node,
+            "--change",
+            "kkkk",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("jj command timed out"));
+    assert_eq!(
+        fixture.success(&["node", "refresh", "--workflow", &workflow, "--node", &node,])?["state"]
+            ["status"],
+        "unassociated"
+    );
+    fixture.success(&["backend", "status"])?;
+    fixture.stop()?;
+    Ok(())
+}
+
+#[test]
+fn missing_jj_is_an_error_not_a_missing_change_and_backend_stays_usable() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let output = fixture.list_command().env("PATH", "").output()?;
+    assert!(
+        output.status.success(),
+        "basic operations must not require jj"
+    );
+    let project = fixture
+        .directory
+        .path()
+        .to_str()
+        .expect("temporary path is UTF-8");
+    let workflow = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "No jj installed",
+    ])?["id"]
+        .to_string();
+    let node = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &workflow,
+        "--prompt",
+        "No jj yet",
+    ])?["id"]
+        .to_string();
+    let output = fixture
+        .command()
+        .args([
+            "node",
+            "associate",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node,
+            "--change",
+            "kkkk",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("install jj"));
+    assert_eq!(
+        fixture.success(&["node", "refresh", "--workflow", &workflow, "--node", &node,])?["state"]
+            ["status"],
+        "unassociated"
+    );
+    fixture.success(&["backend", "status"])?;
+    fixture.stop()?;
+    Ok(())
+}
+
+#[test]
+fn cli_associates_refreshes_and_preserves_missing_native_changes() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project = fixture.directory.path().join("project").canonicalize()?;
+    jj(&project, &["describe", "-m", "Initial native change"])?;
+    let id = jj(
+        &project,
+        &["log", "--no-graph", "-r", "@", "-T", "change_id"],
+    )?;
+    let workflow = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project.to_str().expect("temporary path is UTF-8"),
+        "--name",
+        "jj-backed workflow",
+    ])?["id"]
+        .to_string();
+    let node = fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        &workflow,
+        "--prompt",
+        "Keep the prompt",
+    ])?;
+    let node_id = node["id"].to_string();
+    assert_eq!(
+        fixture.success(&[
+            "node",
+            "refresh",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id
+        ])?["state"]["status"],
+        "unassociated"
+    );
+    fs::write(project.join("dirty.txt"), "not yet snapshotted")?;
+    let op_args = [
+        "--ignore-working-copy",
+        "--at-op=@",
+        "op",
+        "log",
+        "--no-graph",
+        "--limit",
+        "1",
+        "-T",
+        "id",
+    ];
+    let operation = jj(&project, &op_args)?;
+    let associated = fixture.success(&[
+        "node",
+        "associate",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+        "--change",
+        &id[..12],
+    ])?;
+    assert_eq!(associated["node"], node);
+    assert_eq!(associated["association"]["change_id"], id);
+    assert_eq!(
+        associated["association"]["repository_path"],
+        project.to_str().expect("temporary path is UTF-8")
+    );
+    assert_eq!(associated["state"]["status"], "current");
+    assert_eq!(associated["state"]["revision"]["conflicted"], false);
+    assert_eq!(
+        jj(&project, &op_args)?,
+        operation,
+        "backend queries must not snapshot"
+    );
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&[
+            "node",
+            "refresh",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id
+        ])?,
+        associated
+    );
+    jj(&project, &["describe", "-m", "Manually revised"])?;
+    let refreshed = fixture.success(&[
+        "node",
+        "refresh",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+    ])?;
+    assert_eq!(
+        refreshed["state"]["revision"]["description"],
+        "Manually revised\n"
+    );
+    assert_ne!(
+        refreshed["state"]["revision"]["commit_id"],
+        associated["state"]["revision"]["commit_id"]
+    );
+    assert_eq!(refreshed["association"], associated["association"]);
+    for args in [
+        vec![
+            "node",
+            "associate",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id,
+            "--change",
+            "all()",
+        ],
+        vec![
+            "node",
+            "associate",
+            "--workflow",
+            "99999",
+            "--node",
+            &node_id,
+            "--change",
+            &id,
+        ],
+        vec!["node", "refresh", "--workflow", "99999", "--node", &node_id],
+    ] {
+        let output = fixture.command().args(&args).output()?;
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty());
+    }
+    for (method, params) in [
+        (
+            "node.associate",
+            json!({"workflow_id": 1, "node_id": 1, "change_id": 123}),
+        ),
+        (
+            "node.refresh",
+            json!({"workflow_id": 1, "node_id": 1, "extra": true}),
+        ),
+    ] {
+        let mut bytes = serde_json::to_vec(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
+        )?;
+        bytes.push(b'\n');
+        assert_eq!(fixture.rpc(&bytes)?["error"]["code"], -32602);
+    }
+    assert_eq!(
+        fixture.success(&[
+            "node",
+            "refresh",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id
+        ])?,
+        refreshed
+    );
+    jj(&project, &["abandon", "-r", &id])?;
+    let operation = jj(&project, &op_args)?;
+    let missing = fixture.success(&[
+        "node",
+        "refresh",
+        "--workflow",
+        &workflow,
+        "--node",
+        &node_id,
+    ])?;
+    assert_eq!(missing["state"]["status"], "missing");
+    assert_eq!(missing["node"], node);
+    assert_eq!(missing["association"], associated["association"]);
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", &workflow])?["nodes"],
+        json!([node])
+    );
+    let output = fixture
+        .command()
+        .args([
+            "node",
+            "refresh",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id,
+        ])
+        .output()?;
+    assert!(output.status.success());
+    // Fixture enables JSON globally; exercise the human-readable branch separately.
+    let output = Command::new(env!("CARGO_BIN_EXE_waypoints"))
+        .arg("--database")
+        .arg(&fixture.database)
+        .arg("--socket")
+        .arg(&fixture.socket)
+        .args([
+            "node",
+            "refresh",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id,
+        ])
+        .output()?;
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("jj status: missing"));
+    assert_eq!(jj(&project, &op_args)?, operation);
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&[
+            "node",
+            "refresh",
+            "--workflow",
+            &workflow,
+            "--node",
+            &node_id
+        ])?,
+        missing
+    );
+    fixture.stop()?;
+    Ok(())
+}
+
 #[test]
 fn branching_graph_survives_restart_and_rejects_invalid_edits() -> anyhow::Result<()> {
     let fixture = Fixture::new()?;

@@ -324,6 +324,10 @@ fn workflows_only_database_is_upgraded_without_losing_data() -> anyhow::Result<(
         assert!(graph.connections.is_empty());
         let a = storage.create_node(42, "A").await?;
         let b = storage.create_node(42, "B").await?;
+        assert!(matches!(
+            storage.refresh_node(42, a.id).await?.state,
+            waypoints_core::jj::ChangeState::Unassociated
+        ));
         storage.connect_nodes(42, a.id, b.id).await?;
         let graph = storage.workflow_graph(42).await?;
         let new_workflow = storage.create_workflow(&project, "New workflow").await?;

@@ -1,5 +1,19 @@
 # jj snapshots per phase
 
+## Implemented slice
+
+The CLI can explicitly associate a saved node with an existing jj change and
+refresh its current revision, description, and conflict status. Missing changes
+retain their saved nodes; divergence is surfaced without choosing a revision.
+Queries do not snapshot dirty working copies or mutate native history. See
+[backend and CLI usage](11-backend-cli.md#associate-a-node-with-an-existing-jj-change).
+An unassociated node can also explicitly create an empty jj change on a selected
+base revision, without moving or snapshotting the working copy. Workflow
+connections do not choose that base. Existing associations, including missing ones,
+are refused; uncertain creation outcomes require manual inspection and association.
+The model below remains the broader design, not a claim that workspace creation,
+history navigation, downstream staleness, or automatic checkpoints are implemented.
+
 ## Model
 
 - Each phase node is associated with an evolving jj change, initially built on its selected upstream code revision. Saved workflow connections and native ancestry are distinct relationships.

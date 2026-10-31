@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::jj::{self, ChangeAssociation, ChangeState};
+
 /// A workflow saved for a canonical project directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -54,6 +56,18 @@ pub struct WorkflowGraph {
     pub nodes: Vec<Node>,
     /// Connections in ascending source, then target identifier order.
     pub connections: Vec<Connection>,
+}
+
+/// A saved node and its freshly queried native-change status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct NodeChange {
+    /// The node, retained even when the associated change disappears.
+    pub node: Node,
+    /// The persisted reference, or none when no change has been selected.
+    pub association: Option<ChangeAssociation>,
+    /// Live native state; repository/query failures are errors, not missing changes.
+    pub state: ChangeState,
 }
 
 /// A failure to validate workflow input or access local storage.
@@ -143,6 +157,26 @@ impl Storage {
             )
             .await
             .context("initializing connection schema")?;
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS node_changes (
+                    node_id INTEGER PRIMARY KEY REFERENCES nodes(id),
+                    repository_path TEXT NOT NULL,
+                    change_id TEXT NOT NULL
+                )",
+                (),
+            )
+            .await
+            .context("initializing node change schema")?;
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS node_change_creations (
+                    node_id INTEGER PRIMARY KEY REFERENCES nodes(id)
+                )",
+                (),
+            )
+            .await
+            .context("initializing change creation guards")?;
         Ok(Self { database })
     }
 
@@ -317,6 +351,253 @@ impl Storage {
             .context("reading node row")?
             .with_context(|| format!("node {node_id} not found in workflow {workflow_id}"))?;
         Ok(decode_node(&row)?)
+    }
+
+    /// Associates a node with one existing, unambiguous native jj change.
+    ///
+    /// A unique change-ID prefix is resolved to its full ID before saving.
+    /// Repeating this command explicitly replaces a previous association.
+    /// This does not snapshot the working copy or change jj history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid node membership, IDs, missing/divergent changes,
+    /// an unavailable jj repository/executable, or storage failures. Failed selection
+    /// leaves any saved association unchanged.
+    pub async fn associate_node(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+        change_id: &str,
+    ) -> Result<NodeChange, StorageError> {
+        let node = self.node(workflow_id, node_id).await?;
+        jj::validate_change_id(change_id)?;
+        let project = self.project_for_node(workflow_id, node_id).await?;
+        let repository_path = jj::repository_root(&project).await?;
+        let mut revisions = jj::revisions(&repository_path, change_id).await?;
+        if revisions.len() != 1 {
+            return Err(anyhow::anyhow!("select one existing, non-divergent jj change").into());
+        }
+        let revision = revisions.remove(0);
+        let association = ChangeAssociation {
+            repository_path,
+            change_id: revision.change_id.clone(),
+        };
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        connection
+            .execute(
+                "INSERT INTO node_changes (node_id, repository_path, change_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT(node_id) DO UPDATE SET
+                 repository_path = excluded.repository_path, change_id = excluded.change_id",
+                turso::params![
+                    node_id,
+                    association
+                        .repository_path
+                        .to_str()
+                        .context("jj path must be UTF-8")?,
+                    association.change_id.as_str()
+                ],
+            )
+            .await
+            .context("saving node change association")?;
+        connection
+            .execute(
+                "DELETE FROM node_change_creations WHERE node_id = ?1",
+                [node_id],
+            )
+            .await
+            .context("clearing change creation guard")?;
+        Ok(NodeChange {
+            node,
+            association: Some(association),
+            state: ChangeState::Current { revision },
+        })
+    }
+
+    /// Creates and associates an empty native change on an explicitly selected base.
+    ///
+    /// Accepts a change ID, commit ID, unique prefix, or `root()`. The working copy
+    /// and prompt are unchanged. Existing associations, including missing ones, are
+    /// refused. A durable guard prevents retries after uncertain native outcomes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership/base, an existing association or
+    /// creation guard, jj failures, timeouts, or database failures. After creation
+    /// starts, failures require inspecting jj and explicitly associating the result;
+    /// native history is never automatically rolled back.
+    pub async fn create_node_change(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+        base: &str,
+    ) -> Result<NodeChange, StorageError> {
+        let node = self.node(workflow_id, node_id).await?;
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let mut rows = connection
+            .query(
+                "SELECT node_id FROM node_changes WHERE node_id = ?1
+             UNION ALL SELECT node_id FROM node_change_creations WHERE node_id = ?1",
+                [node_id],
+            )
+            .await
+            .context("checking node change creation eligibility")?;
+        if rows
+            .next()
+            .await
+            .context("reading creation eligibility")?
+            .is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "node already has an association or an unfinished creation; inspect jj and explicitly associate the result, do not retry creation"
+            ).into());
+        }
+        drop(rows);
+        let project = self.project_for_node(workflow_id, node_id).await?;
+        // Keep all native work within the client's five-second RPC deadline.
+        let (repository_path, revision) = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            async {
+                let root = jj::repository_root(&project).await?;
+                let base = jj::resolve_base(&root, base).await?;
+                let reserved = connection.execute(
+                    "INSERT INTO node_change_creations (node_id)
+                     SELECT ?1 WHERE NOT EXISTS (SELECT 1 FROM node_changes WHERE node_id = ?1)",
+                    [node_id],
+                ).await.context("reserving node change creation")?;
+                // A competing association must never turn this into an unguarded creation.
+                anyhow::ensure!(
+                    reserved == 1,
+                    "node already has a change association"
+                );
+                let revision = jj::create_change(&root, &base).await
+                    .context("native creation may have succeeded; inspect jj before explicitly associating the result")?;
+                Ok::<_, anyhow::Error>((root, revision))
+            },
+        ).await.context("change creation timed out; inspect jj before retrying")??;
+        let association = ChangeAssociation {
+            repository_path,
+            change_id: revision.change_id.clone(),
+        };
+        connection.execute(
+            "INSERT INTO node_changes (node_id, repository_path, change_id) VALUES (?1, ?2, ?3)",
+            turso::params![
+                node_id,
+                association.repository_path.to_str().context("jj path must be UTF-8")?,
+                association.change_id.as_str()
+            ],
+        ).await.with_context(|| format!(
+            "jj change {} was created, but saving failed; explicitly associate this change, do not create another",
+            association.change_id
+        ))?;
+        connection
+            .execute(
+                "DELETE FROM node_change_creations WHERE node_id = ?1",
+                [node_id],
+            )
+            .await
+            .context("clearing completed creation guard")?;
+        Ok(NodeChange {
+            node,
+            association: Some(association),
+            state: ChangeState::Current { revision },
+        })
+    }
+
+    /// Refreshes a saved association without mutating repository or workflow state.
+    ///
+    /// An absent visible change is reported as missing; multiple visible revisions
+    /// are reported as divergent with two candidate revisions. Neither is guessed at
+    /// or automatically repaired.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership, unavailable/moved repositories,
+    /// jj failures or storage failures. These are never reported as missing changes.
+    pub async fn refresh_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<NodeChange, StorageError> {
+        let node = self.node(workflow_id, node_id).await?;
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let mut rows = connection
+            .query(
+                "SELECT repository_path, change_id FROM node_changes WHERE node_id = ?1",
+                [node_id],
+            )
+            .await
+            .context("reading node change association")?;
+        let Some(row) = rows.next().await.context("reading node change row")? else {
+            return Ok(NodeChange {
+                node,
+                association: None,
+                state: ChangeState::Unassociated,
+            });
+        };
+        let association = ChangeAssociation {
+            repository_path: PathBuf::from(
+                row.get::<String>(0).context("reading jj repository path")?,
+            ),
+            change_id: row.get(1).context("reading jj change ID")?,
+        };
+        let project = self.project_for_node(workflow_id, node_id).await?;
+        let root = jj::repository_root(&project).await?;
+        if root != association.repository_path {
+            return Err(anyhow::anyhow!(
+                "project's jj workspace root changed; explicitly associate the node again"
+            )
+            .into());
+        }
+        let mut revisions = jj::revisions(&root, &association.change_id).await?;
+        let state = match revisions.len() {
+            0 => ChangeState::Missing,
+            1 => ChangeState::Current {
+                revision: revisions.remove(0),
+            },
+            _ => ChangeState::Divergent { revisions },
+        };
+        Ok(NodeChange {
+            node,
+            association: Some(association),
+            state,
+        })
+    }
+
+    async fn project_for_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<PathBuf, StorageError> {
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let mut rows = connection
+            .query(
+                "SELECT w.project_path FROM workflows w JOIN nodes n ON n.workflow_id = w.id
+             WHERE w.id = ?1 AND n.id = ?2",
+                [workflow_id, node_id],
+            )
+            .await
+            .context("reading node project")?;
+        let row = rows
+            .next()
+            .await
+            .context("reading node project row")?
+            .context("node project not found")?;
+        Ok(PathBuf::from(
+            row.get::<String>(0).context("reading project path")?,
+        ))
     }
 
     /// Adds a directed connection while preserving an acyclic workflow graph.

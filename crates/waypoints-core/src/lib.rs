@@ -1,5 +1,6 @@
 //! Headless workflow operations and local persistence for Waypoints.
 
+pub mod jj;
 pub mod storage;
 
 pub fn add(left: u64, right: u64) -> u64 {

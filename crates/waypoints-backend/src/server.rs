@@ -13,8 +13,9 @@ use waypoints_core::storage::Storage;
 
 use crate::config::sidecar;
 use crate::protocol::{
-    ConnectParams, CreateNodeParams, CreateParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
-    ProjectParams, TIMEOUT, UpdateNodeParams, WorkflowParams, read_frame,
+    AssociateParams, ConnectParams, CreateChangeParams, CreateNodeParams, CreateParams, MAX_FRAME,
+    NodeParams, PROTOCOL_VERSION, ProjectParams, TIMEOUT, UpdateNodeParams, WorkflowParams,
+    read_frame,
 };
 use crate::{BackendError, BackendInfo, Config};
 
@@ -201,6 +202,30 @@ async fn dispatch(
                 .node(params.workflow_id, params.node_id)
                 .await
                 .map(|node| json!(node))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.associate" => match parameters::<AssociateParams>(params) {
+            Ok(params) => storage
+                .associate_node(params.workflow_id, params.node_id, &params.change_id)
+                .await
+                .map(|state| json!(state))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.create_change" => match parameters::<CreateChangeParams>(params) {
+            Ok(params) => storage
+                .create_node_change(params.workflow_id, params.node_id, &params.base)
+                .await
+                .map(|state| json!(state))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.refresh" => match parameters::<NodeParams>(params) {
+            Ok(params) => storage
+                .refresh_node(params.workflow_id, params.node_id)
+                .await
+                .map(|state| json!(state))
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },
