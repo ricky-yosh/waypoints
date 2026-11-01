@@ -19,6 +19,10 @@ mod planning;
 mod rename;
 #[path = "backend/restart.rs"]
 mod restart;
+#[path = "backend/restore.rs"]
+mod restore;
+#[path = "backend/revisions.rs"]
+mod revisions;
 #[path = "backend/upstream.rs"]
 mod upstream;
 #[path = "backend/workspace_deletion.rs"]

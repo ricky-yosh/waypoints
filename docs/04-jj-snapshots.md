@@ -54,11 +54,14 @@ The intended history surface exposes multiple native code revisions without
 creating a workflow node for each revision. [Read-only code review](11-backend-cli.md#review-recorded-code-without-snapshotting)
 already exposes current node revisions and exact saved run snapshots, including
 native changed-file summaries and patches without snapshotting dirty files.
-General native revision browsing and explicit historical-code continuation are
-not implemented. Continuing work from an old revision requires an
-explicit native operation whose restore/branch behavior and retention still need
-agreement and validation. Implemented `run continue` loads a saved harness session
-on the current change; it is not historical-code continuation.
+Saved results can now be [restored within the same leaf node/change](21-saved-result-restoration.md).
+Waypoints checkpoints current tracked edits, uses native `jj restore` to produce
+another revision of the same change, and requires a fresh agent session.
+Paginated [native revision history and exact previews](22-native-revision-history.md)
+also include manual revisions, divergence and related squash history.
+The visual picker, arbitrary-revision restoration, and restoration with affected
+downstream work remain unimplemented. `run continue` loads a saved
+harness session on the current change; it does not select historical code.
 
 Native code revisions do not preserve historical prompt text or rewind agent memory. Workflow prompt edits are stored separately; matching a prompt version to a code revision requires an explicit association. If an associated native change disappears, retain the saved node with a missing-change indication rather than deleting the workflow or automatically resurrecting repository history.
 
@@ -76,7 +79,7 @@ failed turns preserve files without an automatic snapshot.
 
 ## Remaining native/product validation
 
-- Define native revision-history browsing beyond saved runs. Current read-only review has automated coverage for bounded output, rewritten/abandoned snapshots, missing native objects, and untouched dirty files.
+- Design the visual revision picker and arbitrary-commit restoration. Native history listing and exact previews now have pagination, branching, bounds, restart, and untouched-dirty-file coverage.
 - Define editing existing multi-parent dependency sets; creation, conflict materialization, and fake-agent execution/snapshot review now have product-path tests.
 - Exercise upstream edits through the complete workflow and define context-staleness behavior separately from native conflicts and stale physical checkouts.
 - Whether Zed shows a phase's diff in a colocated repo (git HEAD pointing at the working copy's parent).

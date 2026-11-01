@@ -76,6 +76,7 @@ impl Storage {
         Ok(async {
             validate_prompt(prompt)?;
             let source = self.run(source_run_id).await?;
+            self.ensure_session_after_restore(&source).await?;
             anyhow::ensure!(
                 matches!(source.state, RunState::Completed | RunState::Cancelled | RunState::Failed { .. } | RunState::Recovered { .. }),
                 "continue requires a stopped run with confirmed cleanup or explicit recovery"

@@ -16,6 +16,10 @@ use waypoints_core::workspace::WorkspaceState;
 mod multiple_parents;
 #[path = "jj/planning.rs"]
 mod planning;
+#[path = "jj/restore.rs"]
+mod restore;
+#[path = "jj/revisions.rs"]
+mod revisions;
 #[path = "jj/upstream.rs"]
 mod upstream;
 #[path = "jj/workspace_deletion.rs"]

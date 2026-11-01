@@ -94,6 +94,24 @@ enum HistoryCommand {
 
 #[derive(Subcommand)]
 enum RunCommand {
+    /// Restore a saved result within the same node/change; preserve tracked edits first.
+    Restore {
+        #[arg(long)]
+        run: i64,
+    },
+    /// List durable restore attempts for a saved run, without modifying files.
+    RestoreStatus {
+        #[arg(long)]
+        run: i64,
+    },
+    /// Release an uncertain restore after manually reconciling native jj state.
+    RecoverRestore {
+        #[arg(long)]
+        operation: i64,
+        /// Attest that all old tools and native jj writers have stopped.
+        #[arg(long, required = true)]
+        confirm_processes_stopped: bool,
+    },
     /// Compare direct upstream revisions with those observed before this run.
     Inputs {
         #[arg(long)]
@@ -225,12 +243,27 @@ enum WorkflowCommand {
 
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Browse native revision history without snapshotting or switching code.
+    Revisions {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
+        page_size: u16,
+        /// Opaque next_cursor from an earlier page; omit to refresh current history.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Review the current recorded native commit, excluding unsnapshotted workspace edits.
     Review {
         #[arg(long)]
         workflow: i64,
         #[arg(long)]
         node: i64,
+        /// Inspect this exact full commit ID instead, without restoring it.
+        #[arg(long)]
+        commit: Option<String>,
     },
     /// Allocate or inspect a dedicated native workspace for this node's change.
     Workspace {
@@ -458,6 +491,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 command,
                 RunCommand::Start { .. }
                     | RunCommand::Continue { .. }
+                    | RunCommand::Restore { .. }
+                    | RunCommand::RestoreStatus { .. }
                     | RunCommand::List { .. }
                     | RunCommand::Status { .. }
                     | RunCommand::Inputs { .. }
@@ -469,6 +504,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 Client::connect(&config).await?
             };
             let value = match command {
+                RunCommand::Restore { run } => {
+                    serde_json::to_value(client.restore_run(run).await?)?
+                }
+                RunCommand::RestoreStatus { run } => {
+                    serde_json::to_value(client.run_restores(run).await?)?
+                }
+                RunCommand::RecoverRestore {
+                    operation,
+                    confirm_processes_stopped,
+                } => {
+                    let confirmation = confirm_processes_stopped
+                        .then_some(waypoints_core::run::RecoveryConfirmation::ProcessesStopped);
+                    serde_json::to_value(client.recover_restore(operation, confirmation).await?)?
+                }
                 RunCommand::Start {
                     workflow,
                     node,
@@ -908,8 +957,60 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         }
                     );
                 }
-                NodeCommand::Review { workflow, node } => {
-                    print_review(client.review_node(workflow, node).await?, args.json)?;
+                NodeCommand::Revisions {
+                    workflow,
+                    node,
+                    page_size,
+                    cursor,
+                } => {
+                    let page = client
+                        .node_revisions(workflow, node, usize::from(page_size), cursor.as_deref())
+                        .await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&page)?);
+                    } else {
+                        println!(
+                            "Change {} — native operation {}",
+                            page.change_id, page.native_operation
+                        );
+                        for entry in &page.entries {
+                            let native = &entry.evolution;
+                            let marker = if entry.is_current {
+                                "current"
+                            } else {
+                                "historical"
+                            };
+                            println!(
+                                "{}  {}  {}",
+                                native.revision.commit_id, marker, native.timestamp
+                            );
+                            println!("  {}", native.operation_description);
+                            if native.revision.change_id != page.change_id {
+                                println!("  Related change: {}", native.revision.change_id);
+                            }
+                            if !entry.run_ids.is_empty() {
+                                println!("  Saved runs: {:?}", entry.run_ids);
+                            }
+                        }
+                        if let Some(cursor) = page.next_cursor {
+                            println!("Next cursor (pass with --cursor): {cursor}");
+                        } else {
+                            println!("End of available native evolution.");
+                        }
+                    }
+                }
+                NodeCommand::Review {
+                    workflow,
+                    node,
+                    commit,
+                } => {
+                    let review = match commit {
+                        Some(commit) => {
+                            client.review_node_revision(workflow, node, &commit).await?
+                        }
+                        None => client.review_node(workflow, node).await?,
+                    };
+                    print_review(review, args.json)?;
                 }
                 NodeCommand::Refresh { workflow, node } => {
                     let status = client.refresh_node(workflow, node).await?;

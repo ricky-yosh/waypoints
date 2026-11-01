@@ -142,6 +142,9 @@ Rules:
 - Select the latest run for that session. Continuing an older run is not a
   conversation fork or rollback; Waypoints refuses it and names the newer run.
   The harness may also have changed its session history outside Waypoints.
+- [Restoring a saved result](21-saved-result-restoration.md) bars continuation of
+  every pre-existing session on that node. Explicitly start a fresh session;
+  selecting old code never silently rewinds agent memory.
 - The same executable path, workspace directory, and jj change are reused.
   Read-only checkout verification runs again; dirty local edits are allowed.
   A changed node association or externally switched workspace is refused rather

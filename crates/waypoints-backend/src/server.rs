@@ -15,10 +15,11 @@ use crate::config::sidecar;
 use crate::protocol::{
     AdoptRootsParams, AssociateParams, ConnectParams, ContinueRunParams, CreateChangeParams,
     CreateNodeParams, CreateParams, CreateWorkspaceParams, DeleteNodeParams,
-    DependencyOperationParams, HistoryParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
-    PermissionParams, ProjectParams, RecoverDependencyParams, RecoverRunParams,
-    RenameWorkflowParams, ReparentParams, RunEventsParams, RunParams, StartRunParams, TIMEOUT,
-    UpdateNodeParams, WorkflowBaseParams, WorkflowParams, read_frame,
+    DependencyOperationParams, HistoryParams, MAX_FRAME, NodeParams, NodeRevisionReviewParams,
+    NodeRevisionsParams, PROTOCOL_VERSION, PermissionParams, ProjectParams,
+    RecoverDependencyParams, RecoverRunParams, RenameWorkflowParams, ReparentParams,
+    RunEventsParams, RunParams, StartRunParams, TIMEOUT, UpdateNodeParams, WorkflowBaseParams,
+    WorkflowParams, read_frame,
 };
 use crate::runs::Runs;
 use crate::{BackendError, BackendInfo, Config};
@@ -539,11 +540,56 @@ async fn dispatch(
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },
+        "node.revisions" => match parameters::<NodeRevisionsParams>(params) {
+            Ok(params) => storage
+                .node_revisions(
+                    params.workflow_id,
+                    params.node_id,
+                    params.page_size,
+                    params.cursor.as_deref(),
+                )
+                .await
+                .map(|page| json!(page))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.revision_review" => match parameters::<NodeRevisionReviewParams>(params) {
+            Ok(params) => storage
+                .review_node_revision(params.workflow_id, params.node_id, &params.commit_id)
+                .await
+                .map(|review| json!(review))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
         "node.review" => match parameters::<NodeParams>(params) {
             Ok(params) => storage
                 .review_node(params.workflow_id, params.node_id)
                 .await
                 .map(|review| json!(review))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.restore" => match parameters::<RunParams>(params) {
+            Ok(params) => storage
+                .restore_run(params.run_id)
+                .await
+                .map(|operation| json!(operation))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.restore_status" => match parameters::<RunParams>(params) {
+            Ok(params) => storage
+                .run_restores(params.run_id)
+                .await
+                .map(|operations| json!(operations))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.recover_restore" => match parameters::<RecoverDependencyParams>(params) {
+            Ok(params) => storage
+                .recover_restore(params.operation_id, params.confirmation)
+                .await
+                .map(|operation| json!(operation))
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },

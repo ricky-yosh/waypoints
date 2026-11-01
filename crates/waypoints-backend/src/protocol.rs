@@ -26,6 +26,8 @@ pub(crate) fn request_timeout(method: &str) -> Duration {
             | "node.reparent_recovery"
             | "node.recover_reparent"
             | "node.resume_deletion"
+            | "run.restore"
+            | "run.recover_restore"
     ) {
         Duration::from_secs(120)
     } else {
@@ -99,6 +101,23 @@ pub(crate) struct RenameWorkflowParams {
 pub(crate) struct NodeParams {
     pub workflow_id: i64,
     pub node_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NodeRevisionsParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub page_size: usize,
+    pub cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NodeRevisionReviewParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub commit_id: String,
 }
 
 #[derive(Deserialize)]

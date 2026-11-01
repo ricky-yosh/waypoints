@@ -15,7 +15,8 @@ completed research from validation still needed.
 3. **jj workflow — partially verified.** Changes, separate workspaces, rewrites,
    abandonment, conflicts, and interrupted-operation recovery have executable
    coverage, including read-only current-node/saved-run diffs and native multi-parent
-   creation with fake-agent execution. Editing merge-parent sets, general revision-history browsing, and the
+   creation with fake-agent execution, plus paginated native evolution and exact
+   previews. Editing merge-parent sets, a visual revision picker, and the
    complete upstream-edit acceptance workflow remain incomplete. Editor handoff
    behavior still needs validation.
 4. **Turso — persistence foundation implemented.** Reopen, additive upgrades,
@@ -52,9 +53,11 @@ every step is available today. Individual feature tests do not replace it.
 - Reopen after backend restart; verify reconnect/refresh and persistent metadata
   undo/redo without code or conversation rewind.
 - Inspect native diffs for current node revisions and exact saved run snapshots.
-- **Not yet complete:** browse general native revision history and explicitly
-  continue from a chosen old code revision. Same-session `run continue` is not
-  this feature.
+- Browse [native revision history](22-native-revision-history.md) through the
+  CLI/backend. Restore eligible saved results within the same leaf change;
+  this passed [manual Codex acceptance](21-saved-result-restoration.md#manual-codex-acceptance).
+  A visual picker and arbitrary-commit restoration remain incomplete.
+  Same-session `run continue` is not code restoration.
 - **Not yet complete:** edit upstream work and surface native ancestry mismatch,
   stale physical checkouts, native conflicts, and stale agent context distinctly.
 - Combine branch results through native multi-parent creation, with clean/conflicted
@@ -70,7 +73,7 @@ No MCP adapter, transcript archive, or durable notification replay is required. 
 
 ## Open questions
 
-- Which native jj operations and retention rules support browsing and explicitly continuing from historical node revisions without inventing another snapshot system?
+- How should the visual picker, arbitrary-commit restoration and native retention limits be exposed beyond implemented native browsing and saved-result restoration?
 - Does the Claude ACP adapter emit diff content for edits?
 - Which agents in practice support resume, load, or fork, and does a session survive a change of working directory?
 - Does Zed show a phase's diff correctly in a colocated jj repo?

@@ -137,6 +137,7 @@ impl Storage {
     }
 
     pub(super) async fn ensure_dependency_operations_clear(&self) -> anyhow::Result<()> {
+        self.ensure_restores_clear().await?;
         let connection = self.database.connect()?;
         let mut rows = connection
             .query(

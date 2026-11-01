@@ -11,6 +11,10 @@ use tokio::time::timeout;
 
 use crate::workflow::BaseSource;
 
+mod evolution;
+pub use evolution::RevisionEvolution;
+pub(crate) use evolution::{evolution_heads, evolution_page, validate_commit_id};
+
 /// A saved association with an evolving native change, not a frozen commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -469,6 +473,77 @@ pub(crate) async fn snapshot_workspace(
         "snapshot did not retain the run's change; inspect native jj state"
     );
     Ok(revision)
+}
+
+pub(crate) async fn same_tree(
+    repository: &Path,
+    first: &Revision,
+    second: &Revision,
+) -> anyhow::Result<bool> {
+    Ok(query(
+        repository,
+        &[
+            "diff",
+            "--from",
+            &first.commit_id,
+            "--to",
+            &second.commit_id,
+            "--summary",
+        ],
+    )
+    .await?
+    .is_empty())
+}
+
+pub(crate) async fn restore_workspace(
+    workspace: &crate::workspace::WorkspaceAssociation,
+    source: &Revision,
+    expected: &Revision,
+) -> anyhow::Result<Revision> {
+    anyhow::ensure!(
+        current_revision(&workspace.directory).await? == *expected
+            && checked_out_revision(&workspace.directory).await? == *expected,
+        "workspace changed before restoring; no restore attempted"
+    );
+    let output = run_command(
+        &workspace.directory,
+        &[
+            "--at-op=@",
+            "--quiet",
+            "--config",
+            "snapshot.auto-update-stale=false",
+            "restore",
+            "--from",
+            &source.commit_id,
+            "--into",
+            "@",
+        ],
+        WorkingCopy::Update,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    anyhow::ensure!(
+        output.stderr.is_empty(),
+        "jj restore reported diagnostics; inspect files and native jj state: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let restored = current_revision(&workspace.directory).await?;
+    anyhow::ensure!(
+        restored.change_id == expected.change_id
+            && restored.description == expected.description
+            && parent_commit_ids(&workspace.directory, &restored.commit_id).await?
+                == parent_commit_ids(&workspace.directory, &expected.commit_id).await?,
+        "restore changed native identity or parents; inspect native jj state"
+    );
+    anyhow::ensure!(
+        same_tree(&workspace.directory, source, &restored).await?,
+        "restored tree differs from selected saved result; inspect native jj state"
+    );
+    anyhow::ensure!(
+        checked_out_revision(&workspace.directory).await? == restored,
+        "restore checkout did not finish; inspect native jj state"
+    );
+    Ok(restored)
 }
 
 pub(crate) async fn checked_out_revision(repository: &Path) -> anyhow::Result<Revision> {

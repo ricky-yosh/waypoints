@@ -658,6 +658,48 @@ impl Client {
         .await
     }
 
+    /// Lists a bounded, operation-pinned page of a node's native evolution.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid selectors/cursors, missing history or native/transport failures.
+    pub async fn node_revisions(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        page_size: usize,
+        cursor: Option<&str>,
+    ) -> Result<waypoints_core::storage::NodeRevisionPage, BackendError> {
+        self.call(
+            "node.revisions",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id,
+                "page_size": page_size, "cursor": cursor,
+            }),
+        )
+        .await
+    }
+
+    /// Previews one exact commit in the node's associated repository without changing code.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid IDs, unavailable commits or native/storage/transport failures.
+    pub async fn review_node_revision(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        commit_id: &str,
+    ) -> Result<waypoints_core::jj::RevisionReview, BackendError> {
+        self.call(
+            "node.revision_review",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id, "commit_id": commit_id,
+            }),
+        )
+        .await
+    }
+
     /// Reviews the exact snapshot saved by a run, including historical node runs.
     ///
     /// # Errors
@@ -668,6 +710,50 @@ impl Client {
         run_id: i64,
     ) -> Result<waypoints_core::jj::RevisionReview, BackendError> {
         self.call("run.review", json!({"run_id": run_id})).await
+    }
+
+    /// Restores a saved result within its node/change, preserving current tracked edits first.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsafe state or native/storage/transport failures; never retry blindly.
+    pub async fn restore_run(
+        &self,
+        run_id: i64,
+    ) -> Result<waypoints_core::storage::RestoreOperation, BackendError> {
+        self.call("run.restore", json!({"run_id": run_id})).await
+    }
+
+    /// Lists durable restore attempts for one saved run without modifying files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing run or storage/transport failure.
+    pub async fn run_restores(
+        &self,
+        run_id: i64,
+    ) -> Result<Vec<waypoints_core::storage::RestoreOperation>, BackendError> {
+        self.call("run.restore_status", json!({"run_id": run_id}))
+            .await
+    }
+
+    /// Releases an uncertain restore after explicit stopped-writer confirmation and checkout checks.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsafe state, missing confirmation or native/storage/transport failures.
+    pub async fn recover_restore(
+        &self,
+        operation_id: i64,
+        confirmation: Option<waypoints_core::run::RecoveryConfirmation>,
+    ) -> Result<waypoints_core::storage::RestoreOperation, BackendError> {
+        self.call(
+            "run.recover_restore",
+            json!({
+                "operation_id": operation_id, "confirmation": confirmation,
+            }),
+        )
+        .await
     }
 
     /// Explicitly continues an abandoned deletion by deregistering its workspace, keeping all files.

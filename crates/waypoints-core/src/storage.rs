@@ -15,7 +15,9 @@ mod bases;
 mod dependencies;
 mod history;
 mod reparent;
+mod restore;
 mod review;
+mod revisions;
 mod runs;
 mod upstream;
 mod workspaces;
@@ -25,6 +27,8 @@ pub use reparent::{
     DeletionWorkspace, DependencyOperation, DependencyOperationKind, DependencyOperationState,
     DependencyRecovery, DependencyRecoveryAssessment, UndoBoundaryAcknowledgement,
 };
+pub use restore::{RestoreOperation, RestoreState};
+pub use revisions::{NodeRevisionEntry, NodeRevisionPage};
 
 /// A workflow saved for a canonical project directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +229,7 @@ impl Storage {
         storage.initialize_bases().await?;
         storage.initialize_dependencies().await?;
         storage.initialize_dependency_operations().await?;
+        storage.initialize_restores().await?;
         Ok(storage)
     }
 
@@ -609,29 +614,12 @@ impl Storage {
         node_id: i64,
     ) -> Result<NodeChange, StorageError> {
         let node = self.node(workflow_id, node_id).await?;
-        let connection = self
-            .database
-            .connect()
-            .context("connecting to workflow database")?;
-        let mut rows = connection
-            .query(
-                "SELECT repository_path, change_id FROM node_changes WHERE node_id = ?1",
-                [node_id],
-            )
-            .await
-            .context("reading node change association")?;
-        let Some(row) = rows.next().await.context("reading node change row")? else {
+        let Some(association) = self.node_change_association(node_id).await? else {
             return Ok(NodeChange {
                 node,
                 association: None,
                 state: ChangeState::Unassociated,
             });
-        };
-        let association = ChangeAssociation {
-            repository_path: PathBuf::from(
-                row.get::<String>(0).context("reading jj repository path")?,
-            ),
-            change_id: row.get(1).context("reading jj change ID")?,
         };
         let project = self.project_for_node(workflow_id, node_id).await?;
         let root = jj::repository_root(&project).await?;
@@ -654,6 +642,33 @@ impl Storage {
             association: Some(association),
             state,
         })
+    }
+
+    async fn node_change_association(
+        &self,
+        node_id: i64,
+    ) -> anyhow::Result<Option<ChangeAssociation>> {
+        let connection = self
+            .database
+            .connect()
+            .context("connecting to workflow database")?;
+        let mut rows = connection
+            .query(
+                "SELECT repository_path, change_id FROM node_changes WHERE node_id = ?1",
+                [node_id],
+            )
+            .await
+            .context("reading node change association")?;
+        let Some(row) = rows.next().await.context("reading node change row")? else {
+            return Ok(None);
+        };
+        let association = ChangeAssociation {
+            repository_path: PathBuf::from(
+                row.get::<String>(0).context("reading jj repository path")?,
+            ),
+            change_id: row.get(1).context("reading jj change ID")?,
+        };
+        Ok(Some(association))
     }
 
     async fn project_for_node(
