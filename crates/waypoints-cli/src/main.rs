@@ -2,6 +2,7 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -407,7 +408,24 @@ enum BackendCommand {
     Stop,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
+    match run_cli() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            if error
+                .downcast_ref::<waypoints_backend::BackendError>()
+                .is_some_and(|error| error.is_ownership_unavailable())
+            {
+                ExitCode::from(waypoints_backend::OWNERSHIP_UNAVAILABLE_EXIT_CODE)
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run_cli() -> anyhow::Result<()> {
     let args = Args::parse();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

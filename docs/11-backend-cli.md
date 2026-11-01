@@ -483,6 +483,14 @@ launch competing processes, but only one opens the database; the others exit and
 their clients connect to the winner. Lock files are deliberately never unlinked.
 Locks release when the process exits, including after a crash.
 
+`serve` reports lock contention with exit status 75. If a starter exits with that
+status and the socket is still missing or refused, its client may launch another
+starter, at most once every 250 ms, within the original five-second startup
+deadline. This covers ownership being released after an earlier starter lost the
+lock. Other startup failures are reported without relaunching; neither requests
+nor workflow mutations are replayed. Readiness checks after relaunch share the
+same deadline, and a live listener still prevents replacement.
+
 A stale socket is removed only after acquiring both ownership locks and checking
 that it refuses connections. A regular file, symlink, or live listener at that path
 is not removed. `backend status` and `backend stop` do not start a backend.

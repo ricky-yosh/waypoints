@@ -18,10 +18,25 @@ pub use server::serve;
 use std::error::Error;
 use std::fmt;
 
+/// Exit status used by `waypoints serve` when an ownership lock is already held.
+///
+/// Auto-start clients may retry this temporary failure within their startup deadline.
+pub const OWNERSHIP_UNAVAILABLE_EXIT_CODE: u8 = 75;
+
 /// A backend startup, transport, or request failure.
 #[derive(Debug)]
 pub struct BackendError {
     inner: anyhow::Error,
+}
+
+impl BackendError {
+    /// Whether startup was refused because another process holds an ownership lock.
+    pub fn is_ownership_unavailable(&self) -> bool {
+        matches!(
+            self.inner.downcast_ref::<std::fs::TryLockError>(),
+            Some(std::fs::TryLockError::WouldBlock)
+        )
+    }
 }
 
 impl fmt::Display for BackendError {

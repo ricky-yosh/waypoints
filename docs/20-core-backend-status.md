@@ -96,7 +96,10 @@ partially satisfied; see [acceptance checklist](07-spikes-and-build-order.md#hea
 Do not substitute saved-session continuation for historical-code continuation,
 or native conflict flags for context-staleness tracking, when reporting completion.
 
-An intermittent backend restart/ownership-lock startup failure has been observed
-in existing tests and was explicitly deferred. No startup fix is implied by the
-native editing/recovery features. Serialized native requests can also delay run
-controls; this is a documented limit, not a general concurrency guarantee.
+An ownership-handoff startup failure is now covered by a deterministic regression:
+the same pending request can start successfully when a previously unavailable
+ownership lock is released. Clients retry only a starter's explicit lock-contention
+exit status, within the original deadline; see [lifecycle](11-backend-cli.md#lifecycle).
+This closes the reproduced handoff gap, not proof that every previously observed
+intermittent restart failure had that cause. Serialized native requests can also
+delay run controls; this is a documented limit, not a general concurrency guarantee.

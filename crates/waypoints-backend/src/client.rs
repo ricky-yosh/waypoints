@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 use waypoints_core::run::{RecoveryConfirmation, RunRecovery};
 use waypoints_core::storage::{
     Connection, DependencyOperation, DependencyRecovery, HistoryStatus, Node, NodeChange,
@@ -21,8 +21,11 @@ use waypoints_core::workspace::NodeWorkspace;
 
 use crate::config::sidecar;
 use crate::protocol::{MAX_FRAME, PROTOCOL_VERSION, TIMEOUT, read_frame};
-use crate::{BackendError, BackendInfo, Config};
+use crate::{BackendError, BackendInfo, Config, OWNERSHIP_UNAVAILABLE_EXIT_CODE};
 use crate::{RunEvents, RunStatus};
+
+// Limit competing process launches while an old backend is releasing ownership.
+const STARTUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A client that talks only to the local backend, never directly to its database.
 #[derive(Debug)]
@@ -50,6 +53,8 @@ impl Client {
     /// Only missing or refused sockets trigger startup. A live but unresponsive or
     /// incompatible backend is reported as an error. Concurrent starters are safe:
     /// the server acquires ownership locks before opening the database.
+    /// Starters that exit due to lock contention may be retried within the same
+    /// startup deadline; requests themselves are never replayed.
     ///
     /// # Errors
     ///
@@ -78,7 +83,8 @@ impl Client {
             .mode(0o600)
             .open(&log_path)
             .context("opening backend startup log")?;
-        let mut child = Command::new(executable)
+        let mut starter = Command::new(executable);
+        starter
             .arg("--database")
             .arg(&config.database)
             .arg("--socket")
@@ -88,30 +94,52 @@ impl Client {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(log)
-            .process_group(0)
-            .spawn()
-            .context("starting backend executable")?;
+            .process_group(0);
+        let mut child = starter.spawn().context("starting backend executable")?;
         let deadline = Instant::now() + TIMEOUT;
+        let mut next_start = Instant::now() + STARTUP_RETRY_DELAY;
         loop {
             // Reap a losing starter if another process won the ownership lock.
-            let _ = child.try_wait().context("checking backend startup")?;
-            match UnixStream::connect(&config.socket).await {
-                Ok(stream) => return Ok(Self::from_stream(config, stream).await?),
-                Err(error) if unavailable(&error) => {}
-                Err(error) => {
+            let exited = child.try_wait().context("checking backend startup")?;
+            match timeout_at(deadline, UnixStream::connect(&config.socket)).await {
+                Ok(Ok(stream)) => {
+                    return Ok(timeout_at(deadline, Self::from_stream(config, stream))
+                        .await
+                        .context("backend readiness timed out")??);
+                }
+                Ok(Err(error)) if unavailable(&error) => {}
+                Ok(Err(error)) => {
                     return Err(anyhow::Error::new(error)
                         .context("connecting to backend")
                         .into());
                 }
+                Err(_) => break,
             }
             if Instant::now() >= deadline {
-                return Err(anyhow::anyhow!(
-                    "backend did not become ready; inspect {} (another backend may own this database)",
-                    log_path.display()
-                ).into());
+                break;
+            }
+            if let Some(status) = exited {
+                if status.code() != Some(i32::from(OWNERSHIP_UNAVAILABLE_EXIT_CODE)) {
+                    return Err(anyhow::anyhow!(
+                        "backend exited during startup ({status}); inspect {}",
+                        log_path.display()
+                    )
+                    .into());
+                }
+                // Check for a winner above before launching again. Never extend
+                // the deadline, overlap our own starters, or bypass their locks.
+                if Instant::now() >= next_start {
+                    child = starter.spawn().context("restarting backend executable")?;
+                    next_start = Instant::now() + STARTUP_RETRY_DELAY;
+                }
             }
             sleep(std::time::Duration::from_millis(25)).await;
         }
+        Err(anyhow::anyhow!(
+            "backend did not become ready; inspect {} (another backend may own this database)",
+            log_path.display()
+        )
+        .into())
     }
 
     async fn from_stream(config: &Config, stream: UnixStream) -> anyhow::Result<Self> {
