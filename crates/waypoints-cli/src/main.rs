@@ -243,6 +243,42 @@ enum WorkflowCommand {
 
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Apply a saved impact preview: checkpoint edits, restore source and rebase checked descendants.
+    RestoreWithDescendants {
+        /// JSON file returned by node restore-impact --json; compared against a fresh report.
+        #[arg(long)]
+        preview: PathBuf,
+        /// Accept code rebasing, stale descendant checkouts, and fresh-session requirements.
+        #[arg(long, required = true)]
+        confirm_restore_and_rebase: bool,
+    },
+    /// Preview restore impact without restoring, rebasing, snapshotting, or rerunning tasks.
+    RestoreImpact {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        /// Full lowercase commit ID of a revision in this node's change.
+        #[arg(long)]
+        commit: String,
+    },
+    /// Restore an exact commit within this node/change; checkpoint tracked edits first.
+    Restore {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        /// Full lowercase commit ID, not a change ID, prefix or revset.
+        #[arg(long)]
+        commit: String,
+    },
+    /// Inspect saved-run and exact-commit restoration attempts without changing files.
+    Restores {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
     /// Browse native revision history without snapshotting or switching code.
     Revisions {
         #[arg(long)]
@@ -954,6 +990,71 @@ async fn run(args: Args) -> anyhow::Result<()> {
                             serde_json::to_string(&value)?
                         } else {
                             serde_json::to_string_pretty(&value)?
+                        }
+                    );
+                }
+                NodeCommand::RestoreWithDescendants {
+                    preview,
+                    confirm_restore_and_rebase,
+                } => {
+                    let preview = serde_json::from_slice::<waypoints_core::storage::RestoreImpact>(
+                        &std::fs::read(&preview).context("reading saved restore-impact JSON")?,
+                    )
+                    .context("decoding saved restore-impact JSON; refresh older previews")?;
+                    let operation = client.restore_node_with_descendants(
+                        &preview, confirm_restore_and_rebase.then_some(
+                            waypoints_core::storage::RestoreRebaseConfirmation::RestoreAndRebase,
+                        ),
+                    ).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&operation)?
+                        } else {
+                            serde_json::to_string_pretty(&operation)?
+                        }
+                    );
+                }
+                NodeCommand::RestoreImpact {
+                    workflow,
+                    node,
+                    commit,
+                } => {
+                    let impact = client.node_restore_impact(workflow, node, &commit).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&impact)?
+                        } else {
+                            serde_json::to_string_pretty(&impact)?
+                        }
+                    );
+                }
+                NodeCommand::Restore {
+                    workflow,
+                    node,
+                    commit,
+                } => {
+                    let operation = client
+                        .restore_node_revision(workflow, node, &commit)
+                        .await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&operation)?
+                        } else {
+                            serde_json::to_string_pretty(&operation)?
+                        }
+                    );
+                }
+                NodeCommand::Restores { workflow, node } => {
+                    let operations = client.node_restores(workflow, node).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&operations)?
+                        } else {
+                            serde_json::to_string_pretty(&operations)?
                         }
                     );
                 }

@@ -12,8 +12,12 @@ use tokio::time::timeout;
 use crate::workflow::BaseSource;
 
 mod evolution;
+mod restore_impact;
 pub use evolution::RevisionEvolution;
 pub(crate) use evolution::{evolution_heads, evolution_page, validate_commit_id};
+pub(crate) use restore_impact::{
+    ImpactRevision, ImpactWorkspace, impact_revisions, impact_tree_changed, impact_workspaces,
+};
 
 /// A saved association with an evolving native change, not a frozen commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

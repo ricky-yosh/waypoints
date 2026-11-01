@@ -34,7 +34,9 @@ than copying them into every overview.
 | Dedicated workspaces | Explicit on-demand allocation and read-only status/verification; no automatic stale-checkout repair or cleanup | [Workspaces](11-backend-cli.md#allocate-a-nodes-editing-workspace) |
 | ACP runs and continuation | Trusted executable, verified workspace, bounded polling, explicit permissions/cancellation, fresh sessions or same-session follow-up | [Run lifecycle](13-agent-run-lifecycle.md) |
 | Automatic successful-turn snapshots | Save an exact native revision and separate snapshot outcome; failure/cancellation preserves files without an automatic snapshot | [Revision recording](13-agent-run-lifecycle.md#automatic-revision-recording) |
-| Saved-result restoration | Restore saved code within the same leaf node/change; checkpoint tracked edits first; fresh agent session required; no downstream rebasing | [Restoration](21-saved-result-restoration.md) |
+| Same-change restoration | Restore a saved run or exact same-change commit, including manual revisions/checkpoints; preserve tracked edits first; fresh session required; no downstream rebasing | [Restoration](21-saved-result-restoration.md) |
+| Confirmed downstream restoration | Fresh equal preview and explicit confirmation; checkpoint allocated workspaces leaf-first; same-workflow native-aligned subtree rebasing; conflicts visible, descendant checkouts left stale, all old affected sessions barred | [Downstream restoration](24-downstream-restoration.md) |
+| Readonly restore impact | Native/graph downstream tasks, merge/external work, workspaces, sessions and known blockers; no conflict simulation or downstream application | [Restore impact](23-restore-impact.md) |
 | Informational upstream hint | Best-effort per-turn direct graph revisions; changed/unchanged/unknown comparison for users, never agent context or execution policy | [Upstream inputs](13-agent-run-lifecycle.md#informational-upstream-hint) |
 | Interrupted-run recovery | Explicit stopped-writer attestation and fresh workspace checks; no process discovery, prompt replay, or lost-snapshot reconstruction | [Run recovery](13-agent-run-lifecycle.md#recovering-interrupted-runs) |
 | Metadata undo/redo | Chronological per canonical project folder; workflow renaming, node creation/initial attachment, prompt edits, legacy connection creation, prompt-only move/delete; never code/conversation rewind | [Workflow history](14-workflow-history.md) |
@@ -56,7 +58,8 @@ multiple project folders. Clients never open the store directly.
   prove current native ancestry, fresh physical checkouts, or fresh agent context.
 - **Session continuation versus code history:** `run continue` loads the latest
   eligible saved harness session; it does not select an old native commit.
-  `run restore` restores saved code and bars old-session continuation on that node.
+  `run restore` or `node restore --commit` restores code and bars old-session
+  continuation on that node.
 - **Tool permission versus review approval:** implemented ACP permissions control
   offered tool requests. A completed run/saved snapshot is not human approval of
   the code or a workflow review gate.
@@ -72,14 +75,14 @@ These are documented gaps, **not newly approved work or a priority order**.
 
 | Area | What is still missing or undecided |
 |---|---|
-| History UI and broader restoration | Visual revision picker; restoring arbitrary revisions/checkpoints or code with affected downstream work beyond implemented leaf saved-result restoration |
-| Broader downstream staleness | Beyond the direct upstream-revision hint: causal/transitive input tracking, graph/native mismatch, stale checkout, stale agent reasoning, and any acknowledgement/resolution policy |
+| History UI and broader restoration | Visual revision picker; cross-workflow/unmanaged affected work and cross-change/changed-parent restoration beyond implemented leaf and checked same-workflow downstream restoration |
+| Broader downstream staleness | Beyond the direct upstream hint, restore-impact report and restore-specific session barriers: causal/transitive input tracking, general graph/native reconciliation, stale agent reasoning, and broader acknowledgement/resolution policy |
 | Workspace folder cleanup | Optional filesystem cleanup beyond implemented deregistration; retained folders, ignored/untracked files, and interrupted removal policies |
 | Editing combined branches | Changing an existing merge's parent set; richer per-input review and conflict-resolution policy beyond native conflict flags, materialized markers, and current node/run review |
 | Broader reconciliation | External jj changes, native-associated legacy adoption, cross-workflow affected work, and ambiguous operation outcomes |
 | Base and project/workflow management | Explicit base updates, whether new workflows should require/default a base, project registration, and broader workflow management |
 | Review and execution policy | Human review gates distinct from tool permissions; context handoff between phases; additional agent configuration/capability support |
-| Operational durability and portability | A documented backup/restore workflow, non-additive schema/history upgrades, repository relocation/replacement, and whether portable workflow import/export is wanted |
+| Operational durability and portability | A documented backup/restore workflow, broader schema/history upgrade and downgrade policy beyond the targeted restore-journal migration, repository relocation/replacement, and whether portable workflow import/export is wanted |
 | Control responsiveness | Whether serialized long native operations delaying cancellation/permission requests is acceptable, or requires a different scheduling design |
 | GUI | Backend integration and product UI remain pending; GUI work must not introduce a separate workflow engine |
 

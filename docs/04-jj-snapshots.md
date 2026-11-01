@@ -26,8 +26,8 @@ Successful agent turns now automatically snapshot their dedicated workspace and
 record an exact revision before releasing the run reservation. Native snapshot
 failures are distinct from agent failures; cancelled/failed turns are not
 automatically snapshotted. See [run finalization](13-agent-run-lifecycle.md#automatic-revision-recording).
-The model below remains the broader design, not a claim that history navigation,
-downstream staleness, or workflow-level checkpoints are implemented.
+The model below remains the broader design, not a claim that the visual history
+picker, general downstream staleness, or workflow-level checkpoints are implemented.
 
 ## Model
 
@@ -44,7 +44,7 @@ existing merge's parent set and safe filesystem cleanup remain pending.
 - Parallel phases are sibling changes on the same parent.
 - Simultaneous editing of different nodes needs separate working directories: allocate jj workspaces on demand. Idle nodes and browsing historical revisions do not each require a permanent workspace. Two agents editing different code states must not share one folder.
 - Combining parallel results is explicit: for a native merge, create a change with the selected results as parents. jj stores conflicts inside the commit instead of blocking, so a conflicted merge is a state clients can show.
-- Editing an earlier phase can cause jj to rebase descendants. Native conflict flags are queryable now; marking downstream agent context stale and displaying badges remain product work.
+- Editing an earlier phase can cause jj to rebase descendants. Native conflict flags are queryable now; checked downstream restoration bars old affected sessions and reports stale checkouts. General context-staleness tracking and UI badges remain product work.
 - A change ID normally follows evolving work across rewrites; a commit ID identifies one exact revision. Divergence can give a change ID multiple visible revisions and requires an explicit choice.
 - jj's operation log supports repository recovery, not undo of workflow metadata, conversations, or external side effects. Workflow edits have their own transactional undo history.
 
@@ -59,8 +59,14 @@ Waypoints checkpoints current tracked edits, uses native `jj restore` to produce
 another revision of the same change, and requires a fresh agent session.
 Paginated [native revision history and exact previews](22-native-revision-history.md)
 also include manual revisions, divergence and related squash history.
-The visual picker, arbitrary-revision restoration, and restoration with affected
-downstream work remain unimplemented. `run continue` loads a saved
+Exact same-change commits, including manual edits/checkpoints, can also be selected
+for restoration without a saved run. The visual picker remains unimplemented.
+[Confirmed same-workflow downstream restoration](24-downstream-restoration.md)
+now checkpoints allocated workspaces, rebases native-aligned descendants,
+and bars old affected sessions without rerunning tasks or repairing stale checkouts.
+A [readonly restore-impact report](23-restore-impact.md)
+lists potential downstream changes/tasks, workspaces and session references
+without predicting future conflicts or changing code. `run continue` loads a saved
 harness session on the current change; it does not select historical code.
 
 Native code revisions do not preserve historical prompt text or rewind agent memory. Workflow prompt edits are stored separately; matching a prompt version to a code revision requires an explicit association. If an associated native change disappears, retain the saved node with a missing-change indication rather than deleting the workflow or automatically resurrecting repository history.
@@ -79,7 +85,7 @@ failed turns preserve files without an automatic snapshot.
 
 ## Remaining native/product validation
 
-- Design the visual revision picker and arbitrary-commit restoration. Native history listing and exact previews now have pagination, branching, bounds, restart, and untouched-dirty-file coverage.
+- Design the visual revision picker and broader downstream reconciliation policy. Native history listing, exact previews, same-change restoration and checked same-workflow downstream application have headless coverage.
 - Define editing existing multi-parent dependency sets; creation, conflict materialization, and fake-agent execution/snapshot review now have product-path tests.
 - Exercise upstream edits through the complete workflow and define context-staleness behavior separately from native conflicts and stale physical checkouts.
 - Whether Zed shows a phase's diff in a colocated repo (git HEAD pointing at the working copy's parent).

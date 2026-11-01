@@ -1,6 +1,279 @@
 use super::*;
 
 #[test]
+fn exact_commit_cli_restores_manual_edits_and_checkpoints_without_faking_agent_runs()
+-> anyhow::Result<()> {
+    let (fixture, agent, workspace) = run_fixture("remember exact restore")?;
+    let started = start_run(&fixture, &agent)?;
+    let run_id = started["run"]["id"].to_string();
+    let completed = wait_run(&fixture, &run_id, "completed")?;
+    fs::write(workspace.join("manual.txt"), "selected manual version\n")?;
+    jj(&workspace, &["describe", "-m", "Manual revision"])?;
+    let selected = recorded_commit(&workspace)?;
+    let preview = fixture.success(&[
+        "node",
+        "review",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--commit",
+        &selected,
+    ])?;
+    fs::write(workspace.join("manual.txt"), "unsaved later version\n")?;
+    fs::write(workspace.join("extra.txt"), "checkpoint\n")?;
+    let graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    let project = fixture.directory.path().join("project");
+    let original = recorded_commit(&project)?;
+    for (params, code) in [
+        (json!({"workflow_id":1,"node_id":1,"commit_id":"@"}), -32000),
+        (
+            json!({"workflow_id":1,"node_id":1,"commit_id":selected[..12]}),
+            -32000,
+        ),
+        (
+            json!({"workflow_id":1,"node_id":1,"commit_id":selected,"force":true}),
+            -32602,
+        ),
+        (json!({"workflow_id":1,"node_id":1,"commit_id":42}), -32602),
+        (json!({"workflow_id":1,"node_id":1}), -32602),
+    ] {
+        let response = fixture.rpc(
+            format!(
+                "{}\n",
+                json!({
+                    "jsonrpc":"2.0","id":1,"method":"node.restore_revision","params":params,
+                })
+            )
+            .as_bytes(),
+        )?;
+        assert_eq!(response["error"]["code"], code, "{response}");
+    }
+    assert_eq!(
+        fixture.success(&["node", "restores", "--workflow", "1", "--node", "1"])?,
+        json!([])
+    );
+    fixture.stop()?;
+    let restored = fixture.success(&[
+        "node",
+        "restore",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--commit",
+        &selected,
+    ])?;
+    assert_eq!(restored["state"], "completed");
+    assert!(restored["run_id"].is_null());
+    assert_eq!(restored["source"], preview["revision"]);
+    assert_eq!(restored["after"]["change_id"], started["run"]["change_id"]);
+    assert_eq!(
+        fs::read_to_string(workspace.join("manual.txt"))?,
+        "selected manual version\n"
+    );
+    assert!(!workspace.join("extra.txt").exists());
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        graph
+    );
+    assert_eq!(recorded_commit(&project)?, original);
+    assert_eq!(
+        fixture.success(&["run", "status", "--run", &run_id])?["run"],
+        completed["run"]
+    );
+    assert_eq!(
+        fixture.success(&["run", "restore-status", "--run", &run_id])?,
+        json!([])
+    );
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "run",
+                "continue",
+                "--run",
+                &run_id,
+                "--prompt",
+                "old history must be refused",
+            ])
+            .output()?
+            .status
+            .success()
+    );
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["node", "restores", "--workflow", "1", "--node", "1"])?,
+        json!([restored])
+    );
+    let checkpoint = restored["preserved"]["commit_id"].as_str().unwrap();
+    let back = fixture.success(&[
+        "node",
+        "restore",
+        "--workflow",
+        "1",
+        "--node",
+        "1",
+        "--commit",
+        checkpoint,
+    ])?;
+    assert!(back["run_id"].is_null());
+    assert_eq!(
+        fs::read_to_string(workspace.join("manual.txt"))?,
+        "unsaved later version\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("extra.txt"))?,
+        "checkpoint\n"
+    );
+    let fresh = start_run(&fixture, &agent)?;
+    let fresh_id = fresh["run"]["id"].to_string();
+    let fresh = wait_run(&fixture, &fresh_id, "completed")?;
+    // This deterministic peer always returns "test-session"; the protocol trace,
+    // not ID inequality, proves a fresh conversation was requested.
+    let requests = agent_requests(&agent)?;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "session/new")
+            .count(),
+        2
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request["method"] == "session/load")
+    );
+    assert!(fresh["run"]["continued_from"].is_null());
+    assert_eq!(fresh["run"]["snapshot"]["status"], "saved");
+    Ok(())
+}
+
+#[test]
+fn uncertain_exact_commit_restores_remain_guarded_without_a_run_reference() -> anyhow::Result<()> {
+    for after_native_restore in [false, true] {
+        let (fixture, _agent, workspace) = run_fixture("unused")?;
+        fs::write(workspace.join("manual.txt"), "selected\n")?;
+        jj(&workspace, &["describe", "-m", "Manual revision"])?;
+        let selected = recorded_commit(&workspace)?;
+        fs::write(workspace.join("manual.txt"), "later unsaved\n")?;
+        let script = if after_native_restore {
+            r#"
+case " $* " in
+  *" restore "*) "$native" "$@"; exit 42 ;;
+esac
+"#
+        } else {
+            "exit 42"
+        };
+        intercept_snapshots(&fixture, script)?;
+        assert!(
+            !fixture
+                .command()
+                .args([
+                    "node",
+                    "restore",
+                    "--workflow",
+                    "1",
+                    "--node",
+                    "1",
+                    "--commit",
+                    &selected,
+                ])
+                .output()?
+                .status
+                .success()
+        );
+        let attempts = fixture.success(&["node", "restores", "--workflow", "1", "--node", "1"])?;
+        let attempt = &attempts[0];
+        assert_eq!(attempt["state"], "unresolved");
+        assert!(attempt["run_id"].is_null());
+        assert_eq!(attempt["preserved"].is_object(), after_native_restore);
+        assert!(attempt["after"].is_null());
+        let current = recorded_commit(&workspace)?;
+        let files = fs::read(workspace.join("manual.txt"))?;
+        let impact = fixture.success(&[
+            "node",
+            "restore-impact",
+            "--workflow",
+            "1",
+            "--node",
+            "1",
+            "--commit",
+            &selected,
+        ])?;
+        assert!(
+            impact["observed_blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_str().unwrap().contains("unresolved restore"))
+        );
+        assert_eq!(
+            fixture.success(&["node", "restores", "--workflow", "1", "--node", "1"])?,
+            attempts
+        );
+        fixture.stop()?;
+        assert_eq!(
+            fixture.success(&["node", "restores", "--workflow", "1", "--node", "1"])?,
+            attempts
+        );
+        assert!(
+            !fixture
+                .command()
+                .args([
+                    "node",
+                    "restore",
+                    "--workflow",
+                    "1",
+                    "--node",
+                    "1",
+                    "--commit",
+                    &selected,
+                ])
+                .output()?
+                .status
+                .success()
+        );
+        assert!(
+            !fixture
+                .command()
+                .args([
+                    "node",
+                    "update",
+                    "--workflow",
+                    "1",
+                    "--node",
+                    "1",
+                    "--prompt",
+                    "blocked",
+                ])
+                .output()?
+                .status
+                .success()
+        );
+        assert_eq!(recorded_commit(&workspace)?, current);
+        assert_eq!(fs::read(workspace.join("manual.txt"))?, files);
+        let operation = attempt["id"].to_string();
+        let recovered = fixture.success(&[
+            "run",
+            "recover-restore",
+            "--operation",
+            &operation,
+            "--confirm-processes-stopped",
+        ])?;
+        assert_eq!(recovered["state"], "recovered");
+        assert!(recovered["run_id"].is_null());
+        assert_eq!(recovered["after"]["commit_id"], current);
+        assert_eq!(
+            fixture.success(&["run", "list", "--workflow", "1", "--node", "1"])?,
+            json!([])
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn failure_before_snapshot_preserves_files_and_recovery_refuses_a_stale_checkout()
 -> anyhow::Result<()> {
     let (fixture, agent, workspace) = run_fixture("remember saved")?;

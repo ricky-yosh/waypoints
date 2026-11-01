@@ -705,45 +705,56 @@ async fn verify_graph_ancestry(
     revisions: &BTreeMap<i64, Revision>,
 ) -> anyhow::Result<()> {
     for (id, revision) in revisions {
-        let mut expected = Vec::new();
-        if graph.base_nodes.contains(id) {
-            expected.push(
-                graph
-                    .workflow
-                    .base
-                    .as_ref()
-                    .context("base missing")?
-                    .revision
-                    .commit_id
-                    .clone(),
-            );
-        }
-        for edge in graph
-            .connections
-            .iter()
-            .filter(|edge| edge.target_id == *id)
-        {
-            expected.push(
-                revisions
-                    .get(&edge.source_id)
-                    .context("native parent missing")?
-                    .commit_id
-                    .clone(),
-            );
-        }
-        expected.sort();
-        expected.dedup();
-        let mut actual = jj::parent_commit_ids(root, &revision.commit_id).await?;
-        actual.sort();
-        anyhow::ensure!(
-            actual == expected,
-            "native parents for node {id} do not match the proposed graph"
-        );
+        verify_node_ancestry(root, graph, *id, revision, revisions).await?;
     }
     Ok(())
 }
 
-fn graph_descendants(graph: &WorkflowGraph, root: i64) -> BTreeSet<i64> {
+pub(super) async fn verify_node_ancestry(
+    root: &std::path::Path,
+    graph: &WorkflowGraph,
+    node_id: i64,
+    revision: &Revision,
+    revisions: &BTreeMap<i64, Revision>,
+) -> anyhow::Result<()> {
+    let mut expected = Vec::new();
+    if graph.base_nodes.contains(&node_id) {
+        expected.push(
+            graph
+                .workflow
+                .base
+                .as_ref()
+                .context("base missing")?
+                .revision
+                .commit_id
+                .clone(),
+        );
+    }
+    for edge in graph
+        .connections
+        .iter()
+        .filter(|edge| edge.target_id == node_id)
+    {
+        expected.push(
+            revisions
+                .get(&edge.source_id)
+                .context("native parent missing")?
+                .commit_id
+                .clone(),
+        );
+    }
+    expected.sort();
+    expected.dedup();
+    let mut actual = jj::parent_commit_ids(root, &revision.commit_id).await?;
+    actual.sort();
+    anyhow::ensure!(
+        actual == expected,
+        "native parents for node {node_id} do not match the proposed graph"
+    );
+    Ok(())
+}
+
+pub(super) fn graph_descendants(graph: &WorkflowGraph, root: i64) -> BTreeSet<i64> {
     let mut result = BTreeSet::from([root]);
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {

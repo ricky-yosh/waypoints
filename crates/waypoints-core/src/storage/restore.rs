@@ -11,8 +11,17 @@ use crate::jj::{self, Revision};
 use crate::run::{RecoveryConfirmation, Run, SnapshotState};
 use crate::workspace::{WorkspaceAssociation, WorkspaceState};
 
+mod downstream;
+mod impact;
+mod schema;
 #[cfg(test)]
 mod tests;
+
+pub use downstream::{RestoreAffectedNode, RestoreDownstream, RestoreRebaseConfirmation};
+pub use impact::{
+    RestoreImpact, RestoreImpactAllocation, RestoreImpactChange, RestoreImpactCheckout,
+    RestoreImpactSession, RestoreImpactTask, RestoreImpactWorkspace,
+};
 
 // Leave time for transport and journal writes within the 120-second RPC deadline.
 const RESTORE_TIMEOUT: Duration = Duration::from_secs(110);
@@ -36,8 +45,8 @@ pub enum RestoreState {
 pub struct RestoreOperation {
     /// Database-local operation identifier.
     pub id: i64,
-    /// Run whose saved code was selected.
-    pub run_id: i64,
+    /// Selected saved run, or none when a native commit was selected directly.
+    pub run_id: Option<i64>,
     /// Owning workflow.
     pub workflow_id: i64,
     /// Unchanged owning node.
@@ -58,47 +67,33 @@ pub struct RestoreOperation {
     pub session_barrier: i64,
     /// Completion or uncertainty, independent of any agent run outcome.
     pub state: RestoreState,
+    /// Checked downstream scope and checkpoints; absent on legacy leaf restores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downstream: Option<RestoreDownstream>,
 }
 
 impl Storage {
     pub(super) async fn initialize_restores(&self) -> anyhow::Result<()> {
-        let connection = self.database.connect()?;
-        connection
-            .execute(
-                "CREATE TABLE IF NOT EXISTS restore_operations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id INTEGER NOT NULL REFERENCES agent_runs(id),
-                node_id INTEGER NOT NULL REFERENCES nodes(id),
-                active INTEGER NOT NULL CHECK(active IN (0, 1)),
-                session_barrier INTEGER NOT NULL,
-                record TEXT NOT NULL
-            )",
-                (),
-            )
-            .await?;
-        connection
-            .execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS one_restore_operation
-             ON restore_operations(active) WHERE active = 1",
-                (),
-            )
-            .await?;
-        Ok(())
+        schema::initialize(&self.database).await
     }
 
     pub(super) async fn ensure_restores_clear(&self) -> anyhow::Result<()> {
         let connection = self.database.connect()?;
         let mut rows = connection
             .query(
-                "SELECT id, run_id FROM restore_operations WHERE active = 1",
+                "SELECT restore_operations.id, restore_operations.node_id, nodes.workflow_id
+                 FROM restore_operations LEFT JOIN nodes ON nodes.id = restore_operations.node_id
+                 WHERE restore_operations.active = 1",
                 (),
             )
             .await?;
         if let Some(row) = rows.next().await? {
             let id: i64 = row.get(0)?;
-            let run_id: i64 = row.get(1)?;
+            let node_id: i64 = row.get(1)?;
+            let workflow_id = row.get::<Option<i64>>(2)?
+                .context("unresolved restore references a missing node; inspect the journal before further work")?;
             anyhow::bail!(
-                "restore operation {id} is unresolved; inspect run restore-status --run {run_id}; reconcile native jj state and explicitly recover it; do not retry"
+                "restore operation {id} is unresolved; inspect node restores --workflow {workflow_id} --node {node_id} and reconcile native jj state before explicit recovery; do not retry"
             );
         }
         Ok(())
@@ -106,10 +101,15 @@ impl Storage {
 
     pub(super) async fn ensure_session_after_restore(&self, run: &Run) -> anyhow::Result<()> {
         let connection = self.database.connect()?;
-        let mut rows = connection.query(
-            "SELECT id FROM restore_operations WHERE node_id = ?1 AND session_barrier >= ?2 LIMIT 1",
-            turso::params![run.node_id, run.id],
-        ).await?;
+        let mut rows = connection
+            .query(
+                "SELECT id FROM restore_operations WHERE session_barrier >= ?2
+             AND (node_id = ?1 OR EXISTS (
+               SELECT 1 FROM json_each(record, '$.downstream.nodes')
+               WHERE json_extract(value, '$.node_id') = ?1)) LIMIT 1",
+                turso::params![run.node_id, run.id],
+            )
+            .await?;
         anyhow::ensure!(
             rows.next().await?.is_none(),
             "code restoration invalidated this session for continuation; explicitly start a fresh run"
@@ -130,30 +130,75 @@ impl Storage {
     /// parents, missing snapshots, stale/shared workspaces and immutable changes.
     /// An uncertain mutation retains a durable global guard; never blindly retry.
     pub async fn restore_run(&mut self, run_id: i64) -> Result<RestoreOperation, StorageError> {
+        let run = self.run(run_id).await?;
+        let SnapshotState::Saved { revision } = &run.snapshot else {
+            return Err(anyhow::anyhow!("run has no saved revision to restore").into());
+        };
+        self.restore_selected(
+            run.workflow_id,
+            run.node_id,
+            &revision.commit_id,
+            Some(&run),
+        )
+        .await
+    }
+
+    /// Restores an exact native revision within the same node/change, without requiring a run.
+    ///
+    /// Accepts a full lowercase commit ID for this change, including manual edits
+    /// and preserved checkpoints. Uses the same checkpoint, session barrier,
+    /// leaf/parent checks and durable recovery as saved-run restoration.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid or missing commits, another change's revision, unsafe
+    /// workspace/ancestry/run state and native/storage failures. An uncertain
+    /// mutation remains reserved; never blindly repeat the request.
+    pub async fn restore_node_revision(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+        commit_id: &str,
+    ) -> Result<RestoreOperation, StorageError> {
+        jj::validate_commit_id(commit_id)?;
+        self.restore_selected(workflow_id, node_id, commit_id, None)
+            .await
+    }
+
+    async fn restore_selected(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+        commit_id: &str,
+        run: Option<&Run>,
+    ) -> Result<RestoreOperation, StorageError> {
         Ok(tokio::time::timeout(RESTORE_TIMEOUT, async {
             self.ensure_dependency_operations_clear().await?;
             self.ensure_no_restore_writers().await?;
-            let run = self.run(run_id).await?;
-            let SnapshotState::Saved { revision: source } = &run.snapshot else {
-                anyhow::bail!("run has no saved revision to restore");
-            };
-            self.node(run.workflow_id, run.node_id).await?;
-            self.require_ready_workspace(run.node_id).await?;
-            let verified = self.verify_node_workspace(run.workflow_id, run.node_id).await?;
+            self.node(workflow_id, node_id).await?;
+            self.require_ready_workspace(node_id).await?;
+            let verified = self.verify_node_workspace(workflow_id, node_id).await?;
             let WorkspaceState::Ready { revision: before } = verified.state else {
                 anyhow::bail!("restore requires a ready workspace");
             };
             let workspace = verified.workspace.context("node has no workspace")?;
-            anyhow::ensure!(
-                workspace.change_id == run.change_id
-                    && workspace.directory == run.directory
-                    && source.change_id == workspace.change_id,
-                "saved run no longer matches this node's workspace/change"
-            );
             let native_operation = jj::operation_id(&workspace.repository_path).await?;
-            let exact = jj::resolve_base(&workspace.repository_path, &source.commit_id).await?;
-            anyhow::ensure!(exact == *source, "saved revision identity changed");
-            self.check_restore_leaf(run.workflow_id, run.node_id, &workspace, &before).await?;
+            let source = jj::resolve_base(&workspace.repository_path, commit_id).await?;
+            anyhow::ensure!(
+                source.change_id == workspace.change_id,
+                "selected revision belongs to another change; cross-change restoration is not supported"
+            );
+            if let Some(run) = run {
+                anyhow::ensure!(
+                    workspace.change_id == run.change_id && workspace.directory == run.directory,
+                    "saved run no longer matches this node's workspace/change"
+                );
+                anyhow::ensure!(
+                    run.snapshot == SnapshotState::Saved { revision: source.clone() },
+                    "saved revision identity changed"
+                );
+            }
+            self.check_restore_leaf(workflow_id, node_id, &workspace, &before).await?;
             anyhow::ensure!(
                 jj::parent_commit_ids(&workspace.repository_path, &source.commit_id).await?
                     == jj::parent_commit_ids(&workspace.repository_path, &before.commit_id).await?,
@@ -165,9 +210,10 @@ impl Storage {
                 "native repository changed during restore preflight; no mutation started"
             );
             let mut operation = RestoreOperation {
-                id: 0, run_id, workflow_id: run.workflow_id, node_id: run.node_id,
-                workspace, source: source.clone(), before, preserved: None, after: None,
+                id: 0, run_id: run.map(|run| run.id), workflow_id, node_id,
+                workspace, source, before, preserved: None, after: None,
                 native_operation, session_barrier: 0, state: RestoreState::Unresolved,
+                downstream: None,
             };
             self.reserve_restore(&mut operation).await?;
             let result = async {
@@ -190,8 +236,8 @@ impl Storage {
                 Ok::<_, anyhow::Error>(())
             }.await;
             result.with_context(|| format!(
-                "restore operation {} may be incomplete; inspect run restore-status --run {}; no automatic retry or rollback",
-                operation.id, operation.run_id,
+                "restore operation {} may be incomplete; inspect node restores --workflow {} --node {}; no automatic retry or rollback",
+                operation.id, operation.workflow_id, operation.node_id,
             ))?;
             Ok::<_, anyhow::Error>(operation)
         }).await.context(
@@ -212,6 +258,36 @@ impl Storage {
                 .query(
                     "SELECT record FROM restore_operations WHERE run_id = ?1 ORDER BY id",
                     [run_id],
+                )
+                .await?;
+            let mut operations = Vec::new();
+            while let Some(row) = rows.next().await? {
+                operations.push(serde_json::from_str(&row.get::<String>(0)?)?);
+            }
+            Ok::<_, anyhow::Error>(operations)
+        }
+        .await?)
+    }
+
+    /// Lists every saved-run and exact-commit restoration attempt for a node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership or an unreadable journal.
+    pub async fn node_restores(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<Vec<RestoreOperation>, StorageError> {
+        self.node(workflow_id, node_id).await?;
+        Ok(async {
+            let connection = self.database.connect()?;
+            let mut rows = connection
+                .query(
+                    "SELECT record FROM restore_operations WHERE node_id = ?1 OR EXISTS (
+                       SELECT 1 FROM json_each(record, '$.downstream.nodes')
+                       WHERE json_extract(value, '$.node_id') = ?1) ORDER BY id",
+                    [node_id],
                 )
                 .await?;
             let mut operations = Vec::new();
@@ -265,6 +341,9 @@ impl Storage {
                 return Ok(operation);
             }
             self.ensure_no_restore_writers().await?;
+            if operation.downstream.is_some() {
+                return self.recover_downstream_restore(operation).await;
+            }
             let verified = self
                 .verify_node_workspace(operation.workflow_id, operation.node_id)
                 .await?;
@@ -350,15 +429,23 @@ impl Storage {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await?;
         let result = async {
+            if let Some(scope) = &operation.downstream {
+                anyhow::ensure!(
+                    super::dependencies::load_graph(&tx, operation.workflow_id).await? == scope.graph,
+                    "saved graph changed before restore reservation"
+                );
+            }
             let mut rows = tx.query("SELECT COALESCE(MAX(id), 0) FROM agent_runs", ()).await?;
             operation.session_barrier = rows.next().await?.context("missing run maximum")?.get(0)?;
             let changed = tx.execute(
                 "INSERT INTO restore_operations(run_id, node_id, active, session_barrier, record)
-                 SELECT ?1, ?2, 1, ?3, ?4 WHERE NOT EXISTS (SELECT 1 FROM agent_runs WHERE active = 1)",
+                 SELECT ?1, ?2, 1, ?3, ?4 WHERE NOT EXISTS (SELECT 1 FROM agent_runs WHERE active = 1)
+                 AND (?5 IS NULL OR (SELECT COALESCE(MAX(id), 0) FROM restore_operations) = ?5)",
                 turso::params![operation.run_id, operation.node_id, operation.session_barrier,
-                    serde_json::to_string(operation)?],
+                    serde_json::to_string(operation)?,
+                    operation.downstream.as_ref().map(|scope| scope.preview_restore_watermark)],
             ).await?;
-            anyhow::ensure!(changed == 1, "an agent run became active before restore");
+            anyhow::ensure!(changed == 1, "a run became active or the confirmed journal changed before restore reservation");
             operation.id = tx.last_insert_rowid();
             tx.execute("UPDATE restore_operations SET record = ?2 WHERE id = ?1",
                 turso::params![operation.id, serde_json::to_string(operation)?]).await?;

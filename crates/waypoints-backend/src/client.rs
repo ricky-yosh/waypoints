@@ -724,6 +724,80 @@ impl Client {
         self.call("run.restore", json!({"run_id": run_id})).await
     }
 
+    /// Restores an exact native commit within the same node/change without requiring a saved run.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid/foreign commits, unsafe state or native/storage/transport failures.
+    pub async fn restore_node_revision(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        commit_id: &str,
+    ) -> Result<waypoints_core::storage::RestoreOperation, BackendError> {
+        self.call(
+            "node.restore_revision",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id, "commit_id": commit_id,
+            }),
+        )
+        .await
+    }
+
+    /// Inspects conservative restore impact without changing files, history, or sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid/foreign selection, unavailable native state,
+    /// changed operation, response bounds, or storage/transport failure.
+    pub async fn node_restore_impact(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        commit_id: &str,
+    ) -> Result<waypoints_core::storage::RestoreImpact, BackendError> {
+        self.call(
+            "node.restore_impact",
+            json!({"workflow_id": workflow_id, "node_id": node_id, "commit_id": commit_id}),
+        )
+        .await
+    }
+
+    /// Restores source code and rebases checked descendants after explicit preview confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses stale/unsafe previews, missing confirmation or native/storage/transport
+    /// failures. An uncertain mutation is journaled; never blindly retry.
+    pub async fn restore_node_with_descendants(
+        &self,
+        preview: &waypoints_core::storage::RestoreImpact,
+        confirmation: Option<waypoints_core::storage::RestoreRebaseConfirmation>,
+    ) -> Result<waypoints_core::storage::RestoreOperation, BackendError> {
+        self.call(
+            "node.restore_with_descendants",
+            json!({"preview": preview, "confirmation": confirmation}),
+        )
+        .await
+    }
+
+    /// Lists saved-run and exact-commit restoration attempts for one node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid membership or storage/transport failure.
+    pub async fn node_restores(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<Vec<waypoints_core::storage::RestoreOperation>, BackendError> {
+        self.call(
+            "node.restores",
+            json!({"workflow_id":workflow_id,"node_id":node_id}),
+        )
+        .await
+    }
+
     /// Lists durable restore attempts for one saved run without modifying files.
     ///
     /// # Errors

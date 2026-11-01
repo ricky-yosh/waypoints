@@ -56,7 +56,13 @@ every step is available today. Individual feature tests do not replace it.
 - Browse [native revision history](22-native-revision-history.md) through the
   CLI/backend. Restore eligible saved results within the same leaf change;
   this passed [manual Codex acceptance](21-saved-result-restoration.md#manual-codex-acceptance).
-  A visual picker and arbitrary-commit restoration remain incomplete.
+  Exact same-change manual revisions/checkpoints can also be restored by commit
+  ID. [Readonly restore impact](23-restore-impact.md) now lists affected native/graph
+  work, workspaces and sessions; it does not simulate conflicts or apply downstream
+  changes. [Confirmed same-workflow application](24-downstream-restoration.md)
+  now checkpoints edits and rebases checked descendants, with explicit fresh
+  sessions and manual stale-checkout reconciliation. A visual picker and broader
+  affected-work reconciliation remain incomplete.
   Same-session `run continue` is not code restoration.
 - **Not yet complete:** edit upstream work and surface native ancestry mismatch,
   stale physical checkouts, native conflicts, and stale agent context distinctly.
@@ -73,7 +79,7 @@ No MCP adapter, transcript archive, or durable notification replay is required. 
 
 ## Open questions
 
-- How should the visual picker, arbitrary-commit restoration and native retention limits be exposed beyond implemented native browsing and saved-result restoration?
+- How should the visual picker, downstream restoration and native retention limits be exposed beyond implemented browsing and same-change run/commit restoration?
 - Does the Claude ACP adapter emit diff content for edits?
 - Which agents in practice support resume, load, or fork, and does a session survive a change of working directory?
 - Does Zed show a phase's diff correctly in a colocated jj repo?

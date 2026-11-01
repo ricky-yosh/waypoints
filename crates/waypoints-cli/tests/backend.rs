@@ -21,6 +21,10 @@ mod rename;
 mod restart;
 #[path = "backend/restore.rs"]
 mod restore;
+#[path = "backend/restore_downstream.rs"]
+mod restore_downstream;
+#[path = "backend/restore_impact.rs"]
+mod restore_impact;
 #[path = "backend/revisions.rs"]
 mod revisions;
 #[path = "backend/upstream.rs"]

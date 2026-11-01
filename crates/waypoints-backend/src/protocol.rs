@@ -27,6 +27,9 @@ pub(crate) fn request_timeout(method: &str) -> Duration {
             | "node.recover_reparent"
             | "node.resume_deletion"
             | "run.restore"
+            | "node.restore_revision"
+            | "node.restore_impact"
+            | "node.restore_with_descendants"
             | "run.recover_restore"
     ) {
         Duration::from_secs(120)
@@ -114,10 +117,17 @@ pub(crate) struct NodeRevisionsParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct NodeRevisionReviewParams {
+pub(crate) struct NodeRevisionParams {
     pub workflow_id: i64,
     pub node_id: i64,
     pub commit_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RestoreDescendantsParams {
+    pub preview: waypoints_core::storage::RestoreImpact,
+    pub confirmation: Option<waypoints_core::storage::RestoreRebaseConfirmation>,
 }
 
 #[derive(Deserialize)]

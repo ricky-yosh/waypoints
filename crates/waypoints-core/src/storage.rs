@@ -27,7 +27,11 @@ pub use reparent::{
     DeletionWorkspace, DependencyOperation, DependencyOperationKind, DependencyOperationState,
     DependencyRecovery, DependencyRecoveryAssessment, UndoBoundaryAcknowledgement,
 };
-pub use restore::{RestoreOperation, RestoreState};
+pub use restore::{
+    RestoreAffectedNode, RestoreDownstream, RestoreImpact, RestoreImpactAllocation,
+    RestoreImpactChange, RestoreImpactCheckout, RestoreImpactSession, RestoreImpactTask,
+    RestoreImpactWorkspace, RestoreOperation, RestoreRebaseConfirmation, RestoreState,
+};
 pub use revisions::{NodeRevisionEntry, NodeRevisionPage};
 
 /// A workflow saved for a canonical project directory.

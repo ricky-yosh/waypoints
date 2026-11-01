@@ -2,6 +2,11 @@ use super::*;
 use waypoints_core::run::{Run, RunState, SnapshotState};
 use waypoints_core::storage::RestoreState;
 
+#[path = "restore/downstream.rs"]
+mod downstream;
+#[path = "restore/impact.rs"]
+mod impact;
+
 async fn fixture() -> anyhow::Result<(Repository, Storage, Workflow, Node, PathBuf)> {
     let repo = Repository::new()?;
     let mut storage = Storage::open(&repo.directory.path().join("restore.db")).await?;
@@ -60,6 +65,191 @@ async fn saved_run(
     run.state = RunState::Completed;
     storage.save_run(&run).await?;
     Ok(run)
+}
+
+#[test]
+fn exact_revision_restore_accepts_manual_work_and_preserved_checkpoints_without_any_run()
+-> anyhow::Result<()> {
+    run(async {
+        let (repo, mut storage, workflow, node, workspace) = fixture().await?;
+        fs::write(workspace.join("manual.txt"), "selected manual edit\n")?;
+        let selected = repo.jj_at(
+            &workspace,
+            &["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+        )?;
+        fs::write(workspace.join("manual.txt"), "later unsaved edit\n")?;
+        fs::write(workspace.join("extra.txt"), "preserve me\n")?;
+        let graph = storage.workflow_graph(workflow.id).await?;
+        let history = storage.history_status(&repo.project).await?;
+        let original = recorded_value(&repo, "@", "commit_id")?;
+        let restored = storage
+            .restore_node_revision(workflow.id, node.id, &selected)
+            .await?;
+        assert_eq!(restored.run_id, None);
+        assert_eq!(restored.state, RestoreState::Completed);
+        assert_eq!(restored.source.commit_id, selected);
+        assert_eq!(
+            restored.after.as_ref().unwrap().change_id,
+            restored.source.change_id
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("manual.txt"))?,
+            "selected manual edit\n"
+        );
+        assert!(!workspace.join("extra.txt").exists());
+        assert!(
+            storage.node_runs(workflow.id, node.id).await?.is_empty(),
+            "no fake run may be invented"
+        );
+        assert_eq!(
+            storage.node_restores(workflow.id, node.id).await?,
+            std::slice::from_ref(&restored)
+        );
+        assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+        assert_eq!(storage.history_status(&repo.project).await?, history);
+        assert_eq!(recorded_value(&repo, "@", "commit_id")?, original);
+        drop(storage);
+        let mut storage = Storage::open(&repo.directory.path().join("restore.db")).await?;
+        assert_eq!(storage.restore_operation(restored.id).await?, restored);
+        let preserved = restored.preserved.as_ref().unwrap();
+        let recovered_code = storage
+            .restore_node_revision(workflow.id, node.id, &preserved.commit_id)
+            .await?;
+        assert_eq!(recovered_code.run_id, None);
+        assert_eq!(recovered_code.source, *preserved);
+        assert_eq!(
+            fs::read_to_string(workspace.join("manual.txt"))?,
+            "later unsaved edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("extra.txt"))?,
+            "preserve me\n"
+        );
+        assert_eq!(storage.node_restores(workflow.id, node.id).await?.len(), 2);
+        assert!(storage.node_runs(workflow.id, node.id).await?.is_empty());
+        Ok(())
+    })
+}
+
+#[test]
+fn exact_restore_refuses_bad_ids_foreign_changes_and_busy_nodes_before_reservation()
+-> anyhow::Result<()> {
+    run(async {
+        let (repo, mut storage, workflow, node, workspace) = fixture().await?;
+        fs::write(workspace.join("manual.txt"), "selected\n")?;
+        let selected = repo.jj_at(
+            &workspace,
+            &["log", "--no-graph", "-r", "@", "-T", "commit_id"],
+        )?;
+        let foreign = recorded_value(&repo, "@", "commit_id")?;
+        fs::write(workspace.join("manual.txt"), "leave untouched\n")?;
+        let operation = repo.operation()?;
+        let graph = storage.workflow_graph(workflow.id).await?;
+        for id in [
+            "@",
+            "root()",
+            &selected[..12],
+            &"F".repeat(40),
+            &"f".repeat(40),
+            &foreign,
+        ] {
+            assert!(
+                storage
+                    .restore_node_revision(workflow.id, node.id, id)
+                    .await
+                    .is_err(),
+                "{id}"
+            );
+        }
+        assert_eq!(repo.operation()?, operation);
+        assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+        assert_eq!(
+            fs::read_to_string(workspace.join("manual.txt"))?,
+            "leave untouched\n"
+        );
+        assert!(
+            storage
+                .node_restores(workflow.id, node.id)
+                .await?
+                .is_empty()
+        );
+        let mut busy = storage
+            .create_run(workflow.id, node.id, Path::new("/bin/sh"))
+            .await?;
+        assert!(
+            storage
+                .restore_node_revision(workflow.id, node.id, &selected)
+                .await
+                .is_err()
+        );
+        busy.state = RunState::Cancelled;
+        storage.save_run(&busy).await?;
+        let child = storage
+            .create_node_from(
+                workflow.id,
+                "downstream",
+                &NodeParent::Node { node_id: node.id },
+            )
+            .await?;
+        assert!(
+            storage
+                .restore_node_revision(workflow.id, node.id, &selected)
+                .await
+                .is_err()
+        );
+        storage.delete_prompt_node(workflow.id, child.id).await?;
+        repo.jj(&["new", &busy.change_id, "--no-edit"])?;
+        let operation = repo.operation()?;
+        assert!(
+            storage
+                .restore_node_revision(workflow.id, node.id, &selected)
+                .await
+                .is_err()
+        );
+        assert_eq!(repo.operation()?, operation);
+        assert!(
+            storage
+                .node_restores(workflow.id, node.id)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn exact_restore_keeps_real_run_history_but_requires_a_fresh_agent_session() -> anyhow::Result<()> {
+    run(async {
+        let (repo, mut storage, workflow, node, workspace) = fixture().await?;
+        fs::write(workspace.join("manual.txt"), "first\n")?;
+        let saved = saved_run(&mut storage, &workflow, &node, "old-session").await?;
+        let commit = storage.review_run(saved.id).await?.revision.commit_id;
+        fs::write(workspace.join("manual.txt"), "later\n")?;
+        let restored = storage
+            .restore_node_revision(workflow.id, node.id, &commit)
+            .await?;
+        assert_eq!(
+            restored.run_id, None,
+            "a direct selection is not an agent-run selection"
+        );
+        assert_eq!(storage.run(saved.id).await?, saved);
+        assert!(storage.run_restores(saved.id).await?.is_empty());
+        assert!(
+            storage
+                .continue_run(saved.id, "wrong memory")
+                .await
+                .is_err()
+        );
+        drop(storage);
+        let mut storage = Storage::open(&repo.directory.path().join("restore.db")).await?;
+        assert!(storage.continue_run(saved.id, "still wrong").await.is_err());
+        let fresh = saved_run(&mut storage, &workflow, &node, "fresh-session").await?;
+        assert_eq!(fresh.continued_from, None);
+        let mut next = storage.continue_run(fresh.id, "new memory").await?;
+        next.state = RunState::Cancelled;
+        storage.save_run(&next).await?;
+        Ok(())
+    })
 }
 
 #[test]
@@ -226,6 +416,7 @@ fn restore_refuses_stale_checkout_and_different_parent_revision() -> anyhow::Res
         let (repo, mut storage, workflow, node, workspace) = fixture().await?;
         fs::write(workspace.join("login.txt"), "saved\n")?;
         let saved = saved_run(&mut storage, &workflow, &node, "session").await?;
+        let commit = storage.review_run(saved.id).await?.revision.commit_id;
         repo.jj(&[
             "--ignore-working-copy",
             "describe",
@@ -236,6 +427,12 @@ fn restore_refuses_stale_checkout_and_different_parent_revision() -> anyhow::Res
         ])?;
         let operation = repo.operation()?;
         assert!(storage.restore_run(saved.id).await.is_err());
+        assert!(
+            storage
+                .restore_node_revision(workflow.id, node.id, &commit)
+                .await
+                .is_err()
+        );
         assert_eq!(repo.operation()?, operation);
         repo.jj_at(&workspace, &["workspace", "update-stale"])?;
         // Rewrite onto another parent without changing this saved run.
@@ -252,6 +449,12 @@ fn restore_refuses_stale_checkout_and_different_parent_revision() -> anyhow::Res
         repo.jj_at(&workspace, &["workspace", "update-stale"])?;
         let operation = repo.operation()?;
         let error = storage.restore_run(saved.id).await.unwrap_err().to_string();
+        assert!(error.contains("different parents"), "{error}");
+        let error = storage
+            .restore_node_revision(workflow.id, node.id, &commit)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("different parents"), "{error}");
         assert_eq!(repo.operation()?, operation);
         assert!(storage.run_restores(saved.id).await?.is_empty());

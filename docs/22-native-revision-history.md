@@ -28,9 +28,13 @@ entry. It is not a full-file-content endpoint or an evolution inter-diff.
 Preview is scoped to the associated repository, not a proof of membership in the
 current page. It accepts related-change commits, including predecessors exposed
 by squash, and other exact commits in that repository. Missing objects are errors.
-Preview does not restore code. Restoration remains the separate
-[`run restore`](21-saved-result-restoration.md) action for eligible saved runs.
-Restoring an arbitrary manual revision by commit ID is not implemented here.
+Preview does not restore code. Restoration is the separate
+[`node restore --commit`](21-saved-result-restoration.md#select-an-exact-native-commit)
+action for eligible same-change revisions, or `run restore` for saved runs.
+Cross-change entries remain preview-only; restore safeguards are not bypassed.
+For a native-aligned subtree in the same workflow, inspect and explicitly confirm
+[restore with descendants](24-downstream-restoration.md) instead of bypassing
+the ordinary restore commands' leaf guards.
 
 ## Response and native meaning
 
@@ -132,9 +136,9 @@ Disposable native-jj and CLI/backend/fake-ACP tests cover:
 - Oversized native history refusing the request instead of returning a partial
   page; a smaller page still succeeds.
 
-The visual picker, arbitrary-commit restoration and native-object retention
-policy remain separate work. This feature does not expand restore eligibility,
-resolve divergence or rewind agent conversation history.
+The visual picker and native-object retention policy remain separate work.
+Browsing does not expand restore eligibility, resolve divergence or rewind agent
+conversation history.
 
 ### Retained real-agent history smoke check
 

@@ -264,16 +264,37 @@ bounds, native retention and remaining UI/restoration scope.
 
 ## Restore a saved result within the same node
 
+Inspect conservative downstream impact first, without snapshotting, restoring,
+rebasing, updating workspaces, or continuing sessions:
+
+```sh
+waypoints node restore-impact --workflow 1 --node 2 --commit FULL_COMMIT_ID --json
+```
+
+This reports native descendants (including merges and unmanaged work), saved
+downstream tasks, workspaces, historical sessions, and known blockers.
+It is not a conflict simulation or apply permission by itself.
+Save the JSON and explicitly confirm checked same-workflow application with
+`node restore-with-descendants --preview FILE --confirm-restore-and-rebase`.
+That path checkpoints workspaces leaf-first, bars old affected sessions, and
+leaves descendant physical checkouts for explicit reconciliation. See
+[restore impact](23-restore-impact.md) and [downstream restoration](24-downstream-restoration.md).
+
 ```sh
 waypoints run restore --run 3 --json
 waypoints run restore-status --run 3 --json
+# Or select an exact same-change revision/checkpoint without an agent run:
+waypoints node restore --workflow 1 --node 2 --commit FULL_COMMIT_ID --json
+waypoints node restores --workflow 1 --node 2 --json
 ```
 
 Restoration checkpoints current jj-tracked edits, then restores the selected
 saved tree as another revision of the same change. It does not create a node,
 change parents, launch an agent, or rewind conversation history. Start a fresh
 run afterwards; all earlier sessions on that node are barred from continuation.
-The initial version requires a ready exclusive workspace, unchanged parent
+Exact-commit selection requires a full lowercase commit ID and the node's own
+change ID; related-change squash entries remain preview-only. Direct selections
+have null `run_id` and never create fake runs. The initial version requires a ready exclusive workspace, unchanged parent
 commits, no saved/native descendants, and no active/interrupted runs in the
 database. See [restoration](21-saved-result-restoration.md) for preservation,
 durable uncertainty, explicit `run recover-restore`, and retention limits.
@@ -572,7 +593,8 @@ Frames are limited to 1 MiB. The server's frame reads/response writes have
 five-second timeouts. Clients allow five seconds for ordinary requests and
 120 seconds for `node.workspace.create`, `node.reparent`, `node.delete`,
 `node.operation_recovery`, `node.recover_operation`, `node.resume_deletion`,
-`run.restore`, and `run.recover_restore`, including the older
+`run.restore`, `node.restore_revision`, `node.restore_impact`, `node.restore_with_descendants`,
+and `run.recover_restore`, including the older
 reparent recovery aliases. Long native requests still serialize other requests;
 agent execution and snapshot tasks run in the background.
 Storage mutations are not cancelled by a server-side transport timeout. Requests
@@ -619,6 +641,10 @@ Methods:
 | `run.review` | `{run_id}` | Same review shape for the exact saved snapshot; no fallback to current code |
 | `run.restore` | `{run_id}` | Durable `RestoreOperation`; restore code within the same leaf node/change, checkpoint current tracked edits first |
 | `run.restore_status` | `{run_id}` | Ordered restoration journal attempts for the selected run; no native mutation |
+| `node.restore_revision` | `{workflow_id, node_id, commit_id}` | Same guarded restore for an exact same-change commit; `run_id: null` |
+| `node.restore_impact` | `{workflow_id, node_id, commit_id}` | Readonly conservative `RestoreImpact`; no mutation or conflict simulation |
+| `node.restore_with_descendants` | `{preview, confirmation?}` | `RestoreOperation`; full fresh-equal impact object and `"restore_and_rebase"` required; checked same-workflow application |
+| `node.restores` | `{workflow_id, node_id}` | All restoration attempts affecting the node, including direct selections and downstream operations |
 | `run.recover_restore` | `{operation_id, confirmation?}` | Reconciled `RestoreOperation`; requires `"processes_stopped"`, never retries restore |
 | `connection.create` | `{workflow_id, source_id, target_id}` | `{workflow_id, source_id, target_id}`; metadata-only, legacy unbased workflows only |
 | `run.start` | `{workflow_id, node_id, executable}` | `{run, permission}`; returns before ACP initialization finishes |
@@ -701,6 +727,6 @@ not full context-staleness tracking. Human-readable `run status` shows it;
 the existing `run.status` JSON response shape. Capture and comparison never change
 agent context or run eligibility.
 
-The visual revision picker, arbitrary-commit restoration, full context staleness,
+The visual revision picker, broader cross-workflow/unmanaged restoration, full context staleness,
 workspace cleanup, editing native merge-parent sets, broader reconciliation, and operational/product decisions
 remain discussion items, not features authorized by this reference.
