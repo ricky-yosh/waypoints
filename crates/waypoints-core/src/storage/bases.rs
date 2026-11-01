@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 
-use super::{Storage, StorageError, Workflow, canonical_project, decode_workflow};
+use super::{
+    Storage, StorageError, Workflow, canonical_project, decode_workflow, validate_workflow_name,
+};
 use crate::jj;
 use crate::workflow::{BaseSource, WorkflowBase};
 
@@ -40,9 +42,7 @@ impl Storage {
         name: &str,
         source: &BaseSource,
     ) -> Result<Workflow, StorageError> {
-        if name.trim().is_empty() {
-            return Err(anyhow::anyhow!("workflow name must not be blank").into());
-        }
+        validate_workflow_name(name)?;
         let project = canonical_project(project)?;
         let base = resolve(&project, source).await?;
         Ok(self
@@ -56,7 +56,7 @@ impl Storage {
         name: &str,
         base: Option<WorkflowBase>,
     ) -> anyhow::Result<Workflow> {
-        anyhow::ensure!(!name.trim().is_empty(), "workflow name must not be blank");
+        validate_workflow_name(name)?;
         let project = canonical_project(project)?;
         let text = project.to_str().context("project path must be UTF-8")?;
         let mut connection = self.database.connect()?;

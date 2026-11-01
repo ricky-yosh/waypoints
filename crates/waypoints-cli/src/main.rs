@@ -169,6 +169,13 @@ enum RunCommand {
 
 #[derive(Subcommand)]
 enum WorkflowCommand {
+    /// Rename a workflow; undoable metadata only, never changes code or runs.
+    Rename {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        name: String,
+    },
     /// Explicitly connect every legacy prompt-only graph root to the saved workflow base.
     AdoptRoots {
         #[arg(long)]
@@ -578,6 +585,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::Workflow { command } => {
             let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
             match command {
+                WorkflowCommand::Rename { workflow, name } => {
+                    let workflow = client.rename_workflow(workflow, &name).await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&workflow)?);
+                    } else {
+                        println!("Renamed workflow {}: {}", workflow.id, workflow.name);
+                    }
+                }
                 WorkflowCommand::AdoptRoots {
                     workflow,
                     base_nodes,

@@ -933,6 +933,9 @@ mod tests {
                     .await
                     .is_err()
             );
+            let saved_workflow = storage.workflow(workflow).await?;
+            assert!(storage.rename_workflow(workflow, "blocked").await.is_err());
+            assert_eq!(storage.workflow(workflow).await?, saved_workflow);
             assert!(
                 storage
                     .create_node_change(workflow, node, "root()")

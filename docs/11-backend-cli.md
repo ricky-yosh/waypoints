@@ -105,12 +105,23 @@ freshness.
 
 The database adds `nodes` and `connections` tables when opening an existing
 workflows-only database, preserving saved workflows. Graphs and prompt edits
-survive backend restarts. Node creation, prompt edits, and connection creation
+survive backend restarts. Workflow renaming, node creation, prompt edits, and connection creation
 now have [persistent metadata undo/redo](14-workflow-history.md), shared across
 the project's workflows. It never reverses code, jj operations, or conversations.
 Existing data forms a non-undoable baseline. Native reparent/delete establish
 acknowledged undo boundaries rather than metadata undo actions. Prompt-only
 move/delete use ordinary metadata history; general disconnection remains unimplemented.
+
+Rename a workflow without changing its ID, base, graph, code, workspaces, or runs:
+
+```sh
+waypoints workflow rename --workflow 1 --name "Review authentication"
+```
+
+The command returns the updated workflow, or prints its ID/name without `--json`.
+Nonblank names are preserved verbatim; duplicates are allowed. An identical name
+preserves Undo/Redo, and rejected edits change nothing. See
+[workflow renaming](14-workflow-history.md#workflow-renaming) for the history contract.
 
 For an unmaterialized subtree in a rooted based workflow:
 
@@ -534,6 +545,7 @@ Methods:
 | `history.undo` | `{project_path, expected_edit_id}` | New metadata history status; stale/blocked actions are errors |
 | `history.redo` | `{project_path, expected_edit_id}` | New metadata history status; restores saved values/identities only |
 | `workflow.create` | `{project_path, name, base?}` | `{id, project_path, name, base}`; nullable saved starting point |
+| `workflow.rename` | `{workflow_id, name}` | Updated saved workflow; undoable name-only edit |
 | `workflow.get` | `{workflow_id}` | Saved workflow including its nullable base, without querying jj |
 | `workflow.set_base` | `{workflow_id, source}` | Initial base selection for an unbased workflow; existing bases cannot be replaced |
 | `workflow.list` | `{project_path}` | Array of workflows ordered by ID |

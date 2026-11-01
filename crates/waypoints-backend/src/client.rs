@@ -253,6 +253,24 @@ impl Client {
         .await
     }
 
+    /// Renames a workflow through the shared, undoable metadata history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a blank name, missing workflow, unresolved dependency
+    /// operation, storage failure, or RPC failure.
+    pub async fn rename_workflow(
+        &self,
+        workflow_id: i64,
+        name: &str,
+    ) -> Result<Workflow, BackendError> {
+        self.call(
+            "workflow.rename",
+            json!({"workflow_id": workflow_id, "name": name}),
+        )
+        .await
+    }
+
     /// Reads a workflow's saved base without querying native state.
     ///
     /// # Errors

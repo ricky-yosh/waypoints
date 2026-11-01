@@ -13,6 +13,8 @@ use tempfile::TempDir;
 
 #[path = "backend/planning.rs"]
 mod planning;
+#[path = "backend/rename.rs"]
+mod rename;
 #[path = "backend/restart.rs"]
 mod restart;
 #[path = "backend/upstream.rs"]

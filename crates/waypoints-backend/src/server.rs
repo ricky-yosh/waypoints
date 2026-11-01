@@ -16,9 +16,9 @@ use crate::protocol::{
     AdoptRootsParams, AssociateParams, ConnectParams, ContinueRunParams, CreateChangeParams,
     CreateNodeParams, CreateParams, CreateWorkspaceParams, DeleteNodeParams,
     DependencyOperationParams, HistoryParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
-    PermissionParams, ProjectParams, RecoverDependencyParams, RecoverRunParams, ReparentParams,
-    RunEventsParams, RunParams, StartRunParams, TIMEOUT, UpdateNodeParams, WorkflowBaseParams,
-    WorkflowParams, read_frame,
+    PermissionParams, ProjectParams, RecoverDependencyParams, RecoverRunParams,
+    RenameWorkflowParams, ReparentParams, RunEventsParams, RunParams, StartRunParams, TIMEOUT,
+    UpdateNodeParams, WorkflowBaseParams, WorkflowParams, read_frame,
 };
 use crate::runs::Runs;
 use crate::{BackendError, BackendInfo, Config};
@@ -335,6 +335,14 @@ async fn dispatch(
                 .adopt_workflow_roots(params.workflow_id, &params.base_nodes)
                 .await
                 .map(|graph| json!(graph))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "workflow.rename" => match parameters::<RenameWorkflowParams>(params) {
+            Ok(params) => storage
+                .rename_workflow(params.workflow_id, &params.name)
+                .await
+                .map(|workflow| json!(workflow))
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },

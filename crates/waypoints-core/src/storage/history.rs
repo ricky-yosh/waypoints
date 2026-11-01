@@ -11,6 +11,7 @@ use super::{Connection, Node, Storage, StorageError, canonical_project, decode_n
 use crate::workflow::NodeParent;
 
 mod planning;
+mod rename;
 
 /// One pending undo or redo action, identified independently of its cursor position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +40,11 @@ pub struct HistoryStatus {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Edit {
+    RenameWorkflow {
+        workflow_id: i64,
+        before: String,
+        after: String,
+    },
     MoveNode {
         change: planning::Change,
     },
@@ -62,6 +68,7 @@ enum Edit {
 impl Edit {
     fn workflow_id(&self) -> i64 {
         match self {
+            Self::RenameWorkflow { workflow_id, .. } => *workflow_id,
             Self::MoveNode { change } | Self::DeleteNode { change } => change.workflow_id,
             Self::CreateNode { node, .. } => node.workflow_id,
             Self::UpdatePrompt { before, .. } => before.workflow_id,
@@ -71,6 +78,7 @@ impl Edit {
 
     fn label(&self) -> &'static str {
         match self {
+            Self::RenameWorkflow { .. } => "Rename workflow",
             Self::MoveNode { .. } => "Move prompt node",
             Self::DeleteNode { .. } => "Delete prompt node",
             Self::CreateNode { .. } => "Create node",
@@ -388,7 +396,9 @@ async fn append(tx: &turso::Connection, project: &Path, edit: &Edit) -> anyhow::
         turso::params![project.to_str(), cursor],
     )
     .await?;
-    let version = if matches!(edit, Edit::MoveNode { .. } | Edit::DeleteNode { .. }) {
+    let version = if matches!(edit, Edit::RenameWorkflow { .. }) {
+        4
+    } else if matches!(edit, Edit::MoveNode { .. } | Edit::DeleteNode { .. }) {
         3
     } else if matches!(
         edit,
@@ -428,7 +438,7 @@ async fn read_edit(
     };
     let version: i64 = row.get(1)?;
     anyhow::ensure!(
-        (1..=3).contains(&version),
+        (1..=4).contains(&version),
         "unsupported workflow history version {version}; current workflows are preserved"
     );
     let edit: Edit =
@@ -458,6 +468,20 @@ async fn status(tx: &turso::Connection, project: &Path) -> anyhow::Result<Histor
 
 async fn apply(tx: &turso::Connection, edit: &Edit, direction: &Direction) -> anyhow::Result<()> {
     match (edit, direction) {
+        (
+            Edit::RenameWorkflow {
+                workflow_id,
+                before,
+                after,
+            },
+            direction,
+        ) => {
+            let (expected, replacement) = match direction {
+                Direction::Undo => (after, before),
+                Direction::Redo => (before, after),
+            };
+            rename::replace_name(tx, *workflow_id, expected, replacement).await?;
+        }
         (Edit::MoveNode { change } | Edit::DeleteNode { change }, direction) => {
             planning::apply(tx, change, direction).await?;
         }

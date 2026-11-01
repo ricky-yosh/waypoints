@@ -695,6 +695,11 @@ fn validate_prompt(prompt: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_workflow_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!name.trim().is_empty(), "workflow name must not be blank");
+    Ok(())
+}
+
 fn decode_node(row: &turso::Row) -> anyhow::Result<Node> {
     Ok(Node {
         id: row.get(0).context("reading node identifier")?,

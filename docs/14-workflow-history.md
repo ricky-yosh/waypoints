@@ -11,6 +11,7 @@ This implements the first part of the
 [workflow history decision](02-architecture.md#architecture-decision-persistent-workflow-undoredo).
 Supported actions:
 
+- Rename a workflow.
 - Create a prompt node.
 - Save a different prompt on an existing node.
 - Create a workflow connection in a legacy unbased workflow.
@@ -22,7 +23,7 @@ initial base/upstream attachment in the same creation action. Metadata-only
 connection edits are blocked in based workflows. [Native reparenting](18-native-reparenting.md)
 is a separate acknowledged operation that starts a new undo baseline.
 
-Saving identical prompt text is a no-op: no undo step and no redo-tail deletion.
+Saving an identical workflow name or prompt text is a no-op: no undo step and no redo-tail deletion.
 Rejected edits likewise leave the history untouched.
 
 Workflow creation is setup, not an undoable action in this slice. Associations,
@@ -31,6 +32,25 @@ history and do not move its cursor or discard redo.
 [Native node deletion](19-native-node-deletion.md) starts an acknowledged undo
 baseline rather than adding an undoable metadata action. Disconnection, ordering,
 and layout remain unimplemented.
+
+## Workflow renaming
+
+```sh
+waypoints workflow rename --workflow 1 --name "Review authentication"
+```
+
+The command returns the updated workflow (`--json` for machine-readable output),
+including its unchanged ID, canonical project path, and saved base. Names follow
+the same rules as creation: blank/whitespace-only names are rejected, other text
+is preserved verbatim, and duplicate names are allowed.
+
+Each changed name adds one `Rename workflow` action to the project's shared
+history. Undo/Redo restores only the expected before/after name, not a snapshot
+of the whole workflow. Graph attachments, code, workspaces, run records, and
+agent sessions are untouched. Renaming and its replay are allowed during active
+runs but, like other metadata edits, refuse unresolved native dependency
+operations. A changed saved name or missing workflow blocks replay without moving
+the cursor. Rename, history append/redo-tail deletion, and cursor writes are atomic.
 
 ## Prompt-only move and delete
 
@@ -187,7 +207,9 @@ no fabricated prior edits, and only subsequent supported edits are undoable.
 Old prompt text is intentionally retained in history records.
 
 Records have explicit format versions 1 (original metadata actions), 2
-(attachment-aware node creation), and 3 (prompt-only move/delete). Unsupported versions or malformed actions
+(attachment-aware node creation), 3 (prompt-only move/delete), and 4 (workflow
+renaming). Earlier versions remain readable; older executables cannot replay
+version 4. Unsupported versions or malformed actions
 produce an error when encountered, without moving the cursor or deleting current
 workflow state. This slice does not implement format conversion or a history-reset
 command; future upgrades must migrate or explicitly invalidate incompatible history.
@@ -219,6 +241,7 @@ metadata-undoable; undoing one does not cancel runs or change jj parents.
 
 | Method | Parameters | Result |
 |---|---|---|
+| `workflow.rename` | `{workflow_id, name}` | Updated saved workflow; one undoable name change |
 | `history.status` | `{project_path}` | `{project_path, undo, redo}` |
 | `history.undo` | `{project_path, expected_edit_id}` | New history status |
 | `history.redo` | `{project_path, expected_edit_id}` | New history status |

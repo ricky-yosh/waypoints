@@ -24,7 +24,7 @@ than copying them into every overview.
 
 | Capability | Current boundary | Detailed contract |
 |---|---|---|
-| Persistent workflows and prompt graphs | Canonical project-folder selection; multiple workflows; no separate project registry | [Backend/CLI](11-backend-cli.md) |
+| Persistent workflows and prompt graphs | Canonical project-folder selection; multiple workflows; undoable renaming; no separate project registry | [Backend/CLI](11-backend-cli.md), [renaming](14-workflow-history.md#workflow-renaming) |
 | Fixed workflow bases | Explicit local bookmark or revision, resolved once; omitting a selector still creates an unbased legacy workflow | [Workflow bases](16-workflow-bases.md) |
 | Rooted node creation | New based-workflow nodes explicitly attach to the base or an upstream node; prompt creation does not create code | [Rooted nodes](17-rooted-node-dependencies.md) |
 | Native association and change creation | Unique native changes; based nodes require matching parents; native creation currently has one parent | [Backend/CLI](11-backend-cli.md#associate-a-node-with-an-existing-jj-change), [rooted nodes](17-rooted-node-dependencies.md) |
@@ -35,7 +35,7 @@ than copying them into every overview.
 | Automatic successful-turn snapshots | Save an exact native revision and separate snapshot outcome; failure/cancellation preserves files without an automatic snapshot | [Revision recording](13-agent-run-lifecycle.md#automatic-revision-recording) |
 | Informational upstream hint | Best-effort per-turn direct graph revisions; changed/unchanged/unknown comparison for users, never agent context or execution policy | [Upstream inputs](13-agent-run-lifecycle.md#informational-upstream-hint) |
 | Interrupted-run recovery | Explicit stopped-writer attestation and fresh workspace checks; no process discovery, prompt replay, or lost-snapshot reconstruction | [Run recovery](13-agent-run-lifecycle.md#recovering-interrupted-runs) |
-| Metadata undo/redo | Chronological per canonical project folder; node creation/initial attachment, prompt edits, legacy connection creation, prompt-only move/delete; never code/conversation rewind | [Workflow history](14-workflow-history.md) |
+| Metadata undo/redo | Chronological per canonical project folder; workflow renaming, node creation/initial attachment, prompt edits, legacy connection creation, prompt-only move/delete; never code/conversation rewind | [Workflow history](14-workflow-history.md) |
 | Prompt-only topology editing | Rooted based workflows; move a native-free subtree or delete one node and reconnect children; refuses native/workspace/run references throughout subtree | [Planning edits](14-workflow-history.md#prompt-only-move-and-delete) |
 | Native reparenting | Move one native node and its checked subtree onto one replacement dependency in the same workflow | [Reparenting](18-native-reparenting.md) |
 | Native deletion with retained folders | Abandon one native change, reconnect children, deregister its ready matching saved workspace while retaining every file and historical record; explicit resume for partial abandonment | [Deletion](19-native-node-deletion.md) |

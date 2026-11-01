@@ -89,6 +89,13 @@ pub(crate) struct WorkflowParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct RenameWorkflowParams {
+    pub workflow_id: i64,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NodeParams {
     pub workflow_id: i64,
     pub node_id: i64,
