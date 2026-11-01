@@ -1,15 +1,24 @@
 # Local backend and CLI
 
+This is the current command/transport reference. Start with the
+[core/backend status map](20-core-backend-status.md) for the capability inventory
+and discussion backlog; follow feature links here for exact safety contracts.
+
 ## Quick start
 
 No database server or manual backend startup is required:
 
 ```sh
-cargo run -p waypoints-cli -- workflow create --project . --name "First workflow"
+cargo run -p waypoints-cli -- workflow create --project . --name "First workflow" --base main
 cargo run -p waypoints-cli -- workflow list --project . --json
 cargo run -p waypoints-cli -- backend status --json
 cargo run -p waypoints-cli -- backend stop
 ```
+
+This example requires an existing jj project and local `main` bookmark. Choose
+another bookmark or `--base-revision` if needed. Omitting both selectors creates
+a legacy unbased workflow and does not require jj; it does not implicitly use
+`main`.
 
 `--json` prints a single JSON value on stdout. Errors go to stderr and exit
 nonzero; command syntax errors use Clap's exit status 2. A workflow name may be
@@ -18,6 +27,33 @@ clients and storage resolve their paths so relative paths don't depend on the
 background server's working directory.
 
 ## Save a branching workflow
+
+For based workflows, use the [rooted node flow](17-rooted-node-dependencies.md):
+`node create --from-base` or `--parent NODE_ID`, then `node create-change` from
+that saved dependency. The metadata-only connection examples below remain the
+**legacy unbased** flow, not a way to bypass native dependency editing.
+
+To move existing native work, use `node reparent --workflow ID --node ID
+--parent UPSTREAM_ID --accept-undo-boundary` (or `--from-base`).
+This rebases the node and its descendants and establishes a project undo
+boundary. Inspect durable outcomes with `node operations --workflow ID --json`.
+See [native reparenting](18-native-reparenting.md) for safeguards, conflicts,
+stale checkouts, and unresolved-operation limitations.
+For an interrupted dependency edit, inspect `node operation-recovery --operation ID --json`.
+After confirming old native processes and other writers stopped, use
+`node recover-operation --operation ID --confirm-processes-stopped --json`.
+Only clearly applied or unapplied outcomes are resolved; jj is never rerun.
+
+`node delete --workflow ID --node ID --accept-undo-boundary` abandons native work
+and reconnects its children. A ready, matching saved workspace is deregistered,
+but its folder and all files remain on disk at the reported path. Unsaved,
+additional, missing, stale, or mismatched editing workspaces remain refused.
+The shared `node operation-recovery` / `node recover-operation`
+commands handle both reparent and delete; older reparent recovery names remain
+aliases. See [native deletion](19-native-node-deletion.md) for scope and history.
+If inspection reports `deletion_abandoned`, use the explicit
+`node resume-deletion --operation ID --confirm-processes-stopped` command for the
+remaining workspace deregistration. Ordinary recovery never runs native mutations.
 
 Workflows can now save an explicit native starting point with
 `workflow create --base main` or `--base-revision COMMIT_ID`. Inspect it with
@@ -28,8 +64,10 @@ Omitting a selector still creates an unbased workflow in this slice.
 
 Nodes contain saved prompts, with optional explicit associations to existing jj changes.
 They do not store agent conversations.
-Connections are directed saved relationships: they do not execute work or change
-jj ancestry. All commands below use the backend, never the database directly.
+In based workflows, attachments represent native code dependencies; checked
+reparent/delete operations change jj ancestry. Connections never automatically
+execute work. The examples below are specifically for **legacy unbased**
+metadata-only connections. All commands use the backend, never the database directly.
 
 First create or list workflows to find the workflow ID. For a new empty database
 the first workflow has ID 1; use the actual IDs returned by your commands.
@@ -52,19 +90,40 @@ cargo run -p waypoints-cli -- node get --workflow 1 --node 2 --json
 cargo run -p waypoints-cli -- workflow graph --workflow 1 --json
 ```
 
-Graph JSON contains `workflow`, `nodes`, and `connections`. Nodes are ordered by
+Graph JSON contains `workflow`, `nodes`, `connections`, `base_nodes`, and
+`connectivity` (`unbased`, `rooted`, or `needs_adoption`). Nodes are ordered by
 ID; connections by source then target ID. Node IDs are database-local and stable
 when prompts are edited. Prompts are preserved verbatim, but blank/whitespace-only
 prompts are rejected. Missing workflows/nodes, cross-workflow links, self-links,
 duplicate links, and directed cycles return errors without changing the graph.
-Fan-out and fan-in are allowed. Nodes need not be connected.
+Legacy unbased graphs allow fan-out, fan-in, and disconnected nodes. Based graphs
+require explicit paths to the base; see [legacy adoption](17-rooted-node-dependencies.md#existing-workflows).
+An unresolved native dependency edit adds `unresolved_dependency_operation` with
+its operation ID: saved edges can then differ from native state until explicit
+recovery. Saved connectivity alone does not prove native ancestry or checkout
+freshness.
 
 The database adds `nodes` and `connections` tables when opening an existing
 workflows-only database, preserving saved workflows. Graphs and prompt edits
 survive backend restarts. Node creation, prompt edits, and connection creation
 now have [persistent metadata undo/redo](14-workflow-history.md), shared across
 the project's workflows. It never reverses code, jj operations, or conversations.
-Existing data forms a non-undoable baseline. No delete/disconnect command exists yet.
+Existing data forms a non-undoable baseline. Native reparent/delete establish
+acknowledged undo boundaries rather than metadata undo actions. Prompt-only
+move/delete use ordinary metadata history; general disconnection remains unimplemented.
+
+For an unmaterialized subtree in a rooted based workflow:
+
+```sh
+waypoints node move-prompt --workflow 1 --node 2 --parent 3
+waypoints node move-prompt --workflow 1 --node 2 --from-base
+waypoints node delete-prompt --workflow 1 --node 2
+```
+
+These return the updated graph without invoking jj or clearing Undo/Redo.
+Deletion reconnects children to the node's sole parent; move changes the parent
+without dropping descendants. Both refuse native/workspace/run references
+anywhere in the source subtree. See [prompt-only editing rules](14-workflow-history.md#prompt-only-move-and-delete).
 
 After rebuilding, stop any old backend and let the next workflow/node/connection
 command start the new executable. Protocol version 1 is retained for these
@@ -96,6 +155,8 @@ An ambiguous prefix, nonexistent change, or divergent change cannot be selected.
 Selection resolves the full change ID and stores it with the canonical jj workspace
 root in the `node_changes` table. Running `associate` again explicitly replaces that
 node's association; a rejected selection leaves its prior association unchanged.
+Based workflows additionally require matching saved native parents and exclusive
+active-node ownership of the selected change.
 Neither selection nor refresh changes workflow connections or jj ancestry.
 
 `node refresh` returns `{node, association, state}`. `association` is either null
@@ -129,12 +190,64 @@ return an error. The owning process is terminated on timeout.
 
 Associations survive backend restarts. Neither association nor refresh creates
 changes. Explicit change and workspace creation are described below.
-Switching existing working copies, revision-history browsing, code restoration,
-downstream staleness, and agent execution are not implemented.
+General existing-checkout switching/repair, revision-history browsing, code
+restoration, and downstream context-staleness tracking are not implemented.
+[Agent execution and saved-session continuation](13-agent-run-lifecycle.md) are
+implemented; they are not native history browsing or historical-code continuation.
+
+## Review recorded code without snapshotting
+
+```sh
+waypoints node review --workflow 1 --node 2
+waypoints run review --run 3
+# Add --json for the same structured response used by RPC clients.
+```
+
+Both commands return `{revision, parent_commit_ids, summary, patch}`. `revision`
+contains the exact change/commit IDs, description, and conflict flag. `summary`
+is native `jj diff -r COMMIT --summary` text, **not a parsed filename list**.
+`patch` is native `jj diff -r COMMIT --git` text. Parents are exact commit IDs.
+For merge commits jj compares against the merged parent tree, not one arbitrarily
+chosen parent. Empty revisions have empty summary/patch strings; binary files and
+conflicts retain jj's native representation.
+
+`node review` first resolves the saved change to one current recorded revision.
+Unassociated, missing, or divergent changes are errors, never guessed selections.
+All subsequent queries use that exact commit even if an external writer advances
+the change during review. `run review` instead resolves the exact commit saved in
+`snapshot.revision`; a later rewrite never substitutes newer code. Runs without a
+saved snapshot and commits no longer available in jj produce errors.
+
+Run review reads through the workflow's project repository, so it does not require
+the run's editing workspace to exist. Historical runs of deleted nodes remain
+reviewable while their native objects remain available. Saved references do not
+pin objects against native garbage collection.
+
+These reads use `--ignore-working-copy --at-op=@`: no snapshot, checkout update,
+Git import, concurrent-operation merging, graph/history write, or agent execution.
+Unsnapshotted workspace edits are excluded. Both commands can auto-start the backend.
+The complete review has a four-second budget; each native subprocess remains
+limited to two seconds and 1 MiB per stream. The JSON-encoded review is limited
+to 900 KiB to fit the 1 MiB RPC frame. Oversized or non-UTF-8 output is an error,
+not truncated code. Use native jj for reviews exceeding these limits.
+
+This is not a revision-history browser, code restoration, old-code continuation,
+human approval, or downstream context-staleness assessment.
 
 ## Create a change for an unassociated node
 
-Choose a base **explicitly**; workflow connections do not infer jj ancestry.
+For a **based workflow**, omit `--base` to create native work on the node's saved
+base/upstream dependency:
+
+```sh
+cargo run -p waypoints-cli -- node create-change --workflow 1 --node 2 --json
+```
+
+The upstream node must have a current idle native change. An explicit `--base`
+is accepted only when it resolves to that same dependency; native creation
+currently requires one parent.
+
+For a **legacy unbased workflow**, choose a base explicitly.
 `BASE_REVISION` accepts one existing change ID, commit ID, unique ID prefix, or
 `root()`. Bookmarks, `@`, and arbitrary revsets are not accepted. A missing or
 divergent change cannot be a base; select an exact commit ID to disambiguate.
@@ -150,8 +263,9 @@ new full change ID and workspace root. Its response has the same
 `{node, association, state}` shape as refresh. The node's prompt and connections
 are unchanged. The new change initially has the base's tree, with no added edits.
 Your current working-copy change, recorded commit, and dirty files stay unchanged.
-Two nodes created on the same base are native siblings even if a workflow edge
-connects them.
+In a legacy unbased workflow, two nodes created on the same explicit base are
+native siblings even if a metadata edge connects them. This independent-base
+behavior is not allowed to bypass saved dependencies in based workflows.
 
 Creation is refused for **any existing association**, including a missing change.
 It does not replace, resurrect, or switch to an associated change. These
@@ -237,7 +351,8 @@ jj status
 waypoints node refresh --workflow 1 --node 2 --json
 ```
 
-Waypoints does not launch an editor or agent. Two node workspaces on sibling
+Workspace allocation does not launch an editor or agent; use explicit
+`run start` / `run continue` for ACP execution. Two node workspaces on sibling
 changes have separate files, but native ancestry and operation history are shared;
 rewriting an ancestor can still rebase descendants or introduce conflicts.
 
@@ -394,7 +509,10 @@ Transport: a local Unix socket, one newline-delimited JSON-RPC 2.0 request per
 connection. Clients reconnect for each request. The backend serializes requests.
 Frames are limited to 1 MiB. The server's frame reads/response writes have
 five-second timeouts. Clients allow five seconds for ordinary requests and
-120 seconds for `node.workspace.create`.
+120 seconds for `node.workspace.create`, `node.reparent`, `node.delete`,
+`node.operation_recovery`, `node.recover_operation`, and `node.resume_deletion`, including the older
+reparent recovery aliases. Long native requests still serialize other requests;
+agent execution and snapshot tasks run in the background.
 Storage mutations are not cancelled by a server-side transport timeout. Requests
 are not automatically retried: a lost response may follow a successful mutation.
 
@@ -411,26 +529,52 @@ Methods:
 | `workflow.get` | `{workflow_id}` | Saved workflow including its nullable base, without querying jj |
 | `workflow.set_base` | `{workflow_id, source}` | Initial base selection for an unbased workflow; existing bases cannot be replaced |
 | `workflow.list` | `{project_path}` | Array of workflows ordered by ID |
-| `workflow.graph` | `{workflow_id}` | `{workflow, nodes, connections}` |
-| `node.create` | `{workflow_id, prompt}` | `{id, workflow_id, prompt}` |
+| `workflow.graph` | `{workflow_id}` | `{workflow, nodes, connections, base_nodes, connectivity, unresolved_dependency_operation?}`; saved metadata, not a jj query |
+| `node.create` | `{workflow_id, prompt, parent?}` | `{id, workflow_id, prompt}`; based workflows require an explicit parent |
 | `node.get` | `{workflow_id, node_id}` | `{id, workflow_id, prompt}` |
 | `node.update` | `{workflow_id, node_id, prompt}` | Updated node, with the same ID |
 | `node.associate` | `{workflow_id, node_id, change_id}` | `{node, association, state}` with the selected current revision |
-| `node.create_change` | `{workflow_id, node_id, base}` | `{node, association, state}` for the newly created empty change |
+| `node.create_change` | `{workflow_id, node_id, base?}` | `{node, association, state}`; omit base to use a based node's saved dependency |
+| `node.reparent` | `{workflow_id, node_id, parent, acknowledgement?}` | `DependencyOperation`; checked native subtree rebase and undo boundary |
+| `node.delete` | `{workflow_id, node_id, acknowledgement?}` | `DependencyOperation`; native abandonment/child reconnection, saved workspace deregistration with all files retained |
+| `node.resume_deletion` | `{operation_id, confirmation?}` | `DependencyOperation`; explicitly finish deregistration from a verified abandonment checkpoint |
+| `node.move_prompt` | `{workflow_id, node_id, parent}` | Updated `WorkflowGraph`; metadata-only subtree move, ordinary Undo |
+| `node.delete_prompt` | `{workflow_id, node_id}` | Updated `WorkflowGraph`; metadata-only deletion/child reconnection, ordinary Undo |
+| `node.operations` | `{workflow_id}` | Saved `DependencyOperation` records ordered by ID |
+| `node.operation_recovery` | `{operation_id}` | `DependencyRecovery`; read-only applied/unapplied/blocked/resolved assessment |
+| `node.recover_operation` | `{operation_id, confirmation?}` | Resolved `DependencyOperation`; fresh checks, no repeated native mutation |
+| `node.reparent_recovery` | `{operation_id}` | Compatibility alias for `node.operation_recovery` |
+| `node.recover_reparent` | `{operation_id, confirmation?}` | Compatibility alias for `node.recover_operation` |
+| `workflow.adopt_roots` | `{workflow_id, base_nodes}` | Rooted prompt-only legacy graph; refuses existing native references |
 | `node.workspace.create` | `{workflow_id, node_id, directory}` | `{node, workspace, state}` for a new or already-saved workspace |
 | `node.workspace.status` | `{workflow_id, node_id}` | `{node, workspace, state}` observed without updating files |
 | `node.workspace.verify` | `{workflow_id, node_id}` | `{node, workspace, state}` marked ready only after read-only checkout verification |
 | `node.refresh` | `{workflow_id, node_id}` | `{node, association, state}` with freshly queried native status |
-| `connection.create` | `{workflow_id, source_id, target_id}` | `{workflow_id, source_id, target_id}` |
+| `node.review` | `{workflow_id, node_id}` | `{revision, parent_commit_ids, summary, patch}` for one current recorded revision |
+| `run.review` | `{run_id}` | Same review shape for the exact saved snapshot; no fallback to current code |
+| `connection.create` | `{workflow_id, source_id, target_id}` | `{workflow_id, source_id, target_id}`; metadata-only, legacy unbased workflows only |
 | `run.start` | `{workflow_id, node_id, executable}` | `{run, permission}`; returns before ACP initialization finishes |
 | `run.continue` | `{run_id, prompt}` | New `{run, permission}` loading the selected stopped run's saved session; no fresh fallback |
-| `run.list` | `{workflow_id, node_id}` | Array of run statuses ordered by ID |
+| `run.list` | `{workflow_id, node_id}` | Array of run statuses ordered by ID, including historical runs for deleted nodes |
 | `run.status` | `{run_id}` | `{run, permission}` including any pending live approval |
+| `run.inputs` | `{run_id}` | Read-only direct upstream comparison: `unchanged`, `changed`, or `unknown` with `detail` |
 | `run.recovery` | `{run_id}` | `{run, workspace}`; read-only recovery checks, not process-exit proof |
 | `run.recover` | `{run_id, confirmation: "processes_stopped"}` | `{run, permission}`; explicitly recovered reservation after fresh checks |
 | `run.events` | `{run_id, after}` | `{status, events, next, gap}` from bounded, transient buffers |
 | `run.permission` | `{run_id, permission_id, option_id}` | Updated status; accepts only an advertised single-use option |
 | `run.cancel` | `{run_id}` | Status acknowledging cancellation, not completed cleanup |
+
+`parent` uses `{"kind":"workflow_base"}` or `{"kind":"node","node_id":1}`.
+`node.reparent` and `node.delete` require
+`acknowledgement: "accept_undo_boundary"` in effect; omitted/null is a refusal
+before mutation, not implicit consent. Dependency recovery similarly requires
+`confirmation: "processes_stopped"`. Unknown fields, booleans instead of these
+strings, or force flags are invalid parameters.
+
+Operation `kind` is `reparent` or `delete`; state is `unresolved`, `completed`, or
+`not_applied`. See [reparenting](18-native-reparenting.md) and
+[deletion](19-native-node-deletion.md) for exact fields, undo boundaries,
+historical data, blocked states, and recovery rules.
 
 See [agent-run lifecycle](13-agent-run-lifecycle.md) for continuation selection,
 replay/live event markers, commands, limits, crash reservations, and validation. Agent tasks run outside
@@ -474,15 +618,21 @@ Native integration tests require `jj` and create disposable repositories. They
 exercise rewrites, abandonment, divergence, conflicts, and unchanged operation IDs
 when querying dirty working copies.
 
-## Deliberately not included
+## Scope and remaining work
 
-The [revised native dependency model](15-native-dependency-editing.md) is the next
-implementation direction, not current CLI behavior. Existing connections remain
-metadata-only and disconnected nodes remain accepted until an explicit migration.
+Based workflows already implement rooted native dependencies; legacy unbased
+graphs retain planning-only/disconnected behavior for compatibility. See the
+[current inventory and discussion backlog](20-core-backend-status.md) rather than
+treating older slice descriptions as a second roadmap.
 
-- Windows named pipes (the backend currently requires macOS/Linux).
-- GUI integration, subscriptions, or durable event replay.
-- Project registration, node deletion/disconnection, or agent-session forks.
-- Retrying or reconstructing failed/interrupted finalization.
-- Automatic process discovery/termination or workspace repair during recovery.
-- General versioned database migrations beyond additive create-if-missing tables.
+The shared backend does not provide a GUI, Windows IPC, subscriptions, durable
+event replay, automatic recovery/repair, or lost-finalization reconstruction.
+There is a small [informational upstream-revision hint](13-agent-run-lifecycle.md#informational-upstream-hint),
+not full context-staleness tracking. Human-readable `run status` shows it;
+`run inputs --run ID --json` exposes the comparison separately without changing
+the existing `run.status` JSON response shape. Capture and comparison never change
+agent context or run eligibility.
+
+Native revision-history browsing, full context staleness, workspace
+cleanup, native merges, broader reconciliation, and operational/product decisions
+remain discussion items, not features authorized by this reference.

@@ -5,16 +5,28 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use waypoints_core::run::RecoveryConfirmation;
-use waypoints_core::workflow::BaseSource;
+use waypoints_core::storage::UndoBoundaryAcknowledgement;
+use waypoints_core::workflow::{BaseSource, NodeParent};
 
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 // Bound memory usage even when a client sends a frame without a newline.
 pub(crate) const MAX_FRAME: usize = 1024 * 1024;
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 
-// Workspace checkout can materialize a repository; ordinary requests keep their short deadline.
+// Native work and full-graph verification have bounded longer deadlines.
+// Ordinary requests keep their short deadline.
 pub(crate) fn request_timeout(method: &str) -> Duration {
-    if method == "node.workspace.create" {
+    if matches!(
+        method,
+        "node.workspace.create"
+            | "node.reparent"
+            | "node.delete"
+            | "node.operation_recovery"
+            | "node.recover_operation"
+            | "node.reparent_recovery"
+            | "node.recover_reparent"
+            | "node.resume_deletion"
+    ) {
         Duration::from_secs(120)
     } else {
         TIMEOUT
@@ -60,6 +72,13 @@ pub(crate) struct CreateParams {
 pub(crate) struct WorkflowBaseParams {
     pub workflow_id: i64,
     pub source: BaseSource,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdoptRootsParams {
+    pub workflow_id: i64,
+    pub base_nodes: Vec<i64>,
 }
 
 #[derive(Deserialize)]
@@ -131,7 +150,49 @@ pub(crate) struct AssociateParams {
 pub(crate) struct CreateChangeParams {
     pub workflow_id: i64,
     pub node_id: i64,
-    pub base: String,
+    #[serde(default)]
+    pub base: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReparentParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub parent: NodeParent,
+    #[serde(default)]
+    pub acknowledgement: Option<UndoBoundaryAcknowledgement>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MovePromptParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    pub parent: NodeParent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteNodeParams {
+    pub workflow_id: i64,
+    pub node_id: i64,
+    #[serde(default)]
+    pub acknowledgement: Option<UndoBoundaryAcknowledgement>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DependencyOperationParams {
+    pub operation_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoverDependencyParams {
+    pub operation_id: i64,
+    #[serde(default)]
+    pub confirmation: Option<RecoveryConfirmation>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +208,8 @@ pub(crate) struct CreateWorkspaceParams {
 pub(crate) struct CreateNodeParams {
     pub workflow_id: i64,
     pub prompt: String,
+    #[serde(default)]
+    pub parent: Option<NodeParent>,
 }
 
 #[derive(Deserialize)]

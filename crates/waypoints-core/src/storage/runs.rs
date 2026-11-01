@@ -140,6 +140,7 @@ impl Storage {
             process_id: None,
             state: RunState::Starting,
             snapshot: SnapshotState::NotRecorded,
+            upstream_inputs: self.capture_upstream_inputs(workflow_id, node_id).await,
         })
     }
 
@@ -321,6 +322,8 @@ impl Storage {
 
     /// Lists a node's runs in identifier order, validating workflow membership.
     ///
+    /// Historical runs remain inspectable after native node deletion.
+    ///
     /// # Errors
     ///
     /// Returns an error for invalid membership, invalid records, or database failure.
@@ -329,9 +332,19 @@ impl Storage {
         workflow_id: i64,
         node_id: i64,
     ) -> Result<Vec<Run>, StorageError> {
-        self.node(workflow_id, node_id).await?;
         Ok(async {
             let connection = self.database.connect()?;
+            let mut membership = connection
+                .query(
+                    "SELECT id FROM nodes WHERE workflow_id = ?1 AND id = ?2",
+                    [workflow_id, node_id],
+                )
+                .await?;
+            anyhow::ensure!(
+                membership.next().await?.is_some(),
+                "node not found in workflow"
+            );
+            drop(membership);
             let mut rows = connection
                 .query(
                     "SELECT id, record FROM agent_runs WHERE node_id = ?1 ORDER BY id",
@@ -429,6 +442,7 @@ impl Storage {
     ///
     /// Returns an error for a reserved node or a database failure.
     pub async fn ensure_node_idle(&self, node_id: i64) -> Result<(), StorageError> {
+        self.ensure_dependency_operations_clear().await?;
         let connection = self
             .database
             .connect()

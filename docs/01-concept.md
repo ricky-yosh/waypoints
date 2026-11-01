@@ -1,5 +1,8 @@
 # Concept
 
+This is the product direction, not an implementation checklist. See
+[current core/backend status](20-core-backend-status.md) for what works today.
+
 ## The problem
 
 Work with coding agents often means chaining prompts by hand: run one, wait and watch the output (watching is useful), copy results into the next prompt, and lose track of which results still hold when something upstream changes. Delta (from the Zed team) makes single threads feel fluid, but the plan that decides which threads exist, and in what order, has no home.
@@ -11,7 +14,7 @@ The workflow is the main object you work with. Workflows are grouped by project 
 - Each node represents a phase's prompt/assignment, which can be refined through multiple turns rather than requiring a new node for each turn.
 - A node is associated with an evolving native jj change. Its historical code revisions are native jj commits, not a separate Waypoints snapshot system.
 - Users move backward and forward between nodes and workflows, inspect historical revisions, and explicitly continue work from a chosen revision.
-- Connections express intended workflow relationships. Native jj ancestry is separate repository truth; show differences rather than silently forcing one to match the other.
+- In based workflows, connections express native code dependencies rooted at a saved base. Native jj state and workflow metadata remain separate stores, but checked dependency edits must keep them aligned. Legacy unbased links remain planning-only; never silently migrate them or guess associations from ancestry.
 - Upstream edits can make downstream work stale and introduce jj conflicts. Surface these consequences; do not automatically execute downstream nodes.
 - Agent conversations stay in existing harnesses. A phase may use fresh scoped context or explicitly continue an upstream conversation; Waypoints does not archive transcripts.
 
@@ -39,7 +42,7 @@ Use **workflow**, not a new application-level "session," for the sidebar item. S
 - Reuse existing results; when a node changes, show affected downstream work and let the user decide what to revisit.
 - Gates: a node can pause for approval before passing output on.
 - Fan-out and fan-in: try two approaches, then compare or merge.
-- Graphs saved as plain files, so they can be diffed and shared.
+- Portable graphs that can be diffed and shared are an idea to discuss, not the current persistence format. Current workflow metadata lives in the backend-owned Turso database; import/export is not implemented.
 
 ## Example chain
 

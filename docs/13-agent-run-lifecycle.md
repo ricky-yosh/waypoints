@@ -29,6 +29,44 @@ attestation that old writers stopped; it is not automatic process detection.
 There is no automatic retry, workflow-edge execution, transcript archive,
 installer, or GUI integration.
 
+## Informational upstream hint
+
+New runs and continuations best-effort record the direct dependencies of a rooted
+workflow as `run.upstream_inputs`: a list of `{parent, commit_id}`. `parent` is
+the saved workflow base or an upstream node. The base stays pinned to its saved
+commit; node inputs use their unique current recorded revisions. Each continuation
+captures new observations without replacing the previous run's observations.
+
+```sh
+waypoints run status --run 1
+waypoints run inputs --run 1 --json
+```
+
+Human-readable `run status` appends a small hint. `run inputs` / RPC `run.inputs`
+returns `{status: "unchanged"}`, `{status: "changed"}`, or
+`{status: "unknown", detail}`. The existing JSON `run status` shape is unchanged:
+use `run inputs` for the live comparison; `run.upstream_inputs` holds only the
+saved observation. Both durable queries can auto-start the backend.
+
+Comparison uses exact commit IDs and dependency identities. Upstream code
+rewrites, native description-only rewrites, and dependency changes count;
+prompt-only edits, downstream-only edits, and unsnapshotted upstream files do not.
+An unavailable/missing/divergent upstream, deleted target node, or failed query
+reports unknown rather than claiming unchanged. Older runs, legacy unbased
+workflows, and runs whose optional input capture failed also report unknown.
+
+Capture adds at most 500 ms of optional bookkeeping before reservation/launch;
+failure or timeout does not block a run. Comparison is read-only with a
+four-second total budget and the existing bounded native queries. Neither
+operation snapshots code, changes metadata history, injects text into agent
+prompts, requires acknowledgement, blocks execution, or reruns anything.
+
+This is a direct graph-revision hint, **not full context-staleness tracking or
+proof of what the agent actually read**. It does not check graph/native ancestry
+alignment, physical checkout freshness, transitive inputs, or agent reasoning.
+Observations are not atomic with external jj writers or agent execution; no
+native objects are pinned against garbage collection.
+
 ## CLI
 
 First allocate and verify a node workspace using the

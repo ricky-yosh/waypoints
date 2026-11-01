@@ -39,6 +39,7 @@ impl Storage {
         node_id: i64,
         directory: &Path,
     ) -> Result<NodeWorkspace, StorageError> {
+        self.ensure_dependency_operations_clear().await?;
         self.node(workflow_id, node_id).await?;
         let directory = normalized_destination(directory)?;
         if let Some(saved) = self.saved_workspace(node_id).await? {

@@ -34,3 +34,34 @@ pub struct WorkflowBase {
     /// Exact native revision observed at selection time; not refreshed automatically.
     pub revision: Revision,
 }
+
+/// Explicit initial dependency for a newly saved node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum NodeParent {
+    /// Attach directly to the workflow's fixed native base.
+    WorkflowBase {},
+    /// Build on a saved upstream node in this workflow.
+    Node {
+        /// Existing upstream node identifier.
+        node_id: i64,
+    },
+}
+
+/// Saved connectivity to the explicit workflow base, not proof of native checkout freshness.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GraphConnectivity {
+    /// Legacy workflow has no selected base.
+    #[default]
+    Unbased,
+    /// Every saved node is reachable from the selected base.
+    Rooted,
+    /// Existing nodes need explicit dependency adoption; none are inferred.
+    NeedsAdoption {
+        /// Nodes without a saved path to the workflow base.
+        node_ids: Vec<i64>,
+    },
+}

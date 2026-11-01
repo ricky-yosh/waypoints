@@ -5,9 +5,19 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use waypoints_core::jj::ChangeState;
-use waypoints_core::storage::Storage;
-use waypoints_core::workflow::BaseSource;
+use waypoints_core::storage::{
+    DependencyOperationKind, DependencyOperationState, Node, Storage, UndoBoundaryAcknowledgement,
+    Workflow,
+};
+use waypoints_core::workflow::{BaseSource, GraphConnectivity, NodeParent};
 use waypoints_core::workspace::WorkspaceState;
+
+#[path = "jj/planning.rs"]
+mod planning;
+#[path = "jj/upstream.rs"]
+mod upstream;
+#[path = "jj/workspace_deletion.rs"]
+mod workspace_deletion;
 
 struct Repository {
     directory: TempDir,
@@ -97,6 +107,876 @@ fn recorded_parents(repo: &Repository, revision: &str) -> anyhow::Result<Vec<Str
     let mut parents = output.lines().map(str::to_owned).collect::<Vec<_>>();
     parents.sort();
     Ok(parents)
+}
+
+async fn reparent_fixture(
+    conflict: bool,
+) -> anyhow::Result<(Repository, Storage, Workflow, Vec<Node>)> {
+    let repo = Repository::new()?;
+    repo.jj(&["describe", "-m", "Base"])?;
+    let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+    let workflow = storage
+        .create_workflow_from(
+            &repo.project,
+            "Reparent",
+            &BaseSource::Revision {
+                id: repo.value("commit_id")?,
+            },
+        )
+        .await?;
+    let mut parent = NodeParent::WorkflowBase {};
+    let mut nodes = Vec::new();
+    for name in ["interfaces", "authentication", "review", "followup"] {
+        let node = storage.create_node_from(workflow.id, name, &parent).await?;
+        let native = storage
+            .create_node_change_from_dependency(workflow.id, node.id)
+            .await?;
+        let change = native.association.expect("created association").change_id;
+        repo.jj(&["edit", &change])?;
+        let file = if conflict && name == "review" {
+            "authentication"
+        } else {
+            name
+        };
+        fs::write(
+            repo.project.join(format!("{file}.txt")),
+            format!("{name}\n"),
+        )?;
+        repo.jj(&["describe", "-m", name])?;
+        parent = NodeParent::Node { node_id: node.id };
+        nodes.push(node);
+    }
+    Ok((repo, storage, workflow, nodes))
+}
+
+#[test]
+fn native_reparent_rebases_descendants_preserves_files_and_starts_new_undo_baseline()
+-> anyhow::Result<()> {
+    run(async {
+        let (repo, mut storage, workflow, nodes) = reparent_fixture(false).await?;
+        let database = repo.directory.path().join("workflow.db");
+        let original_checkout = repo.jj(&["--ignore-working-copy", "debug", "working-copy"])?;
+        fs::write(repo.project.join("dirty.txt"), "not snapshotted\n")?;
+        let previous = storage
+            .history_status(&repo.project)
+            .await?
+            .undo
+            .expect("history");
+        let before_child = storage.refresh_node(workflow.id, nodes[3].id).await?;
+        let operation = storage
+            .reparent_node(
+                workflow.id,
+                nodes[2].id,
+                &NodeParent::Node {
+                    node_id: nodes[0].id,
+                },
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await?;
+        assert_eq!(operation.state, DependencyOperationState::Completed);
+        assert_eq!(operation.before.len(), 2);
+        assert_eq!(operation.after.len(), 2);
+        assert!(operation.after.iter().all(|revision| !revision.conflicted));
+        for old in &operation.before {
+            let new = operation
+                .after
+                .iter()
+                .find(|new| new.change_id == old.change_id)
+                .expect("same change identity");
+            assert_ne!(old.commit_id, new.commit_id);
+        }
+        assert_eq!(
+            repo.jj(&["--ignore-working-copy", "debug", "working-copy"])?,
+            original_checkout
+        );
+        assert_eq!(
+            fs::read_to_string(repo.project.join("dirty.txt"))?,
+            "not snapshotted\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.project.join("authentication.txt"))?,
+            "authentication\n"
+        );
+        let files = repo.jj(&[
+            "--ignore-working-copy",
+            "--at-op=@",
+            "file",
+            "list",
+            "-r",
+            &operation.after[0].change_id,
+        ])?;
+        assert!(!files.contains("authentication.txt"), "{files}");
+        assert!(
+            files.contains("interfaces.txt") && files.contains("review.txt"),
+            "{files}"
+        );
+        assert!(!files.contains("dirty.txt"), "{files}");
+        let graph = storage.workflow_graph(workflow.id).await?;
+        assert!(
+            graph
+                .connections
+                .iter()
+                .any(|edge| edge.source_id == nodes[0].id && edge.target_id == nodes[2].id)
+        );
+        assert!(
+            !graph
+                .connections
+                .iter()
+                .any(|edge| edge.source_id == nodes[1].id && edge.target_id == nodes[2].id)
+        );
+        let new_child = storage.refresh_node(workflow.id, nodes[3].id).await?;
+        assert_eq!(before_child.association, new_child.association);
+        let status = storage.history_status(&repo.project).await?;
+        assert!(status.undo.is_none() && status.redo.is_none());
+        assert!(storage.undo(&repo.project, previous.id).await.is_err());
+        storage
+            .update_node(workflow.id, nodes[2].id, "New prompt")
+            .await?;
+        let edit = storage
+            .history_status(&repo.project)
+            .await?
+            .undo
+            .expect("new action");
+        storage.undo(&repo.project, edit.id).await?;
+        assert!(storage.history_status(&repo.project).await?.undo.is_none());
+        drop(storage);
+        let storage = Storage::open(&database).await?;
+        assert_eq!(
+            storage.dependency_operations(workflow.id).await?,
+            vec![operation]
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn native_reparent_conflicts_are_completed_outcomes_and_base_is_a_valid_destination()
+-> anyhow::Result<()> {
+    run(async {
+        let (_repo, mut storage, workflow, nodes) = reparent_fixture(true).await?;
+        let operation = storage
+            .reparent_node(
+                workflow.id,
+                nodes[2].id,
+                &NodeParent::WorkflowBase {},
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await?;
+        assert_eq!(operation.state, DependencyOperationState::Completed);
+        assert!(operation.after.iter().any(|revision| revision.conflicted));
+        let graph = storage.workflow_graph(workflow.id).await?;
+        assert!(graph.base_nodes.contains(&nodes[2].id));
+        assert!(
+            graph
+                .connections
+                .iter()
+                .all(|edge| edge.target_id != nodes[2].id)
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn native_reparent_refusals_do_not_mutate_graph_native_state_or_history() -> anyhow::Result<()> {
+    run(async {
+        let (repo, mut storage, workflow, nodes) = reparent_fixture(false).await?;
+        let graph = storage.workflow_graph(workflow.id).await?;
+        let history = storage.history_status(&repo.project).await?;
+        let native = repo.operation()?;
+        for (parent, acknowledgement) in [
+            (NodeParent::WorkflowBase {}, None),
+            (
+                NodeParent::Node {
+                    node_id: nodes[3].id,
+                },
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            ),
+            (
+                NodeParent::Node {
+                    node_id: nodes[1].id,
+                },
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            ),
+            (
+                NodeParent::Node { node_id: i64::MAX },
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            ),
+        ] {
+            assert!(
+                storage
+                    .reparent_node(workflow.id, nodes[2].id, &parent, acknowledgement)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+            assert_eq!(storage.history_status(&repo.project).await?, history);
+            assert_eq!(repo.operation()?, native);
+            assert!(storage.dependency_operations(workflow.id).await?.is_empty());
+        }
+        let target = storage
+            .refresh_node(workflow.id, nodes[2].id)
+            .await?
+            .association
+            .expect("native change")
+            .change_id;
+        repo.jj(&[
+            "--ignore-working-copy",
+            "new",
+            "--no-edit",
+            &target,
+            "-m",
+            "External descendant",
+        ])?;
+        let native = repo.operation()?;
+        let error = storage
+            .reparent_node(
+                workflow.id,
+                nodes[2].id,
+                &NodeParent::WorkflowBase {},
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await
+            .expect_err("external descendants must not be silently changed");
+        assert!(
+            error.to_string().contains("native descendants differ"),
+            "{error}"
+        );
+        assert_eq!(repo.operation()?, native);
+        assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+        assert_eq!(storage.history_status(&repo.project).await?, history);
+        Ok(())
+    })
+}
+
+#[test]
+fn native_reparent_rejects_external_ancestry_drift_and_immutable_work() -> anyhow::Result<()> {
+    run(async {
+        for immutable in [false, true] {
+            let (repo, mut storage, workflow, nodes) = reparent_fixture(false).await?;
+            let target = storage
+                .refresh_node(workflow.id, nodes[2].id)
+                .await?
+                .association
+                .expect("change")
+                .change_id;
+            if immutable {
+                repo.jj(&["bookmark", "create", "protected", "-r", &target])?;
+                repo.jj(&[
+                    "config",
+                    "set",
+                    "--repo",
+                    "revset-aliases.\"immutable_heads()\"",
+                    "protected",
+                ])?;
+            } else {
+                repo.jj(&[
+                    "--ignore-working-copy",
+                    "rebase",
+                    "-s",
+                    &target,
+                    "-d",
+                    &workflow.base.as_ref().expect("base").revision.commit_id,
+                ])?;
+            }
+            let native = repo.operation()?;
+            let graph = storage.workflow_graph(workflow.id).await?;
+            let history = storage.history_status(&repo.project).await?;
+            let error = storage
+                .reparent_node(
+                    workflow.id,
+                    nodes[2].id,
+                    &NodeParent::Node {
+                        node_id: nodes[0].id,
+                    },
+                    Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+                )
+                .await
+                .expect_err("unsafe native state");
+            assert!(
+                error.to_string().contains(if immutable {
+                    "immutable"
+                } else {
+                    "native parents"
+                }),
+                "{error}"
+            );
+            assert_eq!(repo.operation()?, native);
+            assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+            assert_eq!(storage.history_status(&repo.project).await?, history);
+            assert!(storage.dependency_operations(workflow.id).await?.is_empty());
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn native_deletion_reconnects_fanout_preserves_descendants_and_supports_roots_and_leaves()
+-> anyhow::Result<()> {
+    run(async {
+        let (repo, mut storage, workflow, nodes) = reparent_fixture(false).await?;
+        let branch = storage
+            .create_node_from(
+                workflow.id,
+                "Sibling",
+                &NodeParent::Node {
+                    node_id: nodes[1].id,
+                },
+            )
+            .await?;
+        storage
+            .create_node_change_from_dependency(workflow.id, branch.id)
+            .await?;
+        let checkout = repo.jj(&["--ignore-working-copy", "debug", "working-copy"])?;
+        fs::write(repo.project.join("dirty.txt"), "unrecorded\n")?;
+        let source = storage
+            .refresh_node(workflow.id, nodes[1].id)
+            .await?
+            .association
+            .expect("native")
+            .change_id;
+        let operation = storage
+            .delete_node(
+                workflow.id,
+                nodes[1].id,
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await?;
+        assert_eq!(operation.kind, DependencyOperationKind::Delete);
+        assert_eq!(operation.state, DependencyOperationState::Completed);
+        assert_eq!(operation.after.len(), 3);
+        assert_eq!(
+            recorded_value(&repo, &format!("change_id(\"{source}\")"), "change_id")?,
+            ""
+        );
+        let graph = storage.workflow_graph(workflow.id).await?;
+        assert_eq!(graph.connectivity, GraphConnectivity::Rooted);
+        assert!(graph.nodes.iter().all(|node| node.id != nodes[1].id));
+        for child in [nodes[2].id, branch.id] {
+            assert!(
+                graph
+                    .connections
+                    .iter()
+                    .any(|edge| edge.source_id == nodes[0].id && edge.target_id == child)
+            );
+            let native = storage
+                .refresh_node(workflow.id, child)
+                .await?
+                .association
+                .expect("native")
+                .change_id;
+            let files = repo.jj(&["--ignore-working-copy", "file", "list", "-r", &native])?;
+            assert!(
+                files.contains("interfaces.txt") && !files.contains("authentication.txt"),
+                "{files}"
+            );
+        }
+        assert!(storage.node(workflow.id, nodes[1].id).await.is_err());
+        assert!(
+            storage
+                .update_node(workflow.id, nodes[1].id, "Cannot resurrect")
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .associate_node(workflow.id, nodes[1].id, &source)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .create_node_from(
+                    workflow.id,
+                    "Cannot depend on deleted node",
+                    &NodeParent::Node {
+                        node_id: nodes[1].id
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let history = storage.history_status(&repo.project).await?;
+        assert!(history.undo.is_none() && history.redo.is_none());
+        assert_eq!(
+            repo.jj(&["--ignore-working-copy", "debug", "working-copy"])?,
+            checkout
+        );
+        assert_eq!(
+            fs::read_to_string(repo.project.join("dirty.txt"))?,
+            "unrecorded\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.project.join("authentication.txt"))?,
+            "authentication\n"
+        );
+        let root_deletion = storage
+            .delete_node(
+                workflow.id,
+                nodes[0].id,
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await?;
+        assert_eq!(root_deletion.state, DependencyOperationState::Completed);
+        assert_eq!(
+            storage.workflow_graph(workflow.id).await?.base_nodes,
+            vec![nodes[2].id, branch.id]
+        );
+        let leaf = storage
+            .delete_node(
+                workflow.id,
+                branch.id,
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await?;
+        assert!(leaf.after.is_empty());
+        let database = repo.directory.path().join("workflow.db");
+        let graph = storage.workflow_graph(workflow.id).await?;
+        drop(storage);
+        let storage = Storage::open(&database).await?;
+        assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+        assert_eq!(storage.dependency_operations(workflow.id).await?.len(), 3);
+        Ok(())
+    })
+}
+
+#[test]
+fn native_deletion_reports_child_conflicts_without_losing_change_identity() -> anyhow::Result<()> {
+    run(async {
+        let (_repo, mut storage, workflow, nodes) = reparent_fixture(true).await?;
+        let operation = storage
+            .delete_node(
+                workflow.id,
+                nodes[1].id,
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await?;
+        assert_eq!(operation.state, DependencyOperationState::Completed);
+        assert!(operation.after.iter().any(|revision| revision.conflicted));
+        for revision in &operation.after {
+            assert!(
+                operation
+                    .before
+                    .iter()
+                    .any(|old| old.change_id == revision.change_id)
+            );
+        }
+        assert_eq!(
+            storage.workflow_graph(workflow.id).await?.connectivity,
+            GraphConnectivity::Rooted
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn native_deletion_refuses_missing_consent_external_descendants_and_unsaved_workspaces()
+-> anyhow::Result<()> {
+    run(async {
+        let (repo, mut storage, workflow, nodes) = reparent_fixture(false).await?;
+        let graph = storage.workflow_graph(workflow.id).await?;
+        let history = storage.history_status(&repo.project).await?;
+        let native = repo.operation()?;
+        assert!(
+            storage
+                .delete_node(workflow.id, nodes[1].id, None)
+                .await
+                .is_err()
+        );
+        let error = storage
+            .delete_node(
+                workflow.id,
+                nodes[3].id,
+                Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+            )
+            .await
+            .expect_err("source is native @");
+        assert!(error.to_string().contains("native workspace"), "{error}");
+        assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+        assert_eq!(storage.history_status(&repo.project).await?, history);
+        assert_eq!(repo.operation()?, native);
+        let source = storage
+            .refresh_node(workflow.id, nodes[1].id)
+            .await?
+            .association
+            .expect("change")
+            .change_id;
+        repo.jj(&[
+            "--ignore-working-copy",
+            "new",
+            "--no-edit",
+            &source,
+            "-m",
+            "Outside workflow",
+        ])?;
+        let native = repo.operation()?;
+        assert!(
+            storage
+                .delete_node(
+                    workflow.id,
+                    nodes[1].id,
+                    Some(UndoBoundaryAcknowledgement::AcceptUndoBoundary)
+                )
+                .await
+                .expect_err("external child")
+                .to_string()
+                .contains("native descendants differ")
+        );
+        assert_eq!(repo.operation()?, native);
+        assert_eq!(storage.history_status(&repo.project).await?, history);
+        assert!(storage.dependency_operations(workflow.id).await?.is_empty());
+        Ok(())
+    })
+}
+
+#[test]
+fn rooted_nodes_require_dependencies_and_undo_restores_the_whole_attachment() -> anyhow::Result<()>
+{
+    run(async {
+        let repo = Repository::new()?;
+        let database = repo.directory.path().join("workflow.db");
+        let mut storage = Storage::open(&database).await?;
+        let workflow = storage
+            .create_workflow_from(
+                &repo.project,
+                "Rooted",
+                &BaseSource::Revision {
+                    id: "root()".to_owned(),
+                },
+            )
+            .await?;
+        let unbased = storage.create_workflow(&repo.project, "Legacy").await?;
+        let foreign = storage.create_node(unbased.id, "Foreign").await?;
+        let operation = repo.operation()?;
+        assert!(storage.create_node(workflow.id, "Orphan").await.is_err());
+        assert!(
+            storage
+                .create_node_from(unbased.id, "No base", &NodeParent::WorkflowBase {})
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .create_node_from(
+                    workflow.id,
+                    "Wrong workflow",
+                    &NodeParent::Node {
+                        node_id: foreign.id
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let root = storage
+            .create_node_from(workflow.id, "Interfaces", &NodeParent::WorkflowBase {})
+            .await?;
+        let child = storage
+            .create_node_from(
+                workflow.id,
+                "Authentication",
+                &NodeParent::Node { node_id: root.id },
+            )
+            .await?;
+        let graph = storage.workflow_graph(workflow.id).await?;
+        assert_eq!(graph.connectivity, GraphConnectivity::Rooted);
+        assert_eq!(graph.base_nodes, vec![root.id]);
+        assert_eq!(graph.connections.len(), 1);
+        assert_eq!(
+            (
+                graph.connections[0].source_id,
+                graph.connections[0].target_id
+            ),
+            (root.id, child.id)
+        );
+        let edit = storage
+            .history_status(&repo.project)
+            .await?
+            .undo
+            .expect("child action");
+        storage.undo(&repo.project, edit.id).await?;
+        let removed = storage.workflow_graph(workflow.id).await?;
+        assert_eq!(removed.nodes, vec![root]);
+        assert!(removed.connections.is_empty());
+        assert_eq!(removed.connectivity, GraphConnectivity::Rooted);
+        drop(storage);
+        let mut storage = Storage::open(&database).await?;
+        storage.redo(&repo.project, edit.id).await?;
+        assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+        assert!(
+            storage
+                .connect_nodes(workflow.id, child.id, foreign.id)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repo.operation()?,
+            operation,
+            "saving/undoing dependencies must not modify native code"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn rooted_native_creation_uses_saved_dependency_and_rejects_independent_base_choices()
+-> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        repo.jj(&["describe", "-m", "Workflow base"])?;
+        let commit = recorded_value(&repo, "@", "commit_id")?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+        let workflow = storage
+            .create_workflow_from(
+                &repo.project,
+                "Native rooted",
+                &BaseSource::Revision { id: commit.clone() },
+            )
+            .await?;
+        let root = storage
+            .create_node_from(workflow.id, "Interfaces", &NodeParent::WorkflowBase {})
+            .await?;
+        let child = storage
+            .create_node_from(
+                workflow.id,
+                "Authentication",
+                &NodeParent::Node { node_id: root.id },
+            )
+            .await?;
+        let before = repo.operation()?;
+        assert!(
+            storage
+                .create_node_change_from_dependency(workflow.id, child.id)
+                .await
+                .is_err(),
+            "upstream native change is required"
+        );
+        assert!(
+            storage
+                .create_node_change(workflow.id, root.id, "root()")
+                .await
+                .is_err()
+        );
+        assert_eq!(repo.operation()?, before);
+        let native_root = storage
+            .create_node_change_from_dependency(workflow.id, root.id)
+            .await?;
+        let root_revision = match native_root.state {
+            ChangeState::Current { revision } => revision,
+            state => panic!("{state:?}"),
+        };
+        assert_eq!(
+            recorded_parents(&repo, &root_revision.change_id)?,
+            vec![
+                workflow
+                    .base
+                    .as_ref()
+                    .expect("base")
+                    .revision
+                    .change_id
+                    .clone()
+            ]
+        );
+        let native_child = storage
+            .create_node_change_from_dependency(workflow.id, child.id)
+            .await?;
+        let child_revision = match native_child.state {
+            ChangeState::Current { revision } => revision,
+            state => panic!("{state:?}"),
+        };
+        assert_eq!(
+            recorded_parents(&repo, &child_revision.change_id)?,
+            vec![root_revision.change_id]
+        );
+        assert_eq!(
+            recorded_value(&repo, "@", "commit_id")?,
+            commit,
+            "original checkout is unchanged"
+        );
+        let graph = storage.workflow_graph(workflow.id).await?;
+        let undo = storage
+            .history_status(&repo.project)
+            .await?
+            .undo
+            .expect("child creation");
+        assert!(
+            storage.undo(&repo.project, undo.id).await.is_err(),
+            "native references must block metadata deletion"
+        );
+        assert_eq!(
+            storage.workflow_graph(workflow.id).await?,
+            graph,
+            "failed undo restores the detached incoming edge too"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn legacy_prompt_graph_adoption_is_explicit_complete_and_preserves_existing_edges()
+-> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+        let workflow = storage.create_workflow(&repo.project, "Legacy").await?;
+        let a = storage.create_node(workflow.id, "First root").await?;
+        let b = storage.create_node(workflow.id, "Second root").await?;
+        let child = storage.create_node(workflow.id, "Child").await?;
+        storage.connect_nodes(workflow.id, a.id, child.id).await?;
+        storage
+            .set_workflow_base(
+                workflow.id,
+                &BaseSource::Revision {
+                    id: "root()".to_owned(),
+                },
+            )
+            .await?;
+        let before = storage.workflow_graph(workflow.id).await?;
+        assert!(matches!(
+            before.connectivity,
+            GraphConnectivity::NeedsAdoption { .. }
+        ));
+        let history = storage.history_status(&repo.project).await?;
+        let operation = repo.operation()?;
+        assert!(
+            storage
+                .create_node_from(
+                    workflow.id,
+                    "Do not extend broken graph",
+                    &NodeParent::WorkflowBase {}
+                )
+                .await
+                .is_err()
+        );
+        for roots in [vec![a.id], vec![a.id, child.id], vec![a.id, a.id, b.id]] {
+            assert!(
+                storage
+                    .adopt_workflow_roots(workflow.id, &roots)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(storage.workflow_graph(workflow.id).await?, before);
+        }
+        let adopted = storage
+            .adopt_workflow_roots(workflow.id, &[a.id, b.id])
+            .await?;
+        assert_eq!(adopted.connectivity, GraphConnectivity::Rooted);
+        assert_eq!(adopted.base_nodes, vec![a.id, b.id]);
+        assert_eq!(adopted.nodes, before.nodes);
+        assert_eq!(adopted.connections, before.connections);
+        assert_eq!(storage.history_status(&repo.project).await?, history);
+        let edge_edit = history.undo.expect("legacy edge edit");
+        assert!(
+            storage.undo(&repo.project, edge_edit.id).await.is_err(),
+            "legacy undo cannot orphan an adopted node"
+        );
+        assert_eq!(storage.workflow_graph(workflow.id).await?, adopted);
+        assert_eq!(repo.operation()?, operation);
+        Ok(())
+    })
+}
+
+#[test]
+fn rooted_association_requires_matching_native_parents_and_unique_node_ownership()
+-> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        repo.jj(&["describe", "-m", "Base"])?;
+        let base = repo.value("commit_id")?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+        let workflow = storage
+            .create_workflow_from(
+                &repo.project,
+                "Associations",
+                &BaseSource::Revision { id: base },
+            )
+            .await?;
+        let first = storage
+            .create_node_from(workflow.id, "First", &NodeParent::WorkflowBase {})
+            .await?;
+        let second = storage
+            .create_node_from(workflow.id, "Second", &NodeParent::WorkflowBase {})
+            .await?;
+        let original_change = repo.value("change_id")?;
+        assert!(
+            storage
+                .associate_node(workflow.id, first.id, &original_change)
+                .await
+                .is_err(),
+            "the workflow base is not its own child"
+        );
+        repo.jj(&["new", "-m", "Correct child"])?;
+        let candidate = repo.value("change_id")?;
+        storage
+            .associate_node(workflow.id, first.id, &candidate)
+            .await?;
+        let legacy = storage
+            .create_workflow(&repo.project, "Legacy alias")
+            .await?;
+        let alias = storage
+            .create_node(legacy.id, "Must not share rooted work")
+            .await?;
+        assert!(
+            storage
+                .associate_node(legacy.id, alias.id, &candidate)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .associate_node(workflow.id, second.id, &candidate)
+                .await
+                .is_err(),
+            "two nodes must not share this native change"
+        );
+        assert!(matches!(
+            storage.refresh_node(workflow.id, second.id).await?.state,
+            ChangeState::Unassociated
+        ));
+        Ok(())
+    })
+}
+
+#[test]
+fn legacy_native_graphs_are_not_silently_adopted() -> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+        let workflow = storage
+            .create_workflow(&repo.project, "Existing native work")
+            .await?;
+        let node = storage
+            .create_node(workflow.id, "Keep existing native work")
+            .await?;
+        let change = repo.value("change_id")?;
+        storage
+            .associate_node(workflow.id, node.id, &change)
+            .await?;
+        storage
+            .set_workflow_base(
+                workflow.id,
+                &BaseSource::Revision {
+                    id: "root()".to_owned(),
+                },
+            )
+            .await?;
+        let before = storage.workflow_graph(workflow.id).await?;
+        assert!(
+            storage
+                .adopt_workflow_roots(workflow.id, &[node.id])
+                .await
+                .is_err()
+        );
+        assert_eq!(storage.workflow_graph(workflow.id).await?, before);
+        assert_eq!(
+            storage
+                .refresh_node(workflow.id, node.id)
+                .await?
+                .association
+                .expect("retained association")
+                .change_id,
+            change
+        );
+        Ok(())
+    })
 }
 
 #[test]
@@ -1253,6 +2133,97 @@ fn repository_errors_are_not_missing_changes_and_do_not_destroy_associations() -
 }
 
 #[test]
+fn review_reads_recorded_changes_and_leaves_dirty_files_and_history_untouched() -> anyhow::Result<()>
+{
+    run(async {
+        let repo = Repository::new()?;
+        fs::write(repo.project.join("modified.txt"), "before\n")?;
+        fs::write(repo.project.join("deleted.txt"), "remove me\n")?;
+        repo.jj(&["new", "-m", "Review this revision"])?;
+        fs::write(repo.project.join("modified.txt"), "recorded\n")?;
+        fs::remove_file(repo.project.join("deleted.txt"))?;
+        fs::write(repo.project.join("space name.txt"), "added\n")?;
+        fs::write(repo.project.join("binary.bin"), [0, 1, 2, 255])?;
+        let id = repo.value("change_id")?;
+        let database = repo.directory.path().join("review.db");
+        let mut storage = Storage::open(&database).await?;
+        let workflow = storage.create_workflow(&repo.project, "Review").await?;
+        let node = storage.create_node(workflow.id, "Review").await?;
+        assert!(storage.review_node(workflow.id, node.id).await.is_err());
+        storage.associate_node(workflow.id, node.id, &id).await?;
+        let history = storage.history_status(&repo.project).await?;
+        let graph = storage.workflow_graph(workflow.id).await?;
+        let operation = repo.operation()?;
+        let commit = recorded_value(&repo, "@", "commit_id")?;
+        fs::write(repo.project.join("modified.txt"), "unsnapshotted\n")?;
+        fs::write(repo.project.join("dirty.txt"), "unrecorded\n")?;
+        let review = storage.review_node(workflow.id, node.id).await?;
+        assert_eq!(review.revision.commit_id, commit);
+        assert_eq!(review.parent_commit_ids.len(), 1);
+        assert!(
+            review.summary.contains("modified.txt"),
+            "{}",
+            review.summary
+        );
+        assert!(review.summary.contains("deleted.txt"), "{}", review.summary);
+        assert!(
+            review.summary.contains("space name.txt"),
+            "{}",
+            review.summary
+        );
+        assert!(review.summary.contains("binary.bin"), "{}", review.summary);
+        assert!(review.patch.contains("+recorded"), "{}", review.patch);
+        assert!(!review.patch.contains("unsnapshotted"));
+        assert!(!review.summary.contains("dirty.txt"));
+        assert_eq!(repo.operation()?, operation);
+        assert_eq!(recorded_value(&repo, "@", "commit_id")?, commit);
+        assert_eq!(
+            fs::read_to_string(repo.project.join("modified.txt"))?,
+            "unsnapshotted\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.project.join("dirty.txt"))?,
+            "unrecorded\n"
+        );
+        assert_eq!(storage.history_status(&repo.project).await?, history);
+        assert_eq!(storage.workflow_graph(workflow.id).await?, graph);
+        drop(storage);
+        let storage = Storage::open(&database).await?;
+        assert_eq!(storage.review_node(workflow.id, node.id).await?, review);
+        repo.jj(&["--ignore-working-copy", "abandon", &id])?;
+        assert!(storage.review_node(workflow.id, node.id).await.is_err());
+        Ok(())
+    })
+}
+
+#[test]
+fn review_of_an_empty_revision_is_empty_and_large_patches_fail_without_mutation()
+-> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        let id = repo.value("change_id")?;
+        let mut storage = Storage::open(&repo.directory.path().join("review.db")).await?;
+        let workflow = storage.create_workflow(&repo.project, "Review").await?;
+        let node = storage.create_node(workflow.id, "Review").await?;
+        storage.associate_node(workflow.id, node.id, &id).await?;
+        let empty = storage.review_node(workflow.id, node.id).await?;
+        assert!(empty.summary.is_empty());
+        assert!(empty.patch.is_empty());
+        // JSON escaping alone pushes this otherwise bounded native patch over the RPC budget.
+        fs::write(repo.project.join("large.txt"), "\t".repeat(500_000))?;
+        repo.value("commit_id")?;
+        let operation = repo.operation()?;
+        let error = storage
+            .review_node(workflow.id, node.id)
+            .await
+            .expect_err("oversized review");
+        assert!(error.to_string().contains("response limit"), "{error}");
+        assert_eq!(repo.operation()?, operation);
+        Ok(())
+    })
+}
+
+#[test]
 fn refresh_reports_divergence_without_selecting_a_revision() -> anyhow::Result<()> {
     run(async {
         let repo = Repository::new()?;
@@ -1278,6 +2249,7 @@ fn refresh_reports_divergence_without_selecting_a_revision() -> anyhow::Result<(
         let operation = repo.operation()?;
         let refreshed = storage.refresh_node(workflow.id, node.id).await?;
         assert_eq!(refreshed.association, selected.association);
+        assert!(storage.review_node(workflow.id, node.id).await.is_err());
         match refreshed.state {
             ChangeState::Divergent { revisions } => {
                 assert_eq!(revisions.len(), 2);
@@ -1324,6 +2296,11 @@ fn refresh_reads_native_conflict_status() -> anyhow::Result<()> {
         let workflow = storage.create_workflow(&repo.project, "Conflict").await?;
         let node = storage.create_node(workflow.id, "Resolve later").await?;
         let selected = storage.associate_node(workflow.id, node.id, &merge).await?;
+        let operation = repo.operation()?;
+        let review = storage.review_node(workflow.id, node.id).await?;
+        assert!(review.revision.conflicted);
+        assert_eq!(review.parent_commit_ids.len(), 2);
+        assert_eq!(repo.operation()?, operation);
         match selected.state {
             ChangeState::Current { revision } => assert!(revision.conflicted),
             state => panic!("expected conflicted current revision, got {state:?}"),

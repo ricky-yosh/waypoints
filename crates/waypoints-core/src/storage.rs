@@ -9,14 +9,22 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::jj::{self, ChangeAssociation, ChangeState};
-use crate::workflow::WorkflowBase;
+use crate::workflow::{GraphConnectivity, NodeParent, WorkflowBase};
 
 mod bases;
+mod dependencies;
 mod history;
+mod reparent;
+mod review;
 mod runs;
+mod upstream;
 mod workspaces;
 
 pub use history::{HistoryEntry, HistoryStatus};
+pub use reparent::{
+    DeletionWorkspace, DependencyOperation, DependencyOperationKind, DependencyOperationState,
+    DependencyRecovery, DependencyRecoveryAssessment, UndoBoundaryAcknowledgement,
+};
 
 /// A workflow saved for a canonical project directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +75,15 @@ pub struct WorkflowGraph {
     pub nodes: Vec<Node>,
     /// Connections in ascending source, then target identifier order.
     pub connections: Vec<Connection>,
+    /// Node IDs explicitly attached directly to the workflow base, in ascending order.
+    #[serde(default)]
+    pub base_nodes: Vec<i64>,
+    /// Saved reachability, distinct from native ancestry and working-copy freshness.
+    #[serde(default)]
+    pub connectivity: GraphConnectivity,
+    /// Interrupted native edit affecting this graph; saved edges may not match jj.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_dependency_operation: Option<i64>,
 }
 
 /// A saved node and its freshly queried native-change status.
@@ -206,6 +223,8 @@ impl Storage {
         storage.initialize_runs().await?;
         storage.initialize_history().await?;
         storage.initialize_bases().await?;
+        storage.initialize_dependencies().await?;
+        storage.initialize_dependency_operations().await?;
         Ok(storage)
     }
 
@@ -263,14 +282,35 @@ impl Storage {
     ///
     /// # Errors
     ///
-    /// Returns an error for a blank prompt, a missing workflow, or a database failure.
+    /// Returns an error for a blank prompt, missing workflow, a based workflow
+    /// requiring an explicit dependency, or a database failure.
     pub async fn create_node(
         &mut self,
         workflow_id: i64,
         prompt: &str,
     ) -> Result<Node, StorageError> {
         validate_prompt(prompt)?;
-        Ok(self.create_node_with_history(workflow_id, prompt).await?)
+        Ok(self
+            .create_node_with_history(workflow_id, prompt, None)
+            .await?)
+    }
+
+    /// Creates a node and its explicit dependency as one undoable metadata action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unbased/unadopted workflow, invalid parent, blank
+    /// prompt, or storage failure. Does not create or rebase native code.
+    pub async fn create_node_from(
+        &mut self,
+        workflow_id: i64,
+        prompt: &str,
+        parent: &NodeParent,
+    ) -> Result<Node, StorageError> {
+        validate_prompt(prompt)?;
+        Ok(self
+            .create_node_with_history(workflow_id, prompt, Some(parent))
+            .await?)
     }
 
     /// Replaces a node's prompt without changing its identifier or connections.
@@ -306,6 +346,7 @@ impl Storage {
             .query(
                 "SELECT id, workflow_id, prompt FROM nodes
                  WHERE workflow_id = ?1 AND id = ?2
+                 AND NOT EXISTS (SELECT 1 FROM deleted_nodes WHERE node_id = nodes.id)
                  AND EXISTS (SELECT 1 FROM workflows WHERE id = ?1)",
                 [workflow_id, node_id],
             )
@@ -323,7 +364,8 @@ impl Storage {
     ///
     /// A unique change-ID prefix is resolved to its full ID before saving.
     /// Repeating this command explicitly replaces a previous association.
-    /// This does not snapshot the working copy or change jj history.
+    /// This does not snapshot the working copy or change jj history. Based workflows
+    /// require matching native parents and exclusive node ownership of the change.
     ///
     /// # Errors
     ///
@@ -346,6 +388,12 @@ impl Storage {
             return Err(anyhow::anyhow!("select one existing, non-divergent jj change").into());
         }
         let revision = revisions.remove(0);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            self.validate_dependency_association(workflow_id, node_id, &repository_path, &revision),
+        )
+        .await
+        .context("node dependency validation timed out")??;
         let association = ChangeAssociation {
             repository_path,
             change_id: revision.change_id.clone(),
@@ -386,7 +434,8 @@ impl Storage {
 
     /// Creates and associates an empty native change on an explicitly selected base.
     ///
-    /// Accepts a change ID, commit ID, unique prefix, or `root()`. The working copy
+    /// Accepts a change ID, commit ID, unique prefix, or `root()`. In a based workflow
+    /// the resolved revision must match the node's saved dependency. The working copy
     /// and prompt are unchanged. Existing associations, including missing ones, are
     /// refused. A durable guard prevents retries after uncertain native outcomes.
     ///
@@ -402,6 +451,32 @@ impl Storage {
         node_id: i64,
         base: &str,
     ) -> Result<NodeChange, StorageError> {
+        self.create_node_change_selected(workflow_id, node_id, Some(base))
+            .await
+    }
+
+    /// Creates a node's native change on its saved dependency, not an arbitrary base.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for legacy/unrooted graphs, unavailable/busy upstream work,
+    /// multiple parents (not yet supported for creation), or native/storage failures.
+    pub async fn create_node_change_from_dependency(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<NodeChange, StorageError> {
+        self.create_node_change_selected(workflow_id, node_id, None)
+            .await
+    }
+
+    async fn create_node_change_selected(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+        base: Option<&str>,
+    ) -> Result<NodeChange, StorageError> {
+        self.ensure_dependency_operations_clear().await?;
         let node = self.node(workflow_id, node_id).await?;
         let connection = self
             .database
@@ -432,7 +507,24 @@ impl Storage {
             std::time::Duration::from_secs(4),
             async {
                 let root = jj::repository_root(&project).await?;
-                let base = jj::resolve_base(&root, base).await?;
+                let dependency = self.dependency_revisions(workflow_id, node_id).await?;
+                let selected = match base {
+                    Some(base) => Some(jj::resolve_base(&root, base).await?),
+                    None => None,
+                };
+                let base = match dependency {
+                    Some((dependency_root, parents)) => {
+                        anyhow::ensure!(root == dependency_root && parents.len() == 1,
+                            "native creation currently requires exactly one saved dependency in the same repository");
+                        let expected = parents.into_iter().next().context("node has no dependency")?;
+                        if let Some(selected) = selected {
+                            anyhow::ensure!(selected.commit_id == expected.commit_id,
+                                "requested native base differs from the node's saved dependency");
+                        }
+                        expected
+                    }
+                    None => selected.context("legacy workflows require an explicit --base for native change creation")?,
+                };
                 let reserved = connection.execute(
                     "INSERT INTO node_change_creations (node_id)
                      SELECT ?1 WHERE NOT EXISTS (SELECT 1 FROM node_changes WHERE node_id = ?1)",
@@ -567,12 +659,12 @@ impl Storage {
         ))
     }
 
-    /// Adds a directed connection while preserving an acyclic workflow graph.
+    /// Adds a metadata-only connection in a legacy unbased workflow, preserving a DAG.
     ///
     /// # Errors
     ///
     /// Returns an error for missing or foreign endpoints, a missing workflow,
-    /// a self-link, duplicate link, cycle, or database failure.
+    /// a self-link, duplicate link, cycle, a based workflow, or database failure.
     pub async fn connect_nodes(
         &mut self,
         workflow_id: i64,
@@ -594,54 +686,7 @@ impl Storage {
             .database
             .connect()
             .context("connecting to workflow database")?;
-        let mut rows = connection
-            .query(
-                "SELECT w.id, w.project_path, w.name, b.record FROM workflows w
-                 LEFT JOIN workflow_bases b ON b.workflow_id = w.id WHERE w.id = ?1",
-                [workflow_id],
-            )
-            .await
-            .context("querying workflow")?;
-        let row = rows
-            .next()
-            .await
-            .context("reading workflow row")?
-            .with_context(|| format!("workflow {workflow_id} not found"))?;
-        let workflow = decode_workflow(&row)?;
-        let mut rows = connection
-            .query(
-                "SELECT id, workflow_id, prompt FROM nodes WHERE workflow_id = ?1 ORDER BY id",
-                [workflow_id],
-            )
-            .await
-            .context("listing nodes")?;
-        let mut nodes = Vec::new();
-        while let Some(row) = rows.next().await.context("reading node row")? {
-            nodes.push(decode_node(&row)?);
-        }
-        let mut rows = connection
-            .query(
-                "SELECT workflow_id, source_id, target_id FROM connections
-                 WHERE workflow_id = ?1 ORDER BY source_id, target_id",
-                [workflow_id],
-            )
-            .await
-            .context("listing connections")?;
-        let mut connections = Vec::new();
-        while let Some(row) = rows.next().await.context("reading connection row")? {
-            connections.push(Connection {
-                workflow_id: row
-                    .get(0)
-                    .context("reading connection workflow identifier")?,
-                source_id: row.get(1).context("reading connection source identifier")?,
-                target_id: row.get(2).context("reading connection target identifier")?,
-            });
-        }
-        Ok(WorkflowGraph {
-            workflow,
-            nodes,
-            connections,
-        })
+        Ok(dependencies::load_graph(&connection, workflow_id).await?)
     }
 }
 

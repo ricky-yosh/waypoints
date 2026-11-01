@@ -13,29 +13,82 @@ Supported actions:
 
 - Create a prompt node.
 - Save a different prompt on an existing node.
-- Create a workflow connection.
+- Create a workflow connection in a legacy unbased workflow.
+- Move a prompt-only subtree in a rooted based workflow.
+- Delete a prompt-only node and reconnect its children to its parent.
+
+The [rooted-node extension](17-rooted-node-dependencies.md) records a based node's
+initial base/upstream attachment in the same creation action. Metadata-only
+connection edits are blocked in based workflows. [Native reparenting](18-native-reparenting.md)
+is a separate acknowledged operation that starts a new undo baseline.
 
 Saving identical prompt text is a no-op: no undo step and no redo-tail deletion.
 Rejected edits likewise leave the history untouched.
 
 Workflow creation is setup, not an undoable action in this slice. Associations,
 change/workspace allocation, verification, and agent execution are outside this
-history and do not move its cursor or discard redo. Node deletion/disconnection,
-ordering, and layout are not implemented yet.
+history and do not move its cursor or discard redo.
+[Native node deletion](19-native-node-deletion.md) starts an acknowledged undo
+baseline rather than adding an undoable metadata action. Disconnection, ordering,
+and layout remain unimplemented.
+
+## Prompt-only move and delete
+
+```sh
+waypoints node move-prompt --workflow 1 --node 2 --parent 3
+waypoints node move-prompt --workflow 1 --node 2 --from-base
+waypoints node delete-prompt --workflow 1 --node 2
+```
+
+These explicit metadata-only commands return the updated workflow graph. They
+require a rooted based workflow and exactly one existing source parent (node or
+base). Legacy unbased/unadopted graphs and multi-parent source nodes are refused.
+Move replaces the source's incoming dependency and keeps its subtree. Delete
+removes only the source node, reconnects each direct child to the source's parent,
+and deduplicates any already-existing inherited attachment. Other child parents
+and descendant edges remain intact. A root's children inherit the saved base;
+deleting the last node leaves a valid empty rooted workflow.
+
+Both commands refuse any native association, change-creation guard, workspace
+allocation, or run record in the source subtree, including completed runs and
+incomplete allocations. An upstream destination may already have native code;
+the moved subtree may not. No jj queries or mutations are performed, and neither
+command can silently switch to the native editing path. Use `node reparent` /
+`node delete` explicitly when native code must change.
+
+Each successful edit is one ordinary project-folder metadata history action:
+`Move prompt node` or `Delete prompt node`. No undo boundary is cleared.
+Moving to the same parent is a no-op and preserves redo. Undo restores the
+original identity, exact prompt, and affected attachments; Redo applies the same
+saved edit. Deleted identities stay reserved even if a new edit discards redo.
+Only affected attachment sets are recorded, not a replacement of the entire graph.
+
+Replay checks the expected saved local state and rechecks subtree references.
+If code/workspaces/runs were added afterward, Undo/Redo refuses rather than
+discarding them. Cycles, cross-workflow parents, stale history selections,
+unresolved native dependency operations, and database failures leave the graph
+and history cursor unchanged. Topology writes, node removal/restoration, history
+append/redo-tail deletion, and cursor movement share one transaction.
 
 ## Decision: acknowledge future code-changing connections
 
 The subsequent [rooted native dependency decision](15-native-dependency-editing.md)
 extends this policy to node deletion: abandon native work, reflect jj's descendant
 reconnection, and safely clean up its workspace. It replaces the proposal for
-metadata-only node removal. These operations remain unimplemented.
+metadata-only removal of native-backed nodes. Prompt-only nodes use the undoable
+metadata commands above. Native deletion supports deregistering a ready saved
+workspace while retaining its folder; filesystem cleanup remains future work.
 
-**Agreed direction, not implemented:** a future connect/disconnect operation
-that rebases native jj work must explicitly acknowledge an undo boundary.
-Current `connection create` remains metadata-only and undoable; it does not
+**Implemented for `node reparent` and `node delete`:** a code-changing dependency operation must
+explicitly acknowledge an undo boundary. Reparenting clears the project's old
+undo/redo only after preflight passes, atomically with durable operation intent
+before native mutation. Uncertain outcomes stay reserved and block further edits;
+see [the exact lifecycle and limits](18-native-reparenting.md).
+General connect/disconnect and workspace folder cleanup remain future work.
+Current legacy `connection create` remains metadata-only and undoable; it does not
 rebase code and does not require this acknowledgement.
 
-- **CLI:** require an explicit acknowledgement flag, planned as
+- **CLI:** require an explicit acknowledgement flag,
   `--accept-undo-boundary`. Explain inline in `--help` that the operation changes
   native code ancestry and that workflow Undo cannot reverse it or cross the
   resulting boundary. Do not require an interactive prompt.
@@ -58,11 +111,13 @@ not permission to silently change the existing command's behavior. Native operat
 selection and acknowledgement are distinct concerns; an acknowledgement flag alone
 must not turn a metadata-only request into a rebase.
 
-Before implementing this extension, define the exact rebase/base-selection rules,
-how affected histories are invalidated, and crash reconciliation when native work
-succeeds but metadata persistence fails. Clearing history after failed or uncertain
-operations must not be used as a substitute for reconciliation. The policy for
-other native/agent edits invalidating workflow history remains to be specified.
+The implemented reparent lifecycle defines exact base selection, history
+invalidation, and durable uncertainty when native work succeeds but graph
+persistence fails. Clearing history is not a substitute for reconciliation:
+unresolved operations remain blocked and inspectable. Explicit reparent recovery
+can resolve clear outcomes without changing jj or restoring the old undo/redo
+history. General repair and the policy for other native/agent edits invalidating
+history remain future work.
 
 ## CLI
 
@@ -131,7 +186,8 @@ Old databases receive additive tables. Their existing contents form a baseline:
 no fabricated prior edits, and only subsequent supported edits are undoable.
 Old prompt text is intentionally retained in history records.
 
-Records have explicit format version 1. Unsupported versions or malformed actions
+Records have explicit format versions 1 (original metadata actions), 2
+(attachment-aware node creation), and 3 (prompt-only move/delete). Unsupported versions or malformed actions
 produce an error when encountered, without moving the cursor or deleting current
 workflow state. This slice does not implement format conversion or a history-reset
 command; future upgrades must migrate or explicitly invalidate incompatible history.
@@ -149,13 +205,15 @@ the node's saved values changed or if any of these references depend on it:
 
 The cursor stays put; no references, files, native changes, or run history are
 removed to make undo work. History is chronological, so a blocked creation cannot
-be skipped to undo earlier actions. General deletion with retained native/run
-references is a separate future design, not an implicit native cleanup policy.
+be skipped to undo earlier actions. [Native deletion](19-native-node-deletion.md)
+is a separate acknowledged operation, not an implicit cleanup policy to make
+metadata undo succeed. Saved workspace deregistration is part of native deletion,
+not an implicit action performed to make metadata Undo succeed.
 
 Prompt undo/redo is allowed while a run is active. A run has already captured its
 assignment: changing the saved node prompt does not change the running prompt,
-session, approvals, or eventual snapshot. Connections are workflow intent only;
-undoing one does not cancel runs or change jj parents.
+session, approvals, or eventual snapshot. Only legacy unbased connections are
+metadata-undoable; undoing one does not cancel runs or change jj parents.
 
 ## RPC
 

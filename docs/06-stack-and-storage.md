@@ -4,7 +4,7 @@
 
 Workflow logic, storage, and jj integration live in a core library with no UI dependency. A local backend hosts that library and exposes a JSON-RPC API shared by the GUI and CLI. The GUI does not shell out to the CLI, and clients do not open independent copies of the store. The backend owns database access and coordinates Waypoints-initiated operations.
 
-The CLI is the interface for human scripting and agents with terminal access; no MCP adapter is planned. Keep workflow metadata durable, but leave conversations and transcripts in existing harnesses. Start with state-change notifications and a full refresh on reconnect rather than event replay. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli) for the authoritative boundary and local IPC recommendation.
+The CLI is the interface for human scripting and agents with terminal access; no MCP adapter is planned. Keep workflow metadata durable, but leave conversations and transcripts in existing harnesses. Current clients poll bounded run events and refresh saved state after reconnect; subscriptions and durable event replay are not implemented or required. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli) for ownership and the [current status map](20-core-backend-status.md) for implemented boundaries.
 
 ## GPUI
 

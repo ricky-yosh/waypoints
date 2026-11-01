@@ -12,8 +12,10 @@ mutation occurs. A later explicit update-base operation is not implemented.
 
 This is the first foundation for the
 [rooted dependency model](15-native-dependency-editing.md), not its completion.
-Selecting a base does not yet create root edges, validate node reachability,
-reconcile existing node ancestry, or restrict node/connection creation.
+The subsequent [rooted-node slice](17-rooted-node-dependencies.md) now requires
+explicit base/upstream attachments for new based-workflow nodes and reports saved
+reachability. Selecting a base alone still does not adopt old graphs, reconcile
+existing native ancestry, or rebase code.
 
 ## CLI
 
@@ -73,8 +75,9 @@ this feature does not pin history with native bookmarks.
 For this additive slice, **omitting both base flags preserves the existing
 unbased behavior**. Such workflows return `"base": null` and can still be created
 without jj. No implicit `main` is assigned to old data or old clients.
-Defaulting/requiring a base will be addressed with rooted-connectivity migration;
-for now, use `--base main` explicitly for the normal code-workflow path.
+Whether new workflows should default to or require a base remains a discussion
+item; rooted node creation has not changed this compatibility behavior.
+Use `--base main` explicitly for the normal code-workflow path.
 
 Assign a starting point to an existing unbased workflow:
 

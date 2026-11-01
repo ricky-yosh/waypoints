@@ -13,10 +13,12 @@ use waypoints_core::storage::Storage;
 
 use crate::config::sidecar;
 use crate::protocol::{
-    AssociateParams, ConnectParams, ContinueRunParams, CreateChangeParams, CreateNodeParams,
-    CreateParams, CreateWorkspaceParams, HistoryParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
-    PermissionParams, ProjectParams, RecoverRunParams, RunEventsParams, RunParams, StartRunParams,
-    TIMEOUT, UpdateNodeParams, WorkflowBaseParams, WorkflowParams, read_frame,
+    AdoptRootsParams, AssociateParams, ConnectParams, ContinueRunParams, CreateChangeParams,
+    CreateNodeParams, CreateParams, CreateWorkspaceParams, DeleteNodeParams,
+    DependencyOperationParams, HistoryParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
+    PermissionParams, ProjectParams, RecoverDependencyParams, RecoverRunParams, ReparentParams,
+    RunEventsParams, RunParams, StartRunParams, TIMEOUT, UpdateNodeParams, WorkflowBaseParams,
+    WorkflowParams, read_frame,
 };
 use crate::runs::Runs;
 use crate::{BackendError, BackendInfo, Config};
@@ -224,6 +226,14 @@ async fn dispatch(
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },
+        "run.inputs" => match parameters::<RunParams>(params) {
+            Ok(params) => storage
+                .run_upstream_status(params.run_id)
+                .await
+                .map(|status| json!(status))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
         "run.status" => match parameters::<RunParams>(params) {
             Ok(params) => storage
                 .run(params.run_id)
@@ -320,6 +330,14 @@ async fn dispatch(
             }
             Err(error) => Err(error),
         },
+        "workflow.adopt_roots" => match parameters::<AdoptRootsParams>(params) {
+            Ok(params) => storage
+                .adopt_workflow_roots(params.workflow_id, &params.base_nodes)
+                .await
+                .map(|graph| json!(graph))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
         "workflow.get" => match parameters::<WorkflowParams>(params) {
             Ok(params) => storage
                 .workflow(params.workflow_id)
@@ -352,12 +370,48 @@ async fn dispatch(
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },
-        "node.create" => match parameters::<CreateNodeParams>(params) {
+        "node.resume_deletion" => match parameters::<RecoverDependencyParams>(params) {
             Ok(params) => storage
-                .create_node(params.workflow_id, &params.prompt)
+                .resume_node_deletion(params.operation_id, params.confirmation)
                 .await
-                .map(|node| json!(node))
+                .map(|operation| json!(operation))
                 .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.move_prompt" => match parameters::<crate::protocol::MovePromptParams>(params) {
+            Ok(params) => storage
+                .move_prompt_node(params.workflow_id, params.node_id, &params.parent)
+                .await
+                .map(|graph| json!(graph))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.delete_prompt" => match parameters::<NodeParams>(params) {
+            Ok(params) => storage
+                .delete_prompt_node(params.workflow_id, params.node_id)
+                .await
+                .map(|graph| json!(graph))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.create" => match parameters::<CreateNodeParams>(params) {
+            Ok(params) => {
+                let result = match params.parent {
+                    Some(parent) => {
+                        storage
+                            .create_node_from(params.workflow_id, &params.prompt, &parent)
+                            .await
+                    }
+                    None => {
+                        storage
+                            .create_node(params.workflow_id, &params.prompt)
+                            .await
+                    }
+                };
+                result
+                    .map(|node| json!(node))
+                    .map_err(|error| (-32000, format!("{error:#}")))
+            }
             Err(error) => Err(error),
         },
         "node.get" => match parameters::<NodeParams>(params) {
@@ -376,12 +430,73 @@ async fn dispatch(
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },
-        "node.create_change" => match parameters::<CreateChangeParams>(params) {
+        "node.operation_recovery" | "node.reparent_recovery" => {
+            match parameters::<DependencyOperationParams>(params) {
+                Ok(params) => storage
+                    .inspect_dependency_recovery(params.operation_id)
+                    .await
+                    .map(|value| json!(value))
+                    .map_err(|error| (-32000, format!("{error:#}"))),
+                Err(error) => Err(error),
+            }
+        }
+        "node.recover_operation" | "node.recover_reparent" => {
+            match parameters::<RecoverDependencyParams>(params) {
+                Ok(params) => storage
+                    .recover_dependency_operation(params.operation_id, params.confirmation)
+                    .await
+                    .map(|value| json!(value))
+                    .map_err(|error| (-32000, format!("{error:#}"))),
+                Err(error) => Err(error),
+            }
+        }
+        "node.operations" => match parameters::<WorkflowParams>(params) {
             Ok(params) => storage
-                .create_node_change(params.workflow_id, params.node_id, &params.base)
+                .dependency_operations(params.workflow_id)
                 .await
-                .map(|state| json!(state))
+                .map(|value| json!(value))
                 .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.delete" => match parameters::<DeleteNodeParams>(params) {
+            Ok(params) => storage
+                .delete_node(params.workflow_id, params.node_id, params.acknowledgement)
+                .await
+                .map(|value| json!(value))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.reparent" => match parameters::<ReparentParams>(params) {
+            Ok(params) => storage
+                .reparent_node(
+                    params.workflow_id,
+                    params.node_id,
+                    &params.parent,
+                    params.acknowledgement,
+                )
+                .await
+                .map(|value| json!(value))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.create_change" => match parameters::<CreateChangeParams>(params) {
+            Ok(params) => {
+                let result = match params.base {
+                    Some(base) => {
+                        storage
+                            .create_node_change(params.workflow_id, params.node_id, &base)
+                            .await
+                    }
+                    None => {
+                        storage
+                            .create_node_change_from_dependency(params.workflow_id, params.node_id)
+                            .await
+                    }
+                };
+                result
+                    .map(|state| json!(state))
+                    .map_err(|error| (-32000, format!("{error:#}")))
+            }
             Err(error) => Err(error),
         },
         "node.workspace.create" => match parameters::<CreateWorkspaceParams>(params) {
@@ -405,6 +520,22 @@ async fn dispatch(
                 .node_workspace(params.workflow_id, params.node_id)
                 .await
                 .map(|state| json!(state))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "node.review" => match parameters::<NodeParams>(params) {
+            Ok(params) => storage
+                .review_node(params.workflow_id, params.node_id)
+                .await
+                .map(|review| json!(review))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "run.review" => match parameters::<RunParams>(params) {
+            Ok(params) => storage
+                .review_run(params.run_id)
+                .await
+                .map(|review| json!(review))
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },

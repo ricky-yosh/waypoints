@@ -1,32 +1,29 @@
 # Waypoints: plan-driven agent workflows
 
-Status: early implementation. Persistent workflows, prompt nodes, branching
-connections, explicit jj associations, and empty-change creation on a selected
-base work through an automatically started backend and CLI on macOS/Linux.
-Native status refresh is read-only. Nodes can allocate dedicated jj workspaces at
-explicit directories without changing the original working copy. A first
-backend-owned ACP run lifecycle supports polling, approvals, and cancellation,
-with fresh runs and explicit saved-session continuation manually validated
-against Codex. Successful turns now automatically record an exact jj revision
-before releasing the workspace, also manually validated against Codex.
-Interrupted runs have explicit read-only inspection and confirmed reservation
-recovery, fake-agent/native-jj tested without signalling saved PIDs or replaying work.
-Node creation, saved prompt edits, and connection creation support persistent
-[metadata undo/redo](docs/14-workflow-history.md), never code or conversation rewind.
-Workflows can explicitly save a fixed starting revision from `main`, another local
-bookmark, or a revision ID; see [workflow bases](docs/16-workflow-bases.md).
-GUI integration remains pending.
-An explicit workspace verification command can acknowledge a completed allocation
-after an interrupted creation, without changing local files or native history.
+Status: early headless implementation on macOS/Linux. Core/backend/CLI support
+persistent rooted workflows, native jj changes and on-demand workspaces, ACP runs
+and continuation, automatic successful-turn snapshots, metadata undo/redo, native
+reparenting, native deletion with retained workspace folders, read-only native code review,
+an informational upstream-revision hint, and undoable prompt-only move/delete.
+Explicit recovery handles clear interrupted outcomes; ambiguous states remain
+blocked. GUI integration, revision-history browsing, and downstream context-staleness
+tracking remain pending.
+
+Start with the [current core/backend status and documentation map](docs/20-core-backend-status.md)
+for implemented boundaries, remaining discussion items, and links to detailed contracts.
 
 ## Try the CLI
 
-From this repository, create a workflow for the current project:
+For an existing jj project with a local `main` bookmark, explicitly save its base:
 
 ```sh
-cargo run -p waypoints-cli -- workflow create --project . --name "First workflow"
+cargo run -p waypoints-cli -- workflow create --project . --name "First workflow" --base main
 cargo run -p waypoints-cli -- workflow list --project . --json
 ```
+
+Choose another bookmark or `--base-revision` when appropriate. Omitting both
+selectors still creates a legacy unbased workflow, not a workflow implicitly
+rooted at `main`; see [base compatibility](docs/16-workflow-bases.md#compatibility-and-existing-workflows).
 
 The first workflow command starts the local backend automatically. Later commands
 reuse it; the CLI never opens the database directly.
@@ -46,12 +43,15 @@ A desktop app for planning and running AI coding work as phases: each phase gets
 
 ## Short description
 
+Product direction, not a list of implemented GUI/backend capabilities:
+
 Waypoints turns a plan into a graph of phases. Each phase runs in a coding agent over ACP (Claude, Codex, Gemini, and others), streams its work live, and is saved as a jj change. Review the diffs, branch parallel phases, edit an earlier step, and see exactly which downstream phases went stale. Built in Rust with GPUI.
 
-## Files in this folder
+## Documentation
 
 | File | What it covers |
 |---|---|
+| [`20-core-backend-status.md`](docs/20-core-backend-status.md) | Start here: current capability inventory, documentation map, and unprioritized discussion backlog |
 | `01-concept.md` | The problem, the core idea, what is deliberately not being built, naming |
 | `02-architecture.md` | Layers, components, phase state machine, data to store |
 | `03-acp-and-agents.md` | How ACP works, which agents support it, sessions, permissions, diffs |
@@ -61,11 +61,15 @@ Waypoints turns a plan into a graph of phases. Each phase runs in a coding agent
 | `07-spikes-and-build-order.md` | Throwaway experiments to run first, build order, open questions |
 | `08-proa-and-web.md` | What Proa is and where it could fit (optional web side) |
 | `09-ideas-explored.md` | Other project ideas considered along the way, and why they were set aside |
+| [`11-backend-cli.md`](docs/11-backend-cli.md) | Current CLI/RPC reference, transport, paths, lifecycle, limits, and validation commands |
 | [`12-codex-acp-spike.md`](docs/12-codex-acp-spike.md) | Tested Codex ACP behavior, setup, caveats, and the next production slice |
 | [`13-agent-run-lifecycle.md`](docs/13-agent-run-lifecycle.md) | Implemented background-run checkpoint, commands, bounds, cleanup, and remaining work |
 | [`14-workflow-history.md`](docs/14-workflow-history.md) | Persistent metadata undo/redo, CLI/RPC, native-history boundary, and validation |
 | [`15-native-dependency-editing.md`](docs/15-native-dependency-editing.md) | Agreed rooted code-dependency model, native abandonment tests, and implementation sequence |
 | [`16-workflow-bases.md`](docs/16-workflow-bases.md) | Explicit bookmark/revision starting points, persistence, CLI/RPC, and legacy compatibility |
+| [`17-rooted-node-dependencies.md`](docs/17-rooted-node-dependencies.md) | Explicit node attachments, rooted connectivity, native creation checks, and legacy adoption |
+| [`18-native-reparenting.md`](docs/18-native-reparenting.md) | Checked native reparenting, code-changing undo boundaries, and unresolved operation safeguards |
+| [`19-native-node-deletion.md`](docs/19-native-node-deletion.md) | Native node abandonment, child reconnection, workspace restrictions, and shared recovery |
 
 ## Decisions so far
 

@@ -4,15 +4,27 @@
 
 **Agreed product direction; implementation in progress.** Explicit
 [workflow base selection](16-workflow-bases.md) now works through backend/CLI.
-Native abandonment behavior is covered by executable tests against jj 0.46.0. This is not a claim
-that Waypoints node deletion, workspace cleanup, rooted graph validation, or
-code-changing connections are implemented.
+[Rooted node creation](17-rooted-node-dependencies.md) now enforces explicit saved
+dependencies in based workflows, including native creation/association checks and
+explicit prompt-only legacy adoption.
+[Native reparenting](18-native-reparenting.md) now rebases a single workflow's
+checked subtree with durable intent, conflict reporting, and an undo boundary.
+External/other-workflow descendants are refused. Explicit recovery handles clearly
+applied or unapplied interrupted operations; ambiguous states remain blocked.
+[Native node deletion](19-native-node-deletion.md) now abandons nodes and reconnects
+children, deregistering a ready matching saved workspace while retaining its folder.
+Explicit resume handles a verified partial abandonment. Folder cleanup remains
+unimplemented.
 
 This decision supersedes the earlier proposal to make metadata-only removal the
-normal deletion behavior. It also supersedes the broader design in which
-connections express only planning intent. Existing commands still implement that
-older metadata-only model; do not silently reinterpret them or migrate saved
-graphs by guessing native ancestry.
+normal deletion behavior for native-backed nodes. Prompt-only nodes now have
+[undoable metadata move/delete](14-workflow-history.md#prompt-only-move-and-delete).
+It also supersedes the broader design in which
+connections express only planning intent. Legacy unbased connection commands
+retain that metadata-only model; based workflows use explicit rooted dependencies
+and checked native edits. Do not silently reinterpret legacy commands or migrate
+saved graphs by guessing native ancestry. See the
+[status map](20-core-backend-status.md) for the current capability boundaries.
 
 ## User-facing rules
 
@@ -57,7 +69,7 @@ It may become conflicted if those edits depended on Authentication.
 ## Acknowledgement
 
 Use the [shared undo-boundary policy](14-workflow-history.md#decision-acknowledge-future-code-changing-connections)
-for code-changing connections and node deletion. The planned CLI flag is
+for code-changing connections and node deletion. The implemented reparent CLI flag is
 `--accept-undo-boundary`, with an inline explanation and no interactive prompt.
 RPC/core must require equivalent explicit acknowledgement. Missing acknowledgement
 must fail without mutation; acknowledgement does not bypass validation or authorize
@@ -84,7 +96,13 @@ tracked steps. Native abandonment is neither a folder-deletion command nor proof
 that affected physical checkouts are current. The tests do not yet validate a
 complete workspace-forget/filesystem-removal policy.
 
-## Implementation sequence
+## Design sequence and remaining scope
+
+This is the broader design sequence, not a list of entirely unimplemented work.
+The current slices implement rooted creation, single-workflow checked native
+edits, durable intent, and clear-outcome recovery. External/other-workflow
+descendants are refused; cross-workflow reconciliation and safe workspace cleanup
+below remain future design/implementation work.
 
 1. **Rooted workflow foundation:** persist an explicit base; validate reachability
    and native associations; provide inspection and explicit adoption for legacy

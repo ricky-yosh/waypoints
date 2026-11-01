@@ -41,6 +41,35 @@ pub struct Run {
     /// Native revision recording, independent of the agent execution outcome.
     #[serde(default)]
     pub snapshot: SnapshotState,
+    /// Direct saved graph dependencies observed before this turn; absent for legacy/unavailable inputs.
+    #[serde(default)]
+    pub upstream_inputs: Option<Vec<RunInput>>,
+}
+
+/// One direct workflow dependency observed before an agent turn, not agent context provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RunInput {
+    /// The saved base or upstream node selected by the graph.
+    pub parent: crate::workflow::NodeParent,
+    /// Exact recorded native revision observed for that dependency.
+    pub commit_id: String,
+}
+
+/// Informational comparison of a run's saved upstream inputs with current graph dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum UpstreamStatus {
+    /// Direct dependencies still have the same recorded commit IDs.
+    Unchanged,
+    /// At least one direct dependency or its recorded revision differs.
+    Changed,
+    /// Inputs were not recorded or cannot currently be compared.
+    Unknown {
+        /// Why no comparison can be made; never evidence that inputs are unchanged.
+        detail: String,
+    },
 }
 
 /// Whether a run's successful turn has a durably recorded native revision.
@@ -217,6 +246,7 @@ mod tests {
         assert_eq!(run.session_id.as_deref(), Some("saved-session"));
         assert_eq!(run.state, RunState::Completed);
         assert_eq!(run.snapshot, SnapshotState::NotRecorded);
+        assert!(run.upstream_inputs.is_none());
         Ok(())
     }
 }

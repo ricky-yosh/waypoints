@@ -6,7 +6,11 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use turso::transaction::{Transaction, TransactionBehavior};
 
+use super::dependencies;
 use super::{Connection, Node, Storage, StorageError, canonical_project, decode_node};
+use crate::workflow::NodeParent;
+
+mod planning;
 
 /// One pending undo or redo action, identified independently of its cursor position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,15 +39,31 @@ pub struct HistoryStatus {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Edit {
-    CreateNode { node: Node },
-    UpdatePrompt { before: Node, after: String },
-    CreateConnection { connection: Connection },
+    MoveNode {
+        change: planning::Change,
+    },
+    DeleteNode {
+        change: planning::Change,
+    },
+    CreateNode {
+        node: Node,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<NodeParent>,
+    },
+    UpdatePrompt {
+        before: Node,
+        after: String,
+    },
+    CreateConnection {
+        connection: Connection,
+    },
 }
 
 impl Edit {
     fn workflow_id(&self) -> i64 {
         match self {
-            Self::CreateNode { node } => node.workflow_id,
+            Self::MoveNode { change } | Self::DeleteNode { change } => change.workflow_id,
+            Self::CreateNode { node, .. } => node.workflow_id,
             Self::UpdatePrompt { before, .. } => before.workflow_id,
             Self::CreateConnection { connection } => connection.workflow_id,
         }
@@ -51,6 +71,8 @@ impl Edit {
 
     fn label(&self) -> &'static str {
         match self {
+            Self::MoveNode { .. } => "Move prompt node",
+            Self::DeleteNode { .. } => "Delete prompt node",
             Self::CreateNode { .. } => "Create node",
             Self::UpdatePrompt { .. } => "Edit prompt",
             Self::CreateConnection { .. } => "Connect nodes",
@@ -110,13 +132,16 @@ impl Storage {
         &self,
         workflow_id: i64,
         prompt: &str,
+        parent: Option<&NodeParent>,
     ) -> anyhow::Result<Node> {
+        self.ensure_dependency_operations_clear().await?;
         let mut connection = self.database.connect()?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await?;
         let result = async {
             let project = project_for_workflow(&tx, workflow_id).await?;
+            dependencies::validate_parent(&tx, workflow_id, parent).await?;
             tx.execute("INSERT INTO node_identities DEFAULT VALUES", ())
                 .await?;
             let node = Node {
@@ -125,7 +150,18 @@ impl Storage {
                 prompt: prompt.to_owned(),
             };
             insert_node(&tx, &node).await?;
-            append(&tx, &project, &Edit::CreateNode { node: node.clone() }).await?;
+            if let Some(parent) = parent {
+                dependencies::attach(&tx, workflow_id, node.id, parent).await?;
+            }
+            append(
+                &tx,
+                &project,
+                &Edit::CreateNode {
+                    node: node.clone(),
+                    parent: parent.cloned(),
+                },
+            )
+            .await?;
             Ok(node)
         }
         .await;
@@ -138,6 +174,7 @@ impl Storage {
         node_id: i64,
         prompt: &str,
     ) -> anyhow::Result<Node> {
+        self.ensure_dependency_operations_clear().await?;
         let mut connection = self.database.connect()?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -146,7 +183,8 @@ impl Storage {
             async {
                 let project = project_for_workflow(&tx, workflow_id).await?;
                 let mut rows = tx.query(
-                "SELECT id, workflow_id, prompt FROM nodes WHERE workflow_id = ?1 AND id = ?2",
+                "SELECT id, workflow_id, prompt FROM nodes WHERE workflow_id = ?1 AND id = ?2
+                 AND NOT EXISTS (SELECT 1 FROM deleted_nodes WHERE node_id = nodes.id)",
                 [workflow_id, node_id],
             ).await?;
                 let row = rows.next().await?.with_context(|| {
@@ -182,12 +220,14 @@ impl Storage {
         source_id: i64,
         target_id: i64,
     ) -> anyhow::Result<Connection> {
+        self.ensure_dependency_operations_clear().await?;
         let mut connection = self.database.connect()?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await?;
         let result = async {
             let project = project_for_workflow(&tx, workflow_id).await?;
+            dependencies::require_legacy_connections(&tx, workflow_id).await?;
             let edge = Connection {
                 workflow_id,
                 source_id,
@@ -259,6 +299,7 @@ impl Storage {
         expected_edit_id: i64,
         direction: Direction,
     ) -> anyhow::Result<HistoryStatus> {
+        self.ensure_dependency_operations_clear().await?;
         let project = canonical_project(project)?;
         let mut connection = self.database.connect()?;
         let tx = connection
@@ -347,9 +388,22 @@ async fn append(tx: &turso::Connection, project: &Path, edit: &Edit) -> anyhow::
         turso::params![project.to_str(), cursor],
     )
     .await?;
+    let version = if matches!(edit, Edit::MoveNode { .. } | Edit::DeleteNode { .. }) {
+        3
+    } else if matches!(
+        edit,
+        Edit::CreateNode {
+            parent: Some(_),
+            ..
+        }
+    ) {
+        2
+    } else {
+        1
+    };
     tx.execute(
-        "INSERT INTO workflow_edits (project_path, position, version, record) VALUES (?1, ?2, 1, ?3)",
-        turso::params![project.to_str(), cursor + 1, serde_json::to_string(edit)?],
+        "INSERT INTO workflow_edits (project_path, position, version, record) VALUES (?1, ?2, ?3, ?4)",
+        turso::params![project.to_str(), cursor + 1, version, serde_json::to_string(edit)?],
     ).await?;
     tx.execute(
         "INSERT INTO workflow_history_heads (project_path, cursor) VALUES (?1, ?2)
@@ -374,7 +428,7 @@ async fn read_edit(
     };
     let version: i64 = row.get(1)?;
     anyhow::ensure!(
-        version == 1,
+        (1..=3).contains(&version),
         "unsupported workflow history version {version}; current workflows are preserved"
     );
     let edit: Edit =
@@ -404,8 +458,19 @@ async fn status(tx: &turso::Connection, project: &Path) -> anyhow::Result<Histor
 
 async fn apply(tx: &turso::Connection, edit: &Edit, direction: &Direction) -> anyhow::Result<()> {
     match (edit, direction) {
-        (Edit::CreateNode { node }, Direction::Redo) => insert_node(tx, node).await?,
-        (Edit::CreateNode { node }, Direction::Undo) => {
+        (Edit::MoveNode { change } | Edit::DeleteNode { change }, direction) => {
+            planning::apply(tx, change, direction).await?;
+        }
+        (Edit::CreateNode { node, parent }, Direction::Redo) => {
+            dependencies::validate_parent(tx, node.workflow_id, parent.as_ref()).await?;
+            insert_node(tx, node).await?;
+            if let Some(parent) = parent {
+                dependencies::attach(tx, node.workflow_id, node.id, parent).await?;
+            }
+        }
+        (Edit::CreateNode { node, parent }, Direction::Undo) => {
+            dependencies::detach_created_node(tx, node.workflow_id, node.id, parent.as_ref())
+                .await?;
             // Never delete associations, allocations, run history, or creation
             // guards to make metadata undo succeed. Those are separate lifecycles.
             let changed = tx
@@ -431,9 +496,11 @@ async fn apply(tx: &turso::Connection, edit: &Edit, direction: &Direction) -> an
             replace_prompt(tx, before, &before.prompt, after).await?;
         }
         (Edit::CreateConnection { connection }, Direction::Redo) => {
+            dependencies::require_legacy_connections(tx, connection.workflow_id).await?;
             insert_connection(tx, connection).await?
         }
         (Edit::CreateConnection { connection }, Direction::Undo) => {
+            dependencies::require_legacy_connections(tx, connection.workflow_id).await?;
             let changed = tx.execute(
                 "DELETE FROM connections WHERE workflow_id = ?1 AND source_id = ?2 AND target_id = ?3",
                 [connection.workflow_id, connection.source_id, connection.target_id],
@@ -517,6 +584,63 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .build()?
             .block_on(test)
+    }
+
+    #[test]
+    fn rooted_history_failures_roll_back_nodes_and_all_dependency_rows() -> anyhow::Result<()> {
+        run(async {
+            let directory = tempfile::tempdir()?;
+            let mut storage = Storage::open(&directory.path().join("workflow.db")).await?;
+            let base = crate::workflow::WorkflowBase {
+                repository_path: directory.path().to_owned(),
+                source: crate::workflow::BaseSource::Revision {
+                    id: "root()".to_owned(),
+                },
+                revision: crate::jj::Revision {
+                    change_id: "k".repeat(32),
+                    commit_id: "0".repeat(40),
+                    description: String::new(),
+                    conflicted: false,
+                },
+            };
+            let workflow = storage
+                .create_workflow_record(directory.path(), "Rooted", Some(base))
+                .await?;
+            let root = storage
+                .create_node_from(workflow.id, "Root", &NodeParent::WorkflowBase {})
+                .await?;
+            let expected = storage.workflow_graph(workflow.id).await?;
+            let history = storage.history_status(directory.path()).await?;
+            let connection = storage.database.connect()?;
+            connection.execute("CREATE UNIQUE INDEX fail_rooted_history ON workflow_edits(version) WHERE version = 2", ()).await?;
+            for parent in [
+                NodeParent::WorkflowBase {},
+                NodeParent::Node { node_id: root.id },
+            ] {
+                assert!(
+                    storage
+                        .create_node_from(workflow.id, "Must roll back", &parent)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(storage.workflow_graph(workflow.id).await?, expected);
+                assert_eq!(storage.history_status(directory.path()).await?, history);
+            }
+            connection
+                .execute("DROP INDEX fail_rooted_history", ())
+                .await?;
+            let edit = history.undo.expect("root creation");
+            storage.undo(directory.path(), edit.id).await?;
+            let empty = storage.workflow_graph(workflow.id).await?;
+            assert!(
+                empty.nodes.is_empty()
+                    && empty.base_nodes.is_empty()
+                    && empty.connections.is_empty()
+            );
+            storage.redo(directory.path(), edit.id).await?;
+            assert_eq!(storage.workflow_graph(workflow.id).await?, expected);
+            Ok(())
+        })
     }
 
     #[test]

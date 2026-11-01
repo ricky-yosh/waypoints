@@ -11,6 +11,13 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[path = "backend/planning.rs"]
+mod planning;
+#[path = "backend/upstream.rs"]
+mod upstream;
+#[path = "backend/workspace_deletion.rs"]
+mod workspace_deletion;
+
 struct Fixture {
     directory: TempDir,
     database: PathBuf,
@@ -844,6 +851,141 @@ fn snapshots_record_exact_revisions_without_client_mutation_and_do_not_repeat() 
         completed
     );
     assert_eq!(recorded_commit(&workspace)?, commit);
+    Ok(())
+}
+
+#[test]
+fn reviews_use_exact_saved_commits_even_after_rewrites_and_workspace_removal() -> anyhow::Result<()>
+{
+    let (fixture, agent, workspace) = run_fixture("complete")?;
+    let project = fixture.directory.path().join("project");
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    let completed = wait_run(&fixture, &id, "completed")?;
+    let saved = &completed["run"]["snapshot"]["revision"];
+    let original = fixture.success(&["run", "review", "--run", &id])?;
+    assert_eq!(&original["revision"], saved);
+    assert!(
+        original["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("captured-prompt.txt")
+    );
+    assert!(
+        original["patch"]
+            .as_str()
+            .expect("patch")
+            .contains("+complete")
+    );
+    assert_eq!(
+        fixture.success(&["node", "review", "--workflow", "1", "--node", "1"])?,
+        original
+    );
+    fs::write(workspace.join("later.txt"), "later recorded code\n")?;
+    jj(&workspace, &["describe", "-m", "A later revision"])?;
+    fs::write(workspace.join("dirty.txt"), "must not snapshot\n")?;
+    let operation = jj(
+        &project,
+        &[
+            "--ignore-working-copy",
+            "--at-op=@",
+            "op",
+            "log",
+            "--no-graph",
+            "--limit",
+            "1",
+            "-T",
+            "id",
+        ],
+    )?;
+    let current = fixture.success(&["node", "review", "--workflow", "1", "--node", "1"])?;
+    assert_ne!(current["revision"]["commit_id"], saved["commit_id"]);
+    assert!(
+        current["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("later.txt")
+    );
+    assert!(
+        !current["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("dirty.txt")
+    );
+    assert_eq!(fixture.success(&["run", "review", "--run", &id])?, original);
+    assert_eq!(
+        fs::read_to_string(workspace.join("dirty.txt"))?,
+        "must not snapshot\n"
+    );
+    assert_eq!(
+        jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "--at-op=@",
+                "op",
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-T",
+                "id"
+            ]
+        )?,
+        operation
+    );
+    for (method, params) in [
+        (
+            "node.review",
+            json!({"workflow_id": 1, "node_id": 1, "revision": "@"}),
+        ),
+        ("run.review", json!({"run_id": 1, "snapshot": true})),
+    ] {
+        let mut bytes = serde_json::to_vec(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
+        )?;
+        bytes.push(b'\n');
+        assert_eq!(fixture.rpc(&bytes)?["error"]["code"], -32602);
+    }
+    let human = Command::new(env!("CARGO_BIN_EXE_waypoints"))
+        .arg("--database")
+        .arg(&fixture.database)
+        .arg("--socket")
+        .arg(&fixture.socket)
+        .args(["run", "review", "--run", &id])
+        .output()?;
+    assert!(human.status.success());
+    assert!(String::from_utf8(human.stdout)?.contains("diff --git"));
+    fixture.stop()?;
+    // Only a disposable test-owned workspace is removed, not any user checkout.
+    fs::remove_dir_all(&workspace)?;
+    assert_eq!(fixture.success(&["run", "review", "--run", &id])?, original);
+    Ok(())
+}
+
+#[test]
+fn run_review_refuses_unsaved_snapshots_instead_of_using_current_code() -> anyhow::Result<()> {
+    let (fixture, agent, _workspace) = run_fixture("sleep")?;
+    let started = start_run(&fixture, &agent)?;
+    let id = started["run"]["id"].to_string();
+    assert!(started["run"]["upstream_inputs"].is_null());
+    assert_eq!(
+        fixture.success(&["run", "inputs", "--run", &id])?["status"],
+        "unknown"
+    );
+    let output = fixture
+        .command()
+        .args(["run", "review", "--run", &id])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("no saved native snapshot"));
+    fixture.success(&["run", "cancel", "--run", &id])?;
+    wait_run(&fixture, &id, "cancelled")?;
+    let output = fixture
+        .command()
+        .args(["run", "review", "--run", &id])
+        .output()?;
+    assert!(!output.status.success());
     Ok(())
 }
 
@@ -2475,9 +2617,12 @@ fn cli_creates_a_change_without_switching_and_retains_it_after_restart() -> anyh
         )?,
         operation
     );
-    for params in [
-        json!({"workflow_id": 1, "node_id": 1}),
-        json!({"workflow_id": 1, "node_id": 1, "base": "root()", "unexpected": true}),
+    for (params, code) in [
+        (json!({"workflow_id": 1, "node_id": 1}), -32000),
+        (
+            json!({"workflow_id": 1, "node_id": 1, "base": "root()", "unexpected": true}),
+            -32602,
+        ),
     ] {
         let response = fixture.rpc(
             format!(
@@ -2488,7 +2633,7 @@ fn cli_creates_a_change_without_switching_and_retains_it_after_restart() -> anyh
             )
             .as_bytes(),
         )?;
-        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(response["error"]["code"], code);
     }
     fixture.stop()?;
     assert_eq!(
@@ -3064,12 +3209,14 @@ fn branching_graph_survives_restart_and_rejects_invalid_edits() -> anyhow::Resul
             "workflow": first,
             "nodes": [root, updated, children[1], children[2]],
             "connections": connections,
+            "base_nodes": [],
+            "connectivity": {"status": "unbased"},
         })
     );
     let other_graph = fixture.success(&["workflow", "graph", "--workflow", &other])?;
     assert_eq!(
         other_graph,
-        json!({"workflow": second, "nodes": [other_node], "connections": []})
+        json!({"workflow": second, "nodes": [other_node], "connections": [], "base_nodes": [], "connectivity": {"status": "unbased"}})
     );
 
     let invalid_commands = [
@@ -3210,6 +3357,677 @@ impl Drop for OwnedServer {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn rooted_node_cli_and_rpc_require_dependencies_and_create_native_work_from_them()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project_path = fixture.directory.path().join("project");
+    let project = project_path.to_str().expect("project path");
+    jj(&project_path, &["describe", "-m", "Base"])?;
+    jj(&project_path, &["bookmark", "create", "main"])?;
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Rooted",
+        "--base",
+        "main",
+    ])?;
+    let missing = fixture
+        .command()
+        .args(["node", "create", "--workflow", "1", "--prompt", "Orphan"])
+        .output()?;
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--from-base or --parent"));
+    fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        "1",
+        "--prompt",
+        "Interfaces",
+        "--from-base",
+    ])?;
+    fixture.success(&[
+        "node",
+        "create",
+        "--workflow",
+        "1",
+        "--prompt",
+        "Authentication",
+        "--parent",
+        "1",
+    ])?;
+    let graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    assert_eq!(graph["connectivity"]["status"], "rooted");
+    assert_eq!(graph["base_nodes"], json!([1]));
+    assert_eq!(
+        graph["connections"],
+        json!([{"workflow_id":1,"source_id":1,"target_id":2}])
+    );
+    let history = fixture.success(&["history", "status", "--project", project])?;
+    let edit = history["undo"]["id"].to_string();
+    fixture.success(&["history", "undo", "--project", project, "--expected", &edit])?;
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?["connections"],
+        json!([])
+    );
+    fixture.stop()?;
+    fixture.success(&["history", "redo", "--project", project, "--expected", &edit])?;
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        graph
+    );
+    for parent in [
+        json!({"kind":"node","node_id":999}),
+        json!({"kind":"workflow_base","force":true}),
+        json!({"kind":"node"}),
+    ] {
+        let mut frame = serde_json::to_vec(&json!({
+            "jsonrpc":"2.0","id":1,"method":"node.create",
+            "params":{"workflow_id":1,"prompt":"Invalid","parent":parent}
+        }))?;
+        frame.push(b'\n');
+        assert!(fixture.rpc(&frame)?.get("error").is_some());
+    }
+    let both = fixture
+        .command()
+        .args([
+            "node",
+            "create",
+            "--workflow",
+            "1",
+            "--prompt",
+            "Both",
+            "--from-base",
+            "--parent",
+            "1",
+        ])
+        .output()?;
+    assert!(!both.status.success());
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        graph
+    );
+    fixture.success(&["node", "create-change", "--workflow", "1", "--node", "1"])?;
+    fixture.success(&["node", "create-change", "--workflow", "1", "--node", "2"])?;
+    let connection = fixture
+        .command()
+        .args([
+            "connection",
+            "create",
+            "--workflow",
+            "1",
+            "--source",
+            "1",
+            "--target",
+            "2",
+        ])
+        .output()?;
+    assert!(!connection.status.success());
+    assert!(String::from_utf8_lossy(&connection.stderr).contains("metadata-only connection edits"));
+    Ok(())
+}
+
+#[test]
+fn reparent_cli_requires_acknowledgement_and_persists_native_outcomes() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project_path = fixture.directory.path().join("project");
+    let project = project_path.to_str().expect("project path");
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Reparent",
+        "--base-revision",
+        "root()",
+    ])?;
+    for (name, dependency) in [
+        ("Interfaces", vec!["--from-base"]),
+        ("Authentication", vec!["--parent", "1"]),
+        ("Review", vec!["--parent", "2"]),
+        ("Followup", vec!["--parent", "3"]),
+    ] {
+        let mut args = vec!["node", "create", "--workflow", "1", "--prompt", name];
+        args.extend(dependency);
+        fixture.success(&args)?;
+    }
+    for id in ["1", "2", "3", "4"] {
+        fixture.success(&["node", "create-change", "--workflow", "1", "--node", id])?;
+    }
+    let graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    let history = fixture.success(&["history", "status", "--project", project])?;
+    let missing = fixture
+        .command()
+        .args([
+            "node",
+            "reparent",
+            "--workflow",
+            "1",
+            "--node",
+            "3",
+            "--parent",
+            "1",
+        ])
+        .output()?;
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--accept-undo-boundary"));
+    for (extra, code) in [
+        (json!({}), -32000),
+        (json!({"acknowledgement":true}), -32602),
+        (json!({"acknowledgement":"force"}), -32602),
+        (
+            json!({"acknowledgement":"accept_undo_boundary", "force":true}),
+            -32602,
+        ),
+    ] {
+        let mut params = json!({"workflow_id":1,"node_id":3,"parent":{"kind":"node","node_id":1}});
+        params
+            .as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        let mut frame = serde_json::to_vec(
+            &json!({"jsonrpc":"2.0","id":1,"method":"node.reparent","params":params}),
+        )?;
+        frame.push(b'\n');
+        assert_eq!(fixture.rpc(&frame)?["error"]["code"], code);
+    }
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        graph
+    );
+    assert_eq!(
+        fixture.success(&["history", "status", "--project", project])?,
+        history
+    );
+    let operation = fixture.success(&[
+        "node",
+        "reparent",
+        "--workflow",
+        "1",
+        "--node",
+        "3",
+        "--parent",
+        "1",
+        "--accept-undo-boundary",
+    ])?;
+    assert_eq!(operation["state"], "completed");
+    assert_eq!(operation["after"].as_array().expect("revisions").len(), 2);
+    assert_eq!(
+        operation["previous_parent"],
+        json!({"kind":"node","node_id":2})
+    );
+    let graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    assert_eq!(
+        graph["connections"],
+        json!([
+            {"workflow_id":1,"source_id":1,"target_id":2},
+            {"workflow_id":1,"source_id":1,"target_id":3},
+            {"workflow_id":1,"source_id":3,"target_id":4},
+        ])
+    );
+    let status = fixture.success(&["history", "status", "--project", project])?;
+    assert!(status["undo"].is_null() && status["redo"].is_null());
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["node", "operations", "--workflow", "1"])?,
+        json!([operation])
+    );
+    let base = fixture.success(&[
+        "node",
+        "reparent",
+        "--workflow",
+        "1",
+        "--node",
+        "3",
+        "--from-base",
+        "--accept-undo-boundary",
+    ])?;
+    assert_eq!(base["state"], "completed");
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?["base_nodes"],
+        json!([1, 3])
+    );
+    Ok(())
+}
+
+#[test]
+fn dependency_recovery_cli_resolves_both_crash_windows_without_repeating_native_mutation()
+-> anyhow::Result<()> {
+    for (command, mutation, applied) in [
+        ("reparent", "rebase", false),
+        ("reparent", "rebase", true),
+        ("delete", "abandon", false),
+        ("delete", "abandon", true),
+    ] {
+        let fixture = Fixture::new()?;
+        jj(fixture.directory.path(), &["git", "init", "project"])?;
+        let project = fixture.directory.path().join("project");
+        fixture.success(&[
+            "workflow",
+            "create",
+            "--project",
+            project.to_str().expect("path"),
+            "--name",
+            "Recovery",
+            "--base-revision",
+            "root()",
+        ])?;
+        fixture.success(&[
+            "node",
+            "create",
+            "--workflow",
+            "1",
+            "--prompt",
+            "A",
+            "--from-base",
+        ])?;
+        fixture.success(&["node", "create-change", "--workflow", "1", "--node", "1"])?;
+        fixture.success(&[
+            "node",
+            "create",
+            "--workflow",
+            "1",
+            "--prompt",
+            "B",
+            "--parent",
+            "1",
+        ])?;
+        fixture.success(&["node", "create-change", "--workflow", "1", "--node", "2"])?;
+        let before_graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+        fixture.stop()?;
+        let output = Command::new("/bin/sh")
+            .args(["-c", "command -v jj"])
+            .output()?;
+        assert!(output.status.success());
+        let native = String::from_utf8(output.stdout)?.trim().to_owned();
+        let bin = fixture.directory.path().join("native-bin");
+        fs::create_dir(&bin)?;
+        let entered = fixture.directory.path().join("rebase-entered");
+        let calls = fixture.directory.path().join("rebase-calls");
+        let wrapper = bin.join("jj");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nnative='{native}'\nfor arg do\n if [ \"$arg\" = {mutation} ]; then\n\
+             echo {mutation} >> '{}'\n{}\necho $$ > '{}'\nexec /bin/sleep 15\n fi\ndone\nexec \"$native\" \"$@\"\n",
+                calls.display(),
+                if applied {
+                    "\"$native\" \"$@\" > /dev/null || exit $?"
+                } else {
+                    ":"
+                },
+                entered.display(),
+            ),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH")?);
+        fixture.json_output(
+            fixture.list_command().env("PATH", path).output()?,
+            "start intercepted backend",
+        )?;
+        let backend_pid = fixture.success(&["backend", "status"])?["pid"].to_string();
+        let mut args = vec![
+            "node",
+            command,
+            "--workflow",
+            "1",
+            "--node",
+            "2",
+            "--accept-undo-boundary",
+        ];
+        if command == "reparent" {
+            args.push("--from-base");
+        }
+        let child = fixture
+            .command()
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        wait_for_file(&entered);
+        // Only these freshly launched, fixture-owned processes are signalled.
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-KILL", &backend_pid])
+                .status()?
+                .success()
+        );
+        let wrapper_pid = fs::read_to_string(&entered)?;
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", wrapper_pid.trim()])
+            .status()?;
+        assert_process_stopped(&entered)?;
+        assert!(!child.wait_with_output()?.status.success());
+        fs::write(project.join("dirty-after-crash.txt"), "keep partial work\n")?;
+        let native_op = jj(
+            &project,
+            &[
+                "--ignore-working-copy",
+                "--at-op=@",
+                "op",
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-T",
+                "id",
+            ],
+        )?;
+        // Reconnect to a fresh backend with the normal native executable.
+        let inspection = fixture.success(&["node", "operation-recovery", "--operation", "1"])?;
+        assert_eq!(
+            inspection["assessment"]["status"],
+            if applied { "applied" } else { "not_applied" }
+        );
+        assert_eq!(inspection["operation"]["state"], "unresolved");
+        assert_eq!(
+            fixture.success(&["workflow", "graph", "--workflow", "1"])?["unresolved_dependency_operation"],
+            1
+        );
+        let missing = fixture
+            .command()
+            .args(["node", "recover-reparent", "--operation", "1"])
+            .output()?;
+        assert!(!missing.status.success());
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("--confirm-processes-stopped"));
+        for (params, code) in [
+            (json!({"operation_id":1}), -32000),
+            (json!({"operation_id":1,"confirmation":true}), -32602),
+            (json!({"operation_id":1,"confirmation":"force"}), -32602),
+            (
+                json!({"operation_id":1,"confirmation":"processes_stopped","force":true}),
+                -32602,
+            ),
+        ] {
+            let mut frame = serde_json::to_vec(
+                &json!({"jsonrpc":"2.0","id":1,"method":"node.recover_reparent","params":params}),
+            )?;
+            frame.push(b'\n');
+            assert_eq!(fixture.rpc(&frame)?["error"]["code"], code);
+        }
+        let result = fixture.success(&[
+            "node",
+            "recover-reparent",
+            "--operation",
+            "1",
+            "--confirm-processes-stopped",
+        ])?;
+        assert_eq!(
+            result["state"],
+            if applied { "completed" } else { "not_applied" }
+        );
+        let graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+        assert!(graph.get("unresolved_dependency_operation").is_none());
+        if applied {
+            assert_eq!(
+                graph["base_nodes"],
+                if command == "delete" {
+                    json!([1])
+                } else {
+                    json!([1, 2])
+                }
+            );
+            assert_eq!(graph["connections"], json!([]));
+        } else {
+            assert_eq!(graph, before_graph);
+        }
+        assert_eq!(
+            jj(
+                &project,
+                &[
+                    "--ignore-working-copy",
+                    "--at-op=@",
+                    "op",
+                    "log",
+                    "--no-graph",
+                    "--limit",
+                    "1",
+                    "-T",
+                    "id"
+                ]
+            )?,
+            native_op
+        );
+        assert_eq!(
+            fs::read_to_string(&calls)?,
+            format!("{mutation}\n"),
+            "never repeat the native command"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("dirty-after-crash.txt"))?,
+            "keep partial work\n"
+        );
+        fixture.success(&[
+            "node",
+            "update",
+            "--workflow",
+            "1",
+            "--node",
+            "1",
+            "--prompt",
+            "Unblocked",
+        ])?;
+        fixture.stop()?;
+        assert_eq!(
+            fixture.success(&[
+                "node",
+                "recover-reparent",
+                "--operation",
+                "1",
+                "--confirm-processes-stopped"
+            ])?,
+            result
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_node_deletion_cli_requires_consent_reconnects_children_and_persists() -> anyhow::Result<()>
+{
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project = fixture.directory.path().join("project");
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project.to_str().expect("path"),
+        "--name",
+        "Delete",
+        "--base-revision",
+        "root()",
+    ])?;
+    for (prompt, dependency) in [
+        ("Interfaces", vec!["--from-base"]),
+        ("Authentication", vec!["--parent", "1"]),
+        ("Review", vec!["--parent", "2"]),
+    ] {
+        let mut args = vec!["node", "create", "--workflow", "1", "--prompt", prompt];
+        args.extend(dependency);
+        fixture.success(&args)?;
+    }
+    for id in ["1", "2", "3"] {
+        fixture.success(&["node", "create-change", "--workflow", "1", "--node", id])?;
+    }
+    let graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    let history = fixture.success(&[
+        "history",
+        "status",
+        "--project",
+        project.to_str().expect("path"),
+    ])?;
+    let missing = fixture
+        .command()
+        .args(["node", "delete", "--workflow", "1", "--node", "2"])
+        .output()?;
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--accept-undo-boundary"));
+    for (params, code) in [
+        (json!({"workflow_id":1,"node_id":2}), -32000),
+        (
+            json!({"workflow_id":1,"node_id":2,"acknowledgement":true}),
+            -32602,
+        ),
+        (
+            json!({"workflow_id":1,"node_id":2,"acknowledgement":"accept_undo_boundary","force":true}),
+            -32602,
+        ),
+    ] {
+        let mut frame = serde_json::to_vec(
+            &json!({"jsonrpc":"2.0","id":1,"method":"node.delete","params":params}),
+        )?;
+        frame.push(b'\n');
+        assert_eq!(fixture.rpc(&frame)?["error"]["code"], code);
+    }
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        graph
+    );
+    assert_eq!(
+        fixture.success(&[
+            "history",
+            "status",
+            "--project",
+            project.to_str().expect("path")
+        ])?,
+        history
+    );
+    let operation = fixture.success(&[
+        "node",
+        "delete",
+        "--workflow",
+        "1",
+        "--node",
+        "2",
+        "--accept-undo-boundary",
+    ])?;
+    assert_eq!(operation["kind"], "delete");
+    assert_eq!(operation["state"], "completed");
+    assert_eq!(operation["after"].as_array().expect("revisions").len(), 1);
+    let graph = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    assert_eq!(
+        graph["connections"],
+        json!([{"workflow_id":1,"source_id":1,"target_id":3}])
+    );
+    assert_eq!(graph["nodes"].as_array().expect("nodes").len(), 2);
+    assert!(
+        !fixture
+            .command()
+            .args(["node", "get", "--workflow", "1", "--node", "2"])
+            .output()?
+            .status
+            .success()
+    );
+    assert!(
+        !fixture
+            .command()
+            .args([
+                "node",
+                "update",
+                "--workflow",
+                "1",
+                "--node",
+                "2",
+                "--prompt",
+                "No resurrection"
+            ])
+            .output()?
+            .status
+            .success()
+    );
+    let history = fixture.success(&[
+        "history",
+        "status",
+        "--project",
+        project.to_str().expect("path"),
+    ])?;
+    assert!(history["undo"].is_null() && history["redo"].is_null());
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        graph
+    );
+    assert_eq!(
+        fixture.success(&["node", "operations", "--workflow", "1"])?,
+        json!([operation])
+    );
+    assert_eq!(
+        fixture.success(&["node", "operation-recovery", "--operation", "1"])?["assessment"]["status"],
+        "resolved"
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_root_adoption_cli_refuses_incomplete_mapping_without_changing_the_graph()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project_path = fixture.directory.path().join("project");
+    let project = project_path.to_str().expect("project path");
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Legacy",
+    ])?;
+    for prompt in ["First", "Second"] {
+        fixture.success(&["node", "create", "--workflow", "1", "--prompt", prompt])?;
+    }
+    fixture.success(&[
+        "workflow",
+        "set-base",
+        "--workflow",
+        "1",
+        "--base-revision",
+        "root()",
+    ])?;
+    let before = fixture.success(&["workflow", "graph", "--workflow", "1"])?;
+    assert_eq!(before["connectivity"]["status"], "needs_adoption");
+    let refused = fixture
+        .command()
+        .args([
+            "workflow",
+            "adopt-roots",
+            "--workflow",
+            "1",
+            "--base-nodes",
+            "1",
+        ])
+        .output()?;
+    assert!(!refused.status.success());
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        before
+    );
+    let adopted = fixture.success(&[
+        "workflow",
+        "adopt-roots",
+        "--workflow",
+        "1",
+        "--base-nodes",
+        "1,2",
+    ])?;
+    assert_eq!(adopted["connectivity"]["status"], "rooted");
+    assert_eq!(adopted["base_nodes"], json!([1, 2]));
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?,
+        adopted
+    );
+    Ok(())
 }
 
 #[test]

@@ -56,6 +56,45 @@ pub enum ChangeState {
     },
 }
 
+/// Native review of one exact commit against its parent tree (merged for merge commits).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RevisionReview {
+    /// Exact revision used for every part of this response.
+    pub revision: Revision,
+    /// Exact native parent commit IDs.
+    pub parent_commit_ids: Vec<String>,
+    /// Native `jj diff --summary` text, not a parsed filename protocol.
+    pub summary: String,
+    /// Native Git-format patch, including jj's conflict/binary representations.
+    pub patch: String,
+}
+
+pub(crate) async fn review(
+    repository: &Path,
+    revision: Revision,
+) -> anyhow::Result<RevisionReview> {
+    let parent_commit_ids = parent_commit_ids(repository, &revision.commit_id).await?;
+    let summary = query(
+        repository,
+        &["diff", "-r", &revision.commit_id, "--summary"],
+    )
+    .await?;
+    let patch = query(repository, &["diff", "-r", &revision.commit_id, "--git"]).await?;
+    let review = RevisionReview {
+        revision,
+        parent_commit_ids,
+        summary: String::from_utf8(summary).context("jj summary must be UTF-8")?,
+        patch: String::from_utf8(patch).context("jj patch must be UTF-8")?,
+    };
+    // Leave room for the RPC envelope; JSON escaping can expand native output.
+    anyhow::ensure!(
+        serde_json::to_vec(&review)?.len() <= 900 * 1024,
+        "revision review exceeds the response limit; inspect this commit with native jj"
+    );
+    Ok(review)
+}
+
 // Bound each subprocess; creation also has a total deadline in storage.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 // Materializing a real repository can take longer than a read-only query.
@@ -187,6 +226,152 @@ async fn revision_set(repository: &Path, revset: &str) -> anyhow::Result<Vec<Rev
         )?;
     revisions.sort_by(|left, right| left.commit_id.cmp(&right.commit_id));
     Ok(revisions)
+}
+
+pub(crate) async fn parent_commit_ids(
+    repository: &Path,
+    commit_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let output = query(
+        repository,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            commit_id,
+            "-T",
+            r#"json(parents.map(|p| p.commit_id()))"#,
+        ],
+    )
+    .await?;
+    serde_json::from_slice(&output).context("decoding native parent commit IDs")
+}
+
+pub(crate) async fn operation_id(repository: &Path) -> anyhow::Result<String> {
+    let output = query(
+        repository,
+        &["op", "log", "--no-graph", "--limit", "1", "-T", "id"],
+    )
+    .await?;
+    let id = String::from_utf8(output)?;
+    anyhow::ensure!(
+        id.len() == 128 && id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "jj did not return one exact operation ID"
+    );
+    Ok(id)
+}
+
+pub(crate) async fn operation_parent_ids(repository: &Path) -> anyhow::Result<Vec<String>> {
+    operation_parent_ids_at(repository, "@").await
+}
+
+pub(crate) async fn operation_parent_ids_at(
+    repository: &Path,
+    operation: &str,
+) -> anyhow::Result<Vec<String>> {
+    let output = query(
+        repository,
+        &[
+            &format!("--at-op={operation}"),
+            "op",
+            "log",
+            "--no-graph",
+            "--limit",
+            "1",
+            "-T",
+            r#"json(parents.map(|operation| operation.id()))"#,
+        ],
+    )
+    .await?;
+    serde_json::from_slice(&output).context("decoding native operation parents")
+}
+
+pub(crate) async fn descendants(
+    repository: &Path,
+    revision: &Revision,
+) -> anyhow::Result<Vec<Revision>> {
+    let output = query(
+        repository,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            &format!("{}::", revision.commit_id),
+            "-T",
+            REVISION_TEMPLATE,
+        ],
+    )
+    .await?;
+    serde_json::Deserializer::from_slice(&output)
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .context("decoding native descendants")
+}
+
+pub(crate) async fn rebase_subtree(
+    repository: &Path,
+    source: &Revision,
+    destination: &Revision,
+    operation: &str,
+) -> anyhow::Result<()> {
+    // Pin the validated operation. Concurrent external writes produce multiple
+    // heads, which subsequent @ queries refuse rather than silently merging.
+    run_command(
+        repository,
+        &[
+            &format!("--at-op={operation}"),
+            "rebase",
+            "--source",
+            &source.commit_id,
+            "--destination",
+            &destination.commit_id,
+        ],
+        WorkingCopy::Ignore,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn abandon_change(
+    repository: &Path,
+    source: &Revision,
+    operation: &str,
+) -> anyhow::Result<()> {
+    run_command(
+        repository,
+        &[
+            &format!("--at-op={operation}"),
+            "abandon",
+            "--",
+            &source.commit_id,
+        ],
+        WorkingCopy::Ignore,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn forget_workspace(
+    repository: &Path,
+    name: &str,
+    operation: &str,
+) -> anyhow::Result<()> {
+    run_command(
+        repository,
+        &[
+            &format!("--at-op={operation}"),
+            "workspace",
+            "forget",
+            "--",
+            name,
+        ],
+        WorkingCopy::Ignore,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn query(repository: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
@@ -397,7 +582,10 @@ async fn run_command(
 ) -> anyhow::Result<CommandOutput> {
     let mut command = Command::new("jj");
     if matches!(working_copy, WorkingCopy::Ignore) {
-        command.args(["--ignore-working-copy", "--at-op=@"]);
+        command.arg("--ignore-working-copy");
+        if !args.iter().any(|arg| arg.starts_with("--at-op=")) {
+            command.arg("--at-op=@");
+        }
     }
     command
         .current_dir(repository)

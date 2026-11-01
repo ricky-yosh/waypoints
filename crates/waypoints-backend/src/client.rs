@@ -13,9 +13,10 @@ use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep, timeout};
 use waypoints_core::run::{RecoveryConfirmation, RunRecovery};
 use waypoints_core::storage::{
-    Connection, HistoryStatus, Node, NodeChange, Workflow, WorkflowGraph,
+    Connection, DependencyOperation, DependencyRecovery, HistoryStatus, Node, NodeChange,
+    UndoBoundaryAcknowledgement, Workflow, WorkflowGraph,
 };
-use waypoints_core::workflow::BaseSource;
+use waypoints_core::workflow::{BaseSource, NodeParent};
 use waypoints_core::workspace::NodeWorkspace;
 
 use crate::config::sidecar;
@@ -274,6 +275,58 @@ impl Client {
             .await
     }
 
+    /// Explicitly attaches legacy prompt-only graph roots to their selected workflow base.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an incomplete selection, native references, or RPC failure.
+    pub async fn adopt_workflow_roots(
+        &self,
+        workflow_id: i64,
+        base_nodes: &[i64],
+    ) -> Result<WorkflowGraph, BackendError> {
+        self.call(
+            "workflow.adopt_roots",
+            json!({"workflow_id":workflow_id,"base_nodes":base_nodes}),
+        )
+        .await
+    }
+
+    /// Saves a node and an explicit upstream dependency atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid/unrooted workflow, invalid parent, or RPC failure.
+    pub async fn create_node_from(
+        &self,
+        workflow_id: i64,
+        prompt: &str,
+        parent: &NodeParent,
+    ) -> Result<Node, BackendError> {
+        self.call(
+            "node.create",
+            json!({"workflow_id":workflow_id,"prompt":prompt,"parent":parent}),
+        )
+        .await
+    }
+
+    /// Creates native work from a node's saved dependency without an independent base choice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing/busy upstream work, unsupported parents, or RPC failure.
+    pub async fn create_node_change_from_dependency(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<NodeChange, BackendError> {
+        self.call(
+            "node.create_change",
+            json!({"workflow_id":workflow_id,"node_id":node_id}),
+        )
+        .await
+    }
+
     /// Saves a prompt node in an existing workflow.
     ///
     /// # Errors
@@ -335,6 +388,98 @@ impl Client {
             "node.associate",
             json!({
                 "workflow_id": workflow_id, "node_id": node_id, "change_id": change_id
+            }),
+        )
+        .await
+    }
+
+    /// Rebases a node and descendants, requiring explicit consent to the undo boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe state or transport/native/storage failures.
+    /// Inspect operations after uncertainty; never automatically retry.
+    pub async fn reparent_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        parent: &NodeParent,
+        acknowledgement: Option<UndoBoundaryAcknowledgement>,
+    ) -> Result<DependencyOperation, BackendError> {
+        self.call(
+            "node.reparent",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id,
+                "parent": parent, "acknowledgement": acknowledgement,
+            }),
+        )
+        .await
+    }
+
+    /// Abandons a native node and deregisters its saved workspace while preserving all files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing consent, unsafe state, or request/native/storage
+    /// failure. Inspect the operation after uncertainty; never blindly retry.
+    pub async fn delete_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        acknowledgement: Option<UndoBoundaryAcknowledgement>,
+    ) -> Result<DependencyOperation, BackendError> {
+        self.call(
+            "node.delete",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id, "acknowledgement": acknowledgement,
+            }),
+        )
+        .await
+    }
+
+    /// Lists durable dependency edit inputs and outcomes, including unresolved reservations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid workflow or request/storage failure.
+    pub async fn dependency_operations(
+        &self,
+        workflow_id: i64,
+    ) -> Result<Vec<DependencyOperation>, BackendError> {
+        self.call("node.operations", json!({"workflow_id": workflow_id}))
+            .await
+    }
+
+    /// Inspects whether an unresolved dependency edit can be resolved without rerunning jj.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing records or request/storage failures.
+    pub async fn inspect_dependency_recovery(
+        &self,
+        operation_id: i64,
+    ) -> Result<DependencyRecovery, BackendError> {
+        self.call(
+            "node.operation_recovery",
+            json!({"operation_id": operation_id}),
+        )
+        .await
+    }
+
+    /// Explicitly resolves a provable dependency-edit outcome after writers have stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing confirmation, ambiguous state, or request/storage failures.
+    pub async fn recover_dependency_operation(
+        &self,
+        operation_id: i64,
+        confirmation: Option<RecoveryConfirmation>,
+    ) -> Result<DependencyOperation, BackendError> {
+        self.call(
+            "node.recover_operation",
+            json!({
+                "operation_id": operation_id, "confirmation": confirmation,
             }),
         )
         .await
@@ -430,6 +575,103 @@ impl Client {
             json!({"workflow_id": workflow_id, "node_id": node_id}),
         )
         .await
+    }
+
+    /// Reviews a node's current recorded commit without snapshotting its workspace.
+    ///
+    /// # Errors
+    ///
+    /// Refuses absent/ambiguous revisions, oversized output, or native/transport failures.
+    pub async fn review_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<waypoints_core::jj::RevisionReview, BackendError> {
+        self.call(
+            "node.review",
+            json!({"workflow_id": workflow_id, "node_id": node_id}),
+        )
+        .await
+    }
+
+    /// Reviews the exact snapshot saved by a run, including historical node runs.
+    ///
+    /// # Errors
+    ///
+    /// Refuses absent snapshots, unavailable commits, oversized output, or request failures.
+    pub async fn review_run(
+        &self,
+        run_id: i64,
+    ) -> Result<waypoints_core::jj::RevisionReview, BackendError> {
+        self.call("run.review", json!({"run_id": run_id})).await
+    }
+
+    /// Explicitly continues an abandoned deletion by deregistering its workspace, keeping all files.
+    ///
+    /// # Errors
+    ///
+    /// Refuses absent stopped-writer confirmation, ambiguity, or native/storage/transport failures.
+    pub async fn resume_node_deletion(
+        &self,
+        operation_id: i64,
+        confirmation: Option<RecoveryConfirmation>,
+    ) -> Result<waypoints_core::storage::DependencyOperation, BackendError> {
+        self.call(
+            "node.resume_deletion",
+            json!({
+                "operation_id": operation_id, "confirmation": confirmation
+            }),
+        )
+        .await
+    }
+
+    /// Moves a prompt-only subtree without invoking jj or clearing metadata Undo.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid topology, native/workspace/run references, or request failures.
+    pub async fn move_prompt_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+        parent: &waypoints_core::workflow::NodeParent,
+    ) -> Result<waypoints_core::storage::WorkflowGraph, BackendError> {
+        self.call(
+            "node.move_prompt",
+            json!({
+                "workflow_id": workflow_id, "node_id": node_id, "parent": parent
+            }),
+        )
+        .await
+    }
+
+    /// Deletes a prompt-only node and reconnects children, retaining transactional metadata Undo.
+    ///
+    /// # Errors
+    ///
+    /// Refuses native/workspace/run references, unsupported graphs, or request failures.
+    pub async fn delete_prompt_node(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<waypoints_core::storage::WorkflowGraph, BackendError> {
+        self.call(
+            "node.delete_prompt",
+            json!({"workflow_id": workflow_id, "node_id": node_id}),
+        )
+        .await
+    }
+
+    /// Compares saved direct upstream revisions without affecting execution or agent context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable runs or transport failures; unavailable inputs are unknown.
+    pub async fn run_upstream_status(
+        &self,
+        run_id: i64,
+    ) -> Result<waypoints_core::run::UpstreamStatus, BackendError> {
+        self.call("run.inputs", json!({"run_id": run_id})).await
     }
 
     /// Saves a directed connection between two nodes in one workflow.

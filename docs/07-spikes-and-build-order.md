@@ -1,13 +1,26 @@
 # Spikes, build order, open questions
 
+The [core/backend status map](20-core-backend-status.md) owns the current capability
+inventory and unprioritized discussion backlog. This page keeps integration
+acceptance and research separate from implementation status.
+
 ## Spikes (small throwaway integration programs, each under a day)
 
-These are integration research topics, not an instruction to implement ACP first. Establish the headless core/backend/CLI foundation below first; ACP experiments can follow when adding harness execution.
+These began as integration research topics, not an instruction to implement ACP
+first. Core/backend/CLI and ACP execution now exist; the entries below distinguish
+completed research from validation still needed.
 
 1. **ACP basics — Codex spike completed.** Streaming, structured diffs, permission denial/approve-once, and protocol cancellation passed with adapter 2.5.0 using a temporary Python client. The subsequent [backend lifecycle](13-agent-run-lifecycle.md) is fake-peer tested, and its Rust fresh-run path also passed a manual Codex file-edit test. That run used a shell tool without a structured edit diff. See [spike results and integration rules](12-codex-acp-spike.md).
 2. **Session reuse — partially verified.** Same-session follow-up and `session/load` after an adapter restart passed with Codex in the temporary spike, including history replay and conversation-only recall. An unprompted session failed to reload. Rust explicit continuation and automatic post-turn snapshotting also passed manual Codex checks. Interrupted-run recovery is now fake-peer/native-jj tested, preserving partial work without replay. Resume without replay, fork, and different-working-directory loading remain untested.
-3. **jj workflow.** In a scratch repo: change per phase, two parallel workspaces, a merge, then edit an early change and observe rebase and conflicts. Confirm exact commands. Check whether Zed shows a phase's diff in a colocated repo.
-4. **Turso.** Throwaway table, a few async writes, reopen the file. Confirms the crate works as expected; keep SQL plain.
+3. **jj workflow — partially verified.** Changes, separate workspaces, rewrites,
+   abandonment, conflicts, and interrupted-operation recovery have executable
+   coverage, including read-only current-node/saved-run diffs. Native multi-parent
+   product operations, general revision-history browsing, and the
+   complete upstream-edit acceptance workflow remain incomplete. Editor handoff
+   behavior still needs validation.
+4. **Turso — persistence foundation implemented.** Reopen, additive upgrades,
+   transactional metadata history, and injected SQL-failure tests exist. Backup/
+   restore procedures and non-additive migration policy remain discussion items.
 
 Write down what you learn; it becomes the spec for the real core crate.
 
@@ -15,27 +28,40 @@ Write down what you learn; it becomes the spec for the real core crate.
 
 **Current decision: core and CLI first, GUI later.** This supersedes the earlier requirement to include a node UI in the first usable slice.
 
-**Next dependency-editing milestone:** establish an explicit workflow base and
-rooted graph validation, then implement acknowledged native node deletion and
-reconnection with durable recovery and safe workspace cleanup. Metadata-only
-removal is no longer the default target. See
-[agreed rules and native validation](15-native-dependency-editing.md).
-Explicit [base selection](16-workflow-bases.md) is implemented; rooted connectivity
-and legacy graph adoption are still the next step.
+The shared backend remains the workflow engine. The GUI must use the same API,
+not implement its own native editing, storage, or execution lifecycle.
+Based workflows follow the [native dependency decision](15-native-dependency-editing.md);
+legacy metadata-only commands retain compatibility rather than silently rebasing.
 
-1. Define the foundation: projects identified by local folders, branching workflows, prompt nodes, and saved relationships distinct from native jj ancestry. Workflows are the sidebar items; agent sessions remain harness-owned.
-2. Implement the headless core and persistence: register projects and manage multiple workflows, with explicit project/workflow identity and selection. Introduce basic jj queries/associations without building a new code-history system.
-3. Expose operations through the local JSON-RPC backend and thin CLI. Keep database access in the backend; support noninteractive commands, structured output, and clear errors.
-4. Verify the headless workflow end to end: create two workflows and edit them independently. In one, create an interfaces/placeholders node with authentication, image-uploading, and settings children. Exercise separate workspaces for two branches, inspect native revision history, and explicitly continue from an older revision using validated jj operations. Edit the upstream node and refresh ancestry/conflict information. Reopen after a backend restart; confirm client reconnect/refresh and persistent workflow undo/redo.
-5. Once the foundation works, add the GPUI client using the same backend operations. Verify CLI edits appear in the GUI before expanding node interactions.
-6. Evaluate ACP execution integration separately; it is not a prerequisite for establishing branching workflows and native history navigation.
+Do not infer the next feature from the order of historical spike entries.
+Missing capabilities and their intended behavior need discussion before selecting
+another implementation slice; see [discussion items](20-core-backend-status.md#remaining-capabilities-and-decisions-for-discussion).
 
-**Current headless checkpoint:** persistent metadata undo/redo now covers node
-creation, prompt edits, and connection creation, including restart and atomic
-failure tests. It does not undo code or agent conversations. Deletion/disconnection,
-native history browsing/continuation, ancestry/context staleness, explicit branch
-combination, and project registration remain unfinished; step 4 above is not yet
-fully satisfied. See [workflow history](14-workflow-history.md).
+## Headless acceptance checklist
+
+The following integrated scenario is **partially satisfied**, not a claim that
+every step is available today. Individual feature tests do not replace it.
+
+- Create two workflows and edit them independently through the backend/CLI.
+- In a based workflow, create interfaces/placeholders with authentication,
+  image-uploading, and settings branches.
+- Allocate separate workspaces for parallel work; run and explicitly continue an
+  agent session, record exact successful-turn revisions, and inspect outcomes.
+- Reparent/delete eligible native nodes and exercise explicit recovery in
+  disposable crash scenarios; confirm graph/native alignment and undo boundaries.
+- Reopen after backend restart; verify reconnect/refresh and persistent metadata
+  undo/redo without code or conversation rewind.
+- Inspect native diffs for current node revisions and exact saved run snapshots.
+- **Not yet complete:** browse general native revision history and explicitly
+  continue from a chosen old code revision. Same-session `run continue` is not
+  this feature.
+- **Not yet complete:** edit upstream work and surface native ancestry mismatch,
+  stale physical checkouts, native conflicts, and stale agent context distinctly.
+- **Not yet complete:** explicitly combine branch results through a supported
+  native multi-parent operation.
+
+GUI integration remains pending. Its acceptance must include CLI edits appearing
+in the GUI through backend refresh, not a second local store or workflow engine.
 
 No MCP adapter, transcript archive, or durable notification replay is required. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli).
 

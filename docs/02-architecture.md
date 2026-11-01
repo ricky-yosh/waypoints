@@ -1,11 +1,16 @@
 # Architecture
 
+This page records architecture and ownership decisions. The
+[core/backend status map](20-core-backend-status.md) is the current capability
+inventory; [backend/CLI](11-backend-cli.md) is the transport and operation reference.
+Design sketches below are explicitly separated from implemented behavior.
+
 ## Layers
 
 1. **Headless core library:** workflow operations, phase prompts and associations, storage, and jj integration. It has no GUI dependency and can be tested without opening a window.
 2. **Local application backend:** a running process hosting the core and exposing a shared JSON-RPC API.
 3. **Clients:** the GPUI desktop app and a CLI both use that API. Neither implements a separate workflow engine.
-4. **Outside Waypoints:** existing agent harnesses and the user's repository (jj colocated with git). Harness integration can follow the first manual workflow.
+4. **Outside Waypoints:** existing agent harnesses and the user's native jj repository. ACP integration launches a trusted user-installed executable; Waypoints does not implement the agent loop.
 
 ## Architecture decision: local backend, GUI, and CLI
 
@@ -22,9 +27,9 @@ CLI -----------+
 - **RPC (remote procedure call)** lets one process request an operation from another. Here both processes run on the same machine; "remote" does not mean hosted.
 - **JSON-RPC** supplies structured requests, responses, and notifications. It does not itself provide persistence or reconnection behavior.
 - **Shared operations:** both clients query and mutate workflows through the backend. It coordinates Waypoints-initiated writes and jj operations; jj remains the source of truth for native version-control state.
-- **Agent interface:** the CLI should support structured JSON output, noninteractive invocation, clear errors and exit codes, explicit repository selection, and waiting for or streaming relevant updates.
+- **Agent interface:** the CLI supports structured JSON output, noninteractive invocation, clear errors and exit codes, explicit project/workflow selection, and bounded event polling. A continuous terminal renderer is not implemented.
 - **Persistence:** save workflow prompts, links, and native-change associations so they survive restarts. Conversations and transcripts remain in the existing harness; do not store them in Waypoints.
-- **Updates:** begin with state-change notifications that tell clients to refresh. Reconnecting clients fetch a current state snapshot; no durable event log or event replay is required initially. External jj changes are reconciled on refresh.
+- **Updates:** current clients poll run status/events and fetch current saved state after reconnect. No subscriptions, durable notification log, or notification replay are required. Native refresh reports current/missing/divergent revisions and conflicts; general ancestry reconciliation and downstream context-staleness tracking are not implemented.
 - **Human-paced execution:** a workflow connection does not automatically run the next phase.
 - **UI debugging is separate:** the native GPUI inspector helps develop the GUI. Agents do not need to click the GUI to perform workflow operations. Screenshots, when useful for visual verification, need not be stored persistently.
 
@@ -35,23 +40,35 @@ backend-owned and serialized. Uncertain runs retain reservations after a crash;
 no prompt is automatically replayed. See [scope and validation](13-agent-run-lifecycle.md).
 This uses polling rather than subscriptions for the initial update transport.
 
-Recommended starting topology: one backend per open repository, shared by its clients, using local IPC (Unix-domain sockets or Windows named pipes), not a public HTTP endpoint. Restrict access to the owning user. A GUI or CLI may start or connect to it; an always-running background service is not required. Backend lifetime and IPC details still need implementation validation.
+**Implemented topology:** one backend owns a configured database/socket pair,
+using local Unix-domain IPC on macOS/Linux, not a public HTTP endpoint. A database
+can contain workflows for multiple canonical project folders. Clients auto-start
+or reuse the backend; lifetime locks prevent competing owners. Access is restricted
+to the owning user. Windows named pipes and automatic per-repository backend
+selection are not implemented. See [lifecycle](11-backend-cli.md#lifecycle).
 
-**Current implementation priority: headless core and CLI first; GUI later.** Establish project-folder registration, multiple branching workflows, node editing, and persistence through the local backend and CLI before implementing the node view. Workflows are the sidebar items grouped by project; do not introduce a separate application-level "session" entity. Agent session references belong to existing harnesses. AI execution integration is not a prerequisite. This supersedes the earlier UI-first milestone, without changing the shared-backend architecture. See [build order](07-spikes-and-build-order.md).
+**Current direction: headless core and CLI first; GUI later.** Workflow persistence,
+branching, native editing, and ACP execution now use the shared backend. A separate
+project registry is not implemented: project identity is the canonical folder.
+Workflows are the eventual sidebar items grouped by project; do not introduce a
+separate application-level "session" entity. Agent session references belong to
+existing harnesses. See [acceptance and research](07-spikes-and-build-order.md).
 
 ## Workflow model and native history
 
-**Revised product direction:** the workflow graph will represent rooted native
-code dependencies. Deleting a node with native work abandons its jj change and
-reflects jj's descendant reconnection, with safe workspace cleanup and an explicit
-undo boundary. This supersedes planning-only connection/removal semantics below;
-current commands have not yet migrated. See the
-[decision, native validation, and implementation sequence](15-native-dependency-editing.md).
+**Implemented for based workflows:** the graph represents native code dependencies
+rooted at a fixed saved base. Node creation attaches metadata atomically; later
+native creation uses that dependency. Checked reparenting and deletion without
+workspaces change jj and reconcile the graph with an acknowledged undo boundary.
+Workspace cleanup and broader reconciliation remain pending.
+[The native dependency decision](15-native-dependency-editing.md) supersedes the
+planning-only model. Legacy unbased commands retain that older behavior; no old
+graph is silently adopted.
 
 - A project identifies a local project folder/repository and groups workflows. The CLI selects projects and workflows explicitly; the later GUI presents that organization in its sidebar.
 - A workflow contains prompt nodes and saved connections, with branching supported from the start. See the [interfaces and parallel implementations example](01-concept.md#project-workflow-and-node-example).
 - A node represents a prompt/assignment associated with an evolving jj change, not a frozen commit or a single agent turn. A change ID follows evolving work; commit IDs identify exact code revisions. Resolve native divergence explicitly rather than assuming a change ID always identifies one current commit.
-- Keep workflow links distinct from jj parent relationships. Reflect manual repository changes without guessing prompt associations. A missing native change does not delete the saved node; mark the association missing and require an explicit action to create or select a replacement.
+- Keep workflow metadata and native jj state as distinct sources with checked alignment, not unrelated dependency graphs. Do not guess prompt associations from native ancestry. External disappearance of a change retains its saved node/association as missing; explicit Waypoints deletion instead abandons native work and removes the node from the active graph while preserving historical references.
 - Browsing native revisions and continuing work from an old revision are separate operations. Validate jj commands and retention before promising indefinite availability or a particular restore/branch behavior.
 - Prompt-edit undo history is distinct from native code history. Associating an exact historical prompt with a code revision requires an explicit recorded reference; do not infer that correspondence.
 - Separate workspaces are needed for simultaneous editing of different code states, not for every idle node or historical revision. Allocate working directories on demand; two concurrent editors/agents must not share a directory for different nodes.
@@ -61,14 +78,14 @@ current commands have not yet migrated. See the
 
 Implement a small, project-owned undo/redo system rather than adopting a dedicated undo crate or generic command framework. Reuse the project's existing storage and serialization dependencies. The required customization is in workflow semantics and transactional persistence, not a general-purpose undo engine.
 
-- **Scope:** saved prompt edits and other metadata-only edits, including the currently implemented node/connection creation operations. Future native dependency edits and node deletion establish an explicit undo boundary rather than becoming reversible metadata commands. Code changes, jj operations, agent execution, and conversations are outside this history; let jj handle code recovery.
-- **Ownership:** one chronological history per repository, shared by GUI and CLI clients. The backend serializes edits, undo, and redo.
+- **Scope:** node creation with its initial attachment, prompt edits, and legacy unbased connection creation. Native reparenting and deletion establish an explicit undo boundary rather than becoming reversible metadata commands. Code changes, jj operations, agent execution, and conversations are outside this history; let jj handle code recovery.
+- **Ownership:** one chronological history per canonical project folder, shared by clients and workflows in that folder. This does not automatically group different subfolders of one repository. The backend serializes edits, undo, and redo.
 - **Records:** represent supported edits as explicit, versioned data with enough before/after information to reverse and reapply them. Do not persist executable closures. Redo restores recorded values and identities rather than rerunning arbitrary side effects.
 - **Atomicity:** commit each workflow mutation and its history record/cursor update in the same database transaction. Undo and redo are transactional too; failures must not advance the cursor.
 - **Persistence:** retain history and its current position across application restarts. Load saved workflow state directly rather than reconstructing it by replaying all commands. This edit history is not event sourcing or a durable client-notification log.
 - **Branching:** a new saved edit after undo discards the redo tail, atomically with the new edit. Selective undo and branching histories are not initial requirements.
 - **Grouping:** one meaningful metadata action is one undo step. Saving a prompt creates one step; typing retains normal local input undo. The revised native node deletion policy is outside ordinary metadata undo; it abandons the associated change and reconciles dependent graph links.
-- **Feedback:** expose what undo/redo will do, such as "Undo delete phase," to both clients.
+- **Feedback:** expose the next metadata action, such as "Edit prompt," with its stable edit ID and workflow ID. Native deletion is not an undoable metadata action.
 - **Upgrades:** migrate stored history formats or explicitly invalidate incompatible history without deleting the current workflow; never silently misinterpret old records.
 
 **Implemented first slice:** node creation, saved prompt edits, and connection
@@ -76,32 +93,43 @@ creation have transactional, persistent undo/redo through the backend and CLI.
 History is shared across workflows in one canonical project folder, with explicit
 expected edit IDs to reject stale clients. Native/run references block undoing a
 node's creation rather than being deleted. Existing data is a non-undoable baseline.
-Deletion/disconnection, ordering, and layout remain future slices. Code and agent
+Disconnection, ordering, and layout remain future slices. Native reparenting and
+deletion have separate undo boundaries and explicit recovery. Code and agent
 conversation state are never part of this history. See [commands and validation](14-workflow-history.md).
 
-**Future connection decision:** code-changing connect/disconnect operations will
-require explicit undo-boundary acknowledgement (a noninteractive CLI flag, not
-an implicit rebase). Workflow Undo will not cross that boundary or reverse native
-code. This extends the metadata-only connection model; existing operations are
-unchanged. See the [decision and remaining design work](14-workflow-history.md#decision-acknowledge-future-code-changing-connections)
-before implementing native dependency editing.
+**Native dependency editing:** `node reparent` and `node delete` require explicit
+undo-boundary acknowledgement. Workflow Undo cannot cross that boundary or reverse
+native code. General connect/disconnect behavior remains a discussion item;
+legacy `connection create` has not acquired rebase semantics. See the
+[history policy](14-workflow-history.md#decision-acknowledge-future-code-changing-connections).
 
 ## Sessions: when does a node keep an ACP session?
 
-The following ACP execution sketches are for later harness integration, not requirements for the first slice. Any session references point to harness-owned conversations; they do not imply a Waypoints chat or transcript store.
+Fresh runs and explicit same-session continuation are implemented in the
+[run lifecycle](13-agent-run-lifecycle.md). Session references point to
+harness-owned conversations, not a Waypoints chat or transcript store.
 
 - Give each running phase its own agent process and ACP session.
 - Shut the process down when the phase ends. Idle nodes hold nothing open.
-- Save the agent's session ID in the store so the session can be resumed later if the agent supports it.
-- A phase is finished when the prompt turn returns with a stop reason. The state machine then moves it to done, or to awaiting approval if a gate is set.
+- Save the agent's session ID for explicit loading when supported. Do not silently start fresh if loading fails.
+- A successful turn enters finalization after process cleanup, then completes with a separate snapshot outcome. This is not human code-review approval; workflow review gates are not implemented.
 
-## Phase states
+## Phase states (product sketch, not the current API)
 
 draft -> ready -> running -> awaiting approval -> done
 
 Plus: failed, stale (an upstream phase changed), conflicted (jj reports a conflict).
 
-## Data to store (sketch)
+Current run states, native conflict flags, graph connectivity, and workspace
+readiness are separate values, not this single phase state machine.
+`awaiting_permission` means an ACP tool decision, not a code-review gate.
+See the [run-state contract](13-agent-run-lifecycle.md#lifecycle-and-ownership).
+
+## Data to store (product sketch)
+
+This sketch includes future fields; consult the feature guides for current records.
+It does not claim that timestamps, model/capability provenance, layout, or
+workflow review state are currently captured.
 
 - Plans, phases, points (the text and ordering).
 - Runs or revisions of a phase (a node can have several versions as you iterate).

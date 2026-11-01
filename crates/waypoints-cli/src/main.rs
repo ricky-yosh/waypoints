@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use waypoints_backend::{Client, Config};
 use waypoints_core::jj::ChangeState;
 use waypoints_core::run::RecoveryConfirmation;
-use waypoints_core::storage::{HistoryStatus, Node, NodeChange};
-use waypoints_core::workflow::BaseSource;
+use waypoints_core::storage::{HistoryStatus, Node, NodeChange, UndoBoundaryAcknowledgement};
+use waypoints_core::workflow::{BaseSource, NodeParent};
 use waypoints_core::workspace::{NodeWorkspace, WorkspaceState};
 
 #[derive(Parser)]
@@ -93,6 +93,16 @@ enum HistoryCommand {
 
 #[derive(Subcommand)]
 enum RunCommand {
+    /// Compare direct upstream revisions with those observed before this run.
+    Inputs {
+        #[arg(long)]
+        run: i64,
+    },
+    /// Review the exact native snapshot saved by a run, without updating any checkout.
+    Review {
+        #[arg(long)]
+        run: i64,
+    },
     /// Capture a node prompt and start an ACP executable in its verified workspace.
     Start {
         #[arg(long)]
@@ -158,6 +168,13 @@ enum RunCommand {
 
 #[derive(Subcommand)]
 enum WorkflowCommand {
+    /// Explicitly connect every legacy prompt-only graph root to the saved workflow base.
+    AdoptRoots {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long, required = true, num_args = 1.., value_delimiter = ',')]
+        base_nodes: Vec<i64>,
+    },
     Create {
         #[arg(long)]
         project: PathBuf,
@@ -200,6 +217,13 @@ enum WorkflowCommand {
 
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Review the current recorded native commit, excluding unsnapshotted workspace edits.
+    Review {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
     /// Allocate or inspect a dedicated native workspace for this node's change.
     Workspace {
         #[command(subcommand)]
@@ -210,6 +234,12 @@ enum NodeCommand {
         workflow: i64,
         #[arg(long)]
         prompt: String,
+        /// Build directly on this workflow's fixed base.
+        #[arg(long, conflicts_with = "parent")]
+        from_base: bool,
+        /// Build on an existing upstream node in this workflow.
+        #[arg(long, conflicts_with = "from_base")]
+        parent: Option<i64>,
     },
     Get {
         #[arg(long)]
@@ -234,15 +264,93 @@ enum NodeCommand {
         #[arg(long)]
         change: String,
     },
-    /// Create an empty jj change on an explicit base, without switching the working copy.
+    /// Create an empty jj change from the saved dependency, without switching the working copy.
     CreateChange {
         #[arg(long)]
         workflow: i64,
         #[arg(long)]
         node: i64,
-        /// Change ID, commit ID, unique prefix, or root(); not an arbitrary revset.
+        /// Legacy workflow base; in based workflows it must match the saved dependency.
         #[arg(long)]
-        base: String,
+        base: Option<String>,
+    },
+    /// Move a prompt-only subtree without changing native code; supports metadata Undo.
+    MovePrompt {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        #[arg(long, required_unless_present = "parent", conflicts_with = "parent")]
+        from_base: bool,
+        #[arg(
+            long,
+            required_unless_present = "from_base",
+            conflicts_with = "from_base"
+        )]
+        parent: Option<i64>,
+    },
+    /// Delete a prompt-only node and reconnect children; supports metadata Undo.
+    DeletePrompt {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
+    /// Rebase this node and descendants onto a replacement dependency.
+    Reparent {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        #[arg(long, required_unless_present = "parent", conflicts_with = "parent")]
+        from_base: bool,
+        #[arg(
+            long,
+            required_unless_present = "from_base",
+            conflicts_with = "from_base"
+        )]
+        parent: Option<i64>,
+        /// Accept that workflow Undo cannot cross this code-changing operation.
+        #[arg(long)]
+        accept_undo_boundary: bool,
+    },
+    /// Continue an abandoned deletion by deregistering its workspace, keeping all files.
+    ResumeDeletion {
+        #[arg(long)]
+        operation: i64,
+        /// Attest old native processes and other writers have stopped.
+        #[arg(long, required = true)]
+        confirm_processes_stopped: bool,
+    },
+    /// Abandon a native node and reconnect children; deregister its saved workspace, keeping all files.
+    Delete {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+        /// Accept that deletion changes native code and workflow Undo cannot cross it.
+        #[arg(long)]
+        accept_undo_boundary: bool,
+    },
+    /// Inspect durable dependency operations; unresolved outcomes must not be retried.
+    Operations {
+        #[arg(long)]
+        workflow: i64,
+    },
+    /// Inspect a dependency operation without releasing its reservation or changing jj.
+    #[command(name = "operation-recovery", visible_alias = "reparent-recovery")]
+    ReparentRecovery {
+        #[arg(long)]
+        operation: i64,
+    },
+    /// Resolve a clearly applied/unapplied dependency operation; never rerun jj or undo code.
+    #[command(name = "recover-operation", visible_alias = "recover-reparent")]
+    RecoverReparent {
+        #[arg(long)]
+        operation: i64,
+        /// Attest that all old native processes and other writers have stopped.
+        #[arg(long)]
+        confirm_processes_stopped: bool,
     },
     /// Query the node's current native revision without snapshotting the working copy.
     Refresh {
@@ -327,6 +435,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     | RunCommand::Continue { .. }
                     | RunCommand::List { .. }
                     | RunCommand::Status { .. }
+                    | RunCommand::Inputs { .. }
+                    | RunCommand::Review { .. }
                     | RunCommand::Recovery { .. }
             ) {
                 Client::connect_or_start(&config, &env::current_exe()?).await?
@@ -348,7 +458,31 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 RunCommand::List { workflow, node } => {
                     serde_json::to_value(client.node_runs(workflow, node).await?)?
                 }
-                RunCommand::Status { run } => serde_json::to_value(client.run_status(run).await?)?,
+                RunCommand::Review { run } => {
+                    print_review(client.review_run(run).await?, args.json)?;
+                    return Ok(());
+                }
+                RunCommand::Inputs { run } => {
+                    let status = client.run_upstream_status(run).await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&status)?);
+                    } else {
+                        print_upstream_status(&status);
+                    }
+                    return Ok(());
+                }
+                RunCommand::Status { run } => {
+                    let status = client.run_status(run).await?;
+                    if !args.json {
+                        println!("{}", serde_json::to_string_pretty(&status)?);
+                        match client.run_upstream_status(run).await {
+                            Ok(inputs) => print_upstream_status(&inputs),
+                            Err(error) => println!("Upstream comparison unavailable: {error}"),
+                        }
+                        return Ok(());
+                    }
+                    serde_json::to_value(status)?
+                }
                 RunCommand::Recovery { run } => {
                     serde_json::to_value(client.inspect_run_recovery(run).await?)?
                 }
@@ -426,6 +560,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::Workflow { command } => {
             let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
             match command {
+                WorkflowCommand::AdoptRoots {
+                    workflow,
+                    base_nodes,
+                } => {
+                    let graph = client.adopt_workflow_roots(workflow, &base_nodes).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&graph)?
+                        } else {
+                            serde_json::to_string_pretty(&graph)?
+                        }
+                    );
+                }
                 WorkflowCommand::Create {
                     project,
                     name,
@@ -490,11 +638,23 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         println!("{}", serde_json::to_string(&graph)?);
                     } else {
                         println!("Workflow {}: {}", graph.workflow.id, graph.workflow.name);
+                        println!(
+                            "Connectivity: {}",
+                            serde_json::to_string(&graph.connectivity)?
+                        );
+                        for id in graph.base_nodes {
+                            println!("Base -> {id}");
+                        }
                         for node in graph.nodes {
                             println!("Node {}: {}", node.id, node.prompt);
                         }
                         for connection in graph.connections {
                             println!("{} -> {}", connection.source_id, connection.target_id);
+                        }
+                        if let Some(id) = graph.unresolved_dependency_operation {
+                            println!(
+                                "UNRESOLVED dependency operation {id}: saved edges may not match jj; inspect node operations."
+                            );
                         }
                     }
                 }
@@ -537,15 +697,207 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     node,
                     base,
                 } => {
-                    let status = client.create_node_change(workflow, node, &base).await?;
+                    let status = match base {
+                        Some(base) => client.create_node_change(workflow, node, &base).await?,
+                        None => {
+                            client
+                                .create_node_change_from_dependency(workflow, node)
+                                .await?
+                        }
+                    };
                     print_node_change(status, args.json)?;
+                }
+                NodeCommand::MovePrompt {
+                    workflow,
+                    node,
+                    from_base,
+                    parent,
+                } => {
+                    let parent = if from_base {
+                        NodeParent::WorkflowBase {}
+                    } else {
+                        NodeParent::Node {
+                            node_id: parent.context("select --parent or --from-base")?,
+                        }
+                    };
+                    let graph = client.move_prompt_node(workflow, node, &parent).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&graph)?
+                        } else {
+                            serde_json::to_string_pretty(&graph)?
+                        }
+                    );
+                }
+                NodeCommand::DeletePrompt { workflow, node } => {
+                    let graph = client.delete_prompt_node(workflow, node).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&graph)?
+                        } else {
+                            serde_json::to_string_pretty(&graph)?
+                        }
+                    );
+                }
+                NodeCommand::Reparent {
+                    workflow,
+                    node,
+                    from_base,
+                    parent,
+                    accept_undo_boundary,
+                } => {
+                    let parent = if from_base {
+                        NodeParent::WorkflowBase {}
+                    } else {
+                        NodeParent::Node {
+                            node_id: parent.context("select --parent or --from-base")?,
+                        }
+                    };
+                    let operation = client
+                        .reparent_node(
+                            workflow,
+                            node,
+                            &parent,
+                            accept_undo_boundary
+                                .then_some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+                        )
+                        .await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&operation)?);
+                    } else {
+                        println!(
+                            "Dependency operation {} completed; workflow Undo starts at this boundary.",
+                            operation.id
+                        );
+                        for revision in &operation.after {
+                            println!(
+                                "{} {}{}",
+                                revision.change_id,
+                                revision.commit_id,
+                                if revision.conflicted { " CONFLICT" } else { "" }
+                            );
+                        }
+                        println!("{}", operation.detail);
+                    }
+                }
+                NodeCommand::ResumeDeletion {
+                    operation,
+                    confirm_processes_stopped,
+                } => {
+                    let result = client
+                        .resume_node_deletion(
+                            operation,
+                            confirm_processes_stopped
+                                .then_some(RecoveryConfirmation::ProcessesStopped),
+                        )
+                        .await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&result)?
+                        } else {
+                            serde_json::to_string_pretty(&result)?
+                        }
+                    );
+                }
+                NodeCommand::Delete {
+                    workflow,
+                    node,
+                    accept_undo_boundary,
+                } => {
+                    let operation = client
+                        .delete_node(
+                            workflow,
+                            node,
+                            accept_undo_boundary
+                                .then_some(UndoBoundaryAcknowledgement::AcceptUndoBoundary),
+                        )
+                        .await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&operation)?);
+                    } else {
+                        println!(
+                            "Node {node} deleted by dependency operation {}; workflow Undo starts at this boundary.",
+                            operation.id
+                        );
+                        println!("{}", operation.detail);
+                        for revision in operation.after {
+                            println!(
+                                "{} {}{}",
+                                revision.change_id,
+                                revision.commit_id,
+                                if revision.conflicted { " CONFLICT" } else { "" }
+                            );
+                        }
+                    }
+                }
+                NodeCommand::Operations { workflow } => {
+                    let operations = client.dependency_operations(workflow).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&operations)?
+                        } else {
+                            serde_json::to_string_pretty(&operations)?
+                        }
+                    );
+                }
+                NodeCommand::ReparentRecovery { operation } => {
+                    let value = client.inspect_dependency_recovery(operation).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&value)?
+                        } else {
+                            serde_json::to_string_pretty(&value)?
+                        }
+                    );
+                }
+                NodeCommand::RecoverReparent {
+                    operation,
+                    confirm_processes_stopped,
+                } => {
+                    let value = client
+                        .recover_dependency_operation(
+                            operation,
+                            confirm_processes_stopped
+                                .then_some(RecoveryConfirmation::ProcessesStopped),
+                        )
+                        .await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&value)?
+                        } else {
+                            serde_json::to_string_pretty(&value)?
+                        }
+                    );
+                }
+                NodeCommand::Review { workflow, node } => {
+                    print_review(client.review_node(workflow, node).await?, args.json)?;
                 }
                 NodeCommand::Refresh { workflow, node } => {
                     let status = client.refresh_node(workflow, node).await?;
                     print_node_change(status, args.json)?;
                 }
-                NodeCommand::Create { workflow, prompt } => {
-                    print_node(client.create_node(workflow, &prompt).await?, args.json)?;
+                NodeCommand::Create {
+                    workflow,
+                    prompt,
+                    from_base,
+                    parent,
+                } => {
+                    let dependency = if from_base {
+                        Some(NodeParent::WorkflowBase {})
+                    } else {
+                        parent.map(|node_id| NodeParent::Node { node_id })
+                    };
+                    let node = match dependency {
+                        Some(parent) => client.create_node_from(workflow, &prompt, &parent).await?,
+                        None => client.create_node(workflow, &prompt).await?,
+                    };
+                    print_node(node, args.json)?;
                 }
                 NodeCommand::Get { workflow, node } => {
                     print_node(client.node(workflow, node).await?, args.json)?;
@@ -618,6 +970,32 @@ fn print_node(node: Node, json: bool) -> anyhow::Result<()> {
             "Node {} (workflow {}): {}",
             node.id, node.workflow_id, node.prompt
         );
+    }
+    Ok(())
+}
+
+fn print_upstream_status(status: &waypoints_core::run::UpstreamStatus) {
+    use waypoints_core::run::UpstreamStatus;
+    match status {
+        UpstreamStatus::Changed => {
+            println!("Upstream code or dependencies changed since this run.")
+        }
+        UpstreamStatus::Unchanged => println!("Upstream revisions unchanged since this run."),
+        UpstreamStatus::Unknown { detail } => println!("Upstream comparison unknown: {detail}"),
+        _ => println!("Upstream comparison unknown."),
+    }
+}
+
+fn print_review(value: waypoints_core::jj::RevisionReview, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        println!("Change: {}", value.revision.change_id);
+        println!("Commit: {}", value.revision.commit_id);
+        println!("Parents: {}", value.parent_commit_ids.join(" "));
+        println!("Conflicted: {}", value.revision.conflicted);
+        println!("\n{}", value.revision.description);
+        print!("\n{}{}", value.summary, value.patch);
     }
     Ok(())
 }
