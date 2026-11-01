@@ -403,14 +403,22 @@ async fn dispatch(
             Err(error) => Err(error),
         },
         "node.create" => match parameters::<CreateNodeParams>(params) {
+            Ok(params) if params.parent.is_some() && params.parents.is_some() => {
+                Err((-32602, "select parent or parents, not both".to_owned()))
+            }
             Ok(params) => {
-                let result = match params.parent {
-                    Some(parent) => {
+                let result = match (params.parent, params.parents) {
+                    (_, Some(parents)) => {
+                        storage
+                            .create_node_from_parents(params.workflow_id, &params.prompt, &parents)
+                            .await
+                    }
+                    (Some(parent), None) => {
                         storage
                             .create_node_from(params.workflow_id, &params.prompt, &parent)
                             .await
                     }
-                    None => {
+                    (None, None) => {
                         storage
                             .create_node(params.workflow_id, &params.prompt)
                             .await

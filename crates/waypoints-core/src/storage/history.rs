@@ -10,6 +10,9 @@ use super::dependencies;
 use super::{Connection, Node, Storage, StorageError, canonical_project, decode_node};
 use crate::workflow::NodeParent;
 
+#[cfg(test)]
+#[path = "history/multiple_parents_tests.rs"]
+mod multiple_parents_tests;
 mod planning;
 mod rename;
 
@@ -40,6 +43,10 @@ pub struct HistoryStatus {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Edit {
+    CreateNodeFromParents {
+        node: Node,
+        parents: Vec<NodeParent>,
+    },
     RenameWorkflow {
         workflow_id: i64,
         before: String,
@@ -70,7 +77,9 @@ impl Edit {
         match self {
             Self::RenameWorkflow { workflow_id, .. } => *workflow_id,
             Self::MoveNode { change } | Self::DeleteNode { change } => change.workflow_id,
-            Self::CreateNode { node, .. } => node.workflow_id,
+            Self::CreateNode { node, .. } | Self::CreateNodeFromParents { node, .. } => {
+                node.workflow_id
+            }
             Self::UpdatePrompt { before, .. } => before.workflow_id,
             Self::CreateConnection { connection } => connection.workflow_id,
         }
@@ -81,7 +90,7 @@ impl Edit {
             Self::RenameWorkflow { .. } => "Rename workflow",
             Self::MoveNode { .. } => "Move prompt node",
             Self::DeleteNode { .. } => "Delete prompt node",
-            Self::CreateNode { .. } => "Create node",
+            Self::CreateNode { .. } | Self::CreateNodeFromParents { .. } => "Create node",
             Self::UpdatePrompt { .. } => "Edit prompt",
             Self::CreateConnection { .. } => "Connect nodes",
         }
@@ -140,7 +149,7 @@ impl Storage {
         &self,
         workflow_id: i64,
         prompt: &str,
-        parent: Option<&NodeParent>,
+        parents: &[NodeParent],
     ) -> anyhow::Result<Node> {
         self.ensure_dependency_operations_clear().await?;
         let mut connection = self.database.connect()?;
@@ -149,7 +158,7 @@ impl Storage {
             .await?;
         let result = async {
             let project = project_for_workflow(&tx, workflow_id).await?;
-            dependencies::validate_parent(&tx, workflow_id, parent).await?;
+            dependencies::validate_parents(&tx, workflow_id, parents).await?;
             tx.execute("INSERT INTO node_identities DEFAULT VALUES", ())
                 .await?;
             let node = Node {
@@ -158,18 +167,21 @@ impl Storage {
                 prompt: prompt.to_owned(),
             };
             insert_node(&tx, &node).await?;
-            if let Some(parent) = parent {
+            for parent in parents {
                 dependencies::attach(&tx, workflow_id, node.id, parent).await?;
             }
-            append(
-                &tx,
-                &project,
-                &Edit::CreateNode {
+            let edit = if parents.len() > 1 {
+                Edit::CreateNodeFromParents {
                     node: node.clone(),
-                    parent: parent.cloned(),
-                },
-            )
-            .await?;
+                    parents: parents.to_vec(),
+                }
+            } else {
+                Edit::CreateNode {
+                    node: node.clone(),
+                    parent: parents.first().cloned(),
+                }
+            };
+            append(&tx, &project, &edit).await?;
             Ok(node)
         }
         .await;
@@ -396,7 +408,9 @@ async fn append(tx: &turso::Connection, project: &Path, edit: &Edit) -> anyhow::
         turso::params![project.to_str(), cursor],
     )
     .await?;
-    let version = if matches!(edit, Edit::RenameWorkflow { .. }) {
+    let version = if matches!(edit, Edit::CreateNodeFromParents { .. }) {
+        5
+    } else if matches!(edit, Edit::RenameWorkflow { .. }) {
         4
     } else if matches!(edit, Edit::MoveNode { .. } | Edit::DeleteNode { .. }) {
         3
@@ -438,7 +452,7 @@ async fn read_edit(
     };
     let version: i64 = row.get(1)?;
     anyhow::ensure!(
-        (1..=4).contains(&version),
+        (1..=5).contains(&version),
         "unsupported workflow history version {version}; current workflows are preserved"
     );
     let edit: Edit =
@@ -485,33 +499,11 @@ async fn apply(tx: &turso::Connection, edit: &Edit, direction: &Direction) -> an
         (Edit::MoveNode { change } | Edit::DeleteNode { change }, direction) => {
             planning::apply(tx, change, direction).await?;
         }
-        (Edit::CreateNode { node, parent }, Direction::Redo) => {
-            dependencies::validate_parent(tx, node.workflow_id, parent.as_ref()).await?;
-            insert_node(tx, node).await?;
-            if let Some(parent) = parent {
-                dependencies::attach(tx, node.workflow_id, node.id, parent).await?;
-            }
+        (Edit::CreateNodeFromParents { node, parents }, direction) => {
+            apply_created_node(tx, node, parents, direction).await?;
         }
-        (Edit::CreateNode { node, parent }, Direction::Undo) => {
-            dependencies::detach_created_node(tx, node.workflow_id, node.id, parent.as_ref())
-                .await?;
-            // Never delete associations, allocations, run history, or creation
-            // guards to make metadata undo succeed. Those are separate lifecycles.
-            let changed = tx
-                .execute(
-                    "DELETE FROM nodes WHERE id = ?1 AND workflow_id = ?2 AND prompt = ?3
-                 AND NOT EXISTS (SELECT 1 FROM node_changes WHERE node_id = ?1)
-                 AND NOT EXISTS (SELECT 1 FROM node_change_creations WHERE node_id = ?1)
-                 AND NOT EXISTS (SELECT 1 FROM node_workspaces WHERE node_id = ?1)
-                 AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE node_id = ?1)
-                 AND NOT EXISTS (SELECT 1 FROM connections WHERE source_id = ?1 OR target_id = ?1)",
-                    turso::params![node.id, node.workflow_id, node.prompt.clone()],
-                )
-                .await?;
-            anyhow::ensure!(
-                changed == 1,
-                "cannot undo node creation: saved node changed or native/run/connection references depend on it"
-            );
+        (Edit::CreateNode { node, parent }, direction) => {
+            apply_created_node(tx, node, parent.as_slice(), direction).await?;
         }
         (Edit::UpdatePrompt { before, after }, Direction::Undo) => {
             replace_prompt(tx, before, after, &before.prompt).await?;
@@ -532,6 +524,44 @@ async fn apply(tx: &turso::Connection, edit: &Edit, direction: &Direction) -> an
             anyhow::ensure!(
                 changed == 1,
                 "cannot undo connection: saved connection changed"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn apply_created_node(
+    tx: &turso::Connection,
+    node: &Node,
+    parents: &[NodeParent],
+    direction: &Direction,
+) -> anyhow::Result<()> {
+    match direction {
+        Direction::Redo => {
+            dependencies::validate_parents(tx, node.workflow_id, parents).await?;
+            insert_node(tx, node).await?;
+            for parent in parents {
+                dependencies::attach(tx, node.workflow_id, node.id, parent).await?;
+            }
+        }
+        Direction::Undo => {
+            dependencies::detach_created_node(tx, node.workflow_id, node.id, parents).await?;
+            // Never delete associations, allocations, run history, or creation
+            // guards to make metadata undo succeed. Those are separate lifecycles.
+            let changed = tx
+                .execute(
+                    "DELETE FROM nodes WHERE id = ?1 AND workflow_id = ?2 AND prompt = ?3
+                 AND NOT EXISTS (SELECT 1 FROM node_changes WHERE node_id = ?1)
+                 AND NOT EXISTS (SELECT 1 FROM node_change_creations WHERE node_id = ?1)
+                 AND NOT EXISTS (SELECT 1 FROM node_workspaces WHERE node_id = ?1)
+                 AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE node_id = ?1)
+                 AND NOT EXISTS (SELECT 1 FROM connections WHERE source_id = ?1 OR target_id = ?1)",
+                    turso::params![node.id, node.workflow_id, node.prompt.clone()],
+                )
+                .await?;
+            anyhow::ensure!(
+                changed == 1,
+                "cannot undo node creation: saved node changed or native/run/connection references depend on it"
             );
         }
     }

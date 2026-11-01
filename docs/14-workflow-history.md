@@ -207,9 +207,12 @@ no fabricated prior edits, and only subsequent supported edits are undoable.
 Old prompt text is intentionally retained in history records.
 
 Records have explicit format versions 1 (original metadata actions), 2
-(attachment-aware node creation), 3 (prompt-only move/delete), and 4 (workflow
-renaming). Earlier versions remain readable; older executables cannot replay
-version 4. Unsupported versions or malformed actions
+(attachment-aware node creation), 3 (prompt-only move/delete), 4 (workflow
+renaming), and 5 (multi-parent node creation). Earlier versions remain readable;
+older executables cannot replay newer record versions. Multi-parent creation
+records all incoming attachments as one `Create node` action, with the same
+native-reference protections as single-parent creation.
+Unsupported versions or malformed actions
 produce an error when encountered, without moving the cursor or deleting current
 workflow state. This slice does not implement format conversion or a history-reset
 command; future upgrades must migrate or explicitly invalidate incompatible history.

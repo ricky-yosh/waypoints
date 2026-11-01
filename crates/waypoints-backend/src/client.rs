@@ -386,6 +386,24 @@ impl Client {
         .await
     }
 
+    /// Saves a node with all selected upstream parents as one undoable action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid dependencies, blank prompt, storage or RPC failure.
+    pub async fn create_node_from_parents(
+        &self,
+        workflow_id: i64,
+        prompt: &str,
+        parents: &[NodeParent],
+    ) -> Result<Node, BackendError> {
+        self.call(
+            "node.create",
+            json!({"workflow_id":workflow_id, "prompt":prompt, "parents":parents}),
+        )
+        .await
+    }
+
     /// Reads a node belonging to the selected workflow.
     ///
     /// # Errors

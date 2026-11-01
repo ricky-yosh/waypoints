@@ -217,6 +217,14 @@ pub(crate) struct CreateNodeParams {
     pub prompt: String,
     #[serde(default)]
     pub parent: Option<NodeParent>,
+    #[serde(default, deserialize_with = "node_parents")]
+    pub parents: Option<Vec<NodeParent>>,
+}
+
+fn node_parents<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<NodeParent>>, D::Error> {
+    Vec::<NodeParent>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]

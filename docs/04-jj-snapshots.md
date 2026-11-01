@@ -36,8 +36,9 @@ planning-only connection semantics in this broader design. Native abandonment in
 chains, branches, merges, conflicting children, and another editing workspace is
 now tested on jj 0.46.0. Checked [reparenting](18-native-reparenting.md) and
 [deletion with retained workspace folders](19-native-node-deletion.md) are implemented.
-Native multi-parent creation and safe filesystem cleanup remain
-pending; native primitive tests do not establish those product capabilities.
+[Native multi-parent creation](17-rooted-node-dependencies.md#combining-parallel-work)
+is also implemented, with clean/conflicted two-/three-parent tests. Editing an
+existing merge's parent set and safe filesystem cleanup remain pending.
 
 - Each phase node can be associated with an evolving jj change, initially built on its saved upstream code dependency. Metadata and native ancestry are separate stores that checked edits keep aligned; legacy unbased links remain planning-only.
 - Parallel phases are sibling changes on the same parent.
@@ -76,6 +77,6 @@ failed turns preserve files without an automatic snapshot.
 ## Remaining native/product validation
 
 - Define native revision-history browsing beyond saved runs. Current read-only review has automated coverage for bounded output, rewritten/abandoned snapshots, missing native objects, and untouched dirty files.
-- Validate multi-parent product creation/editing beyond the already tested native abandonment primitives.
+- Define editing existing multi-parent dependency sets; creation, conflict materialization, and fake-agent execution/snapshot review now have product-path tests.
 - Exercise upstream edits through the complete workflow and define context-staleness behavior separately from native conflicts and stale physical checkouts.
 - Whether Zed shows a phase's diff in a colocated repo (git HEAD pointing at the working copy's parent).

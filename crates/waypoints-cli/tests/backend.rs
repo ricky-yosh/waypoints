@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[path = "backend/multiple_parents.rs"]
+mod multiple_parents;
 #[path = "backend/planning.rs"]
 mod planning;
 #[path = "backend/rename.rs"]

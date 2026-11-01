@@ -12,6 +12,8 @@ use waypoints_core::storage::{
 use waypoints_core::workflow::{BaseSource, GraphConnectivity, NodeParent};
 use waypoints_core::workspace::WorkspaceState;
 
+#[path = "jj/multiple_parents.rs"]
+mod multiple_parents;
 #[path = "jj/planning.rs"]
 mod planning;
 #[path = "jj/upstream.rs"]

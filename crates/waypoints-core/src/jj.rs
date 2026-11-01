@@ -172,26 +172,35 @@ pub(crate) async fn resolve_workflow_base(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn create_change(repository: &Path, base: &Revision) -> anyhow::Result<Revision> {
+    create_change_from_parents(repository, std::slice::from_ref(base)).await
+}
+
+pub(crate) async fn create_change_from_parents(
+    repository: &Path,
+    parents: &[Revision],
+) -> anyhow::Result<Revision> {
+    anyhow::ensure!(
+        !parents.is_empty(),
+        "native creation requires at least one parent"
+    );
     // --no-edit reports the created commit using commit_summary. Override it with
     // marked JSON so identity comes from this command, never a racy heads() query.
     let template =
         format!("templates.commit_summary='\"waypoints-created:\" ++ {REVISION_TEMPLATE}'");
-    let output = run(
-        repository,
-        &[
-            "--config",
-            &template,
-            "--config",
-            "ui.quiet=false",
-            "new",
-            "--no-edit",
-            "-m",
-            "",
-            &base.commit_id,
-        ],
-    )
-    .await?;
+    let mut args = vec![
+        "--config",
+        &template,
+        "--config",
+        "ui.quiet=false",
+        "new",
+        "--no-edit",
+        "-m",
+        "",
+    ];
+    args.extend(parents.iter().map(|parent| parent.commit_id.as_str()));
+    let output = run(repository, &args).await?;
     let stderr = std::str::from_utf8(&output.stderr)?;
     let mut revisions = stderr
         .lines()
@@ -203,7 +212,19 @@ pub(crate) async fn create_change(repository: &Path, base: &Revision) -> anyhow:
         revisions.len() == 1,
         "jj did not report exactly one created change; inspect jj before retrying"
     );
-    Ok(revisions.remove(0))
+    let revision = revisions.remove(0);
+    let mut actual = parent_commit_ids(repository, &revision.commit_id).await?;
+    actual.sort();
+    let mut expected: Vec<_> = parents
+        .iter()
+        .map(|parent| parent.commit_id.clone())
+        .collect();
+    expected.sort();
+    anyhow::ensure!(
+        actual == expected,
+        "created change's native parents differ from selected dependencies; inspect jj before retrying"
+    );
+    Ok(revision)
 }
 
 async fn revision_set(repository: &Path, revset: &str) -> anyhow::Result<Vec<Revision>> {

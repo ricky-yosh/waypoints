@@ -26,8 +26,8 @@ than copying them into every overview.
 |---|---|---|
 | Persistent workflows and prompt graphs | Canonical project-folder selection; multiple workflows; undoable renaming; no separate project registry | [Backend/CLI](11-backend-cli.md), [renaming](14-workflow-history.md#workflow-renaming) |
 | Fixed workflow bases | Explicit local bookmark or revision, resolved once; omitting a selector still creates an unbased legacy workflow | [Workflow bases](16-workflow-bases.md) |
-| Rooted node creation | New based-workflow nodes explicitly attach to the base or an upstream node; prompt creation does not create code | [Rooted nodes](17-rooted-node-dependencies.md) |
-| Native association and change creation | Unique native changes; based nodes require matching parents; native creation currently has one parent | [Backend/CLI](11-backend-cli.md#associate-a-node-with-an-existing-jj-change), [rooted nodes](17-rooted-node-dependencies.md) |
+| Rooted node creation | New based-workflow nodes explicitly attach to the base or one or more upstream nodes; prompt creation does not create code | [Rooted nodes](17-rooted-node-dependencies.md) |
+| Native association and change creation | Unique native changes; based nodes require matching parents; one or more upstream nodes can create clean or conflicted native merges | [Backend/CLI](11-backend-cli.md#associate-a-node-with-an-existing-jj-change), [combining work](17-rooted-node-dependencies.md#combining-parallel-work) |
 | Native status refresh | Current/missing/divergent revisions and conflict flags, read-only; not a full ancestry/staleness assessment | [Native status](11-backend-cli.md#associate-a-node-with-an-existing-jj-change) |
 | Read-only code review | Exact revision details, parent IDs, changed-file summary and Git patch for a node's current recorded commit or a run's saved snapshot; no snapshot/checkout mutation | [Code review](11-backend-cli.md#review-recorded-code-without-snapshotting) |
 | Dedicated workspaces | Explicit on-demand allocation and read-only status/verification; no automatic stale-checkout repair or cleanup | [Workspaces](11-backend-cli.md#allocate-a-nodes-editing-workspace) |
@@ -72,7 +72,7 @@ These are documented gaps, **not newly approved work or a priority order**.
 | Native history browsing and continuation | Listing/browsing a node's native revisions beyond saved runs, and exact behavior for explicitly continuing from an old code revision |
 | Broader downstream staleness | Beyond the direct upstream-revision hint: causal/transitive input tracking, graph/native mismatch, stale checkout, stale agent reasoning, and any acknowledgement/resolution policy |
 | Workspace folder cleanup | Optional filesystem cleanup beyond implemented deregistration; retained folders, ignored/untracked files, and interrupted removal policies |
-| Combining branches | Native multi-parent creation, merge-parent editing, and review/conflict behavior |
+| Editing combined branches | Changing an existing merge's parent set; richer per-input review and conflict-resolution policy beyond native conflict flags, materialized markers, and current node/run review |
 | Broader reconciliation | External jj changes, native-associated legacy adoption, cross-workflow affected work, and ambiguous operation outcomes |
 | Base and project/workflow management | Explicit base updates, whether new workflows should require/default a base, project registration, and broader workflow management |
 | Review and execution policy | Human review gates distinct from tool permissions; context handoff between phases; additional agent configuration/capability support |

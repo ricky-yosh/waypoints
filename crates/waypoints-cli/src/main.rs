@@ -245,9 +245,9 @@ enum NodeCommand {
         /// Build directly on this workflow's fixed base.
         #[arg(long, conflicts_with = "parent")]
         from_base: bool,
-        /// Build on an existing upstream node in this workflow.
-        #[arg(long, conflicts_with = "from_base")]
-        parent: Option<i64>,
+        /// Build on upstream nodes in this workflow; repeat --parent to combine code.
+        #[arg(long, conflicts_with = "from_base", value_delimiter = ',')]
+        parent: Vec<i64>,
     },
     Get {
         #[arg(long)]
@@ -921,14 +921,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     from_base,
                     parent,
                 } => {
-                    let dependency = if from_base {
-                        Some(NodeParent::WorkflowBase {})
+                    let parents = if from_base {
+                        vec![NodeParent::WorkflowBase {}]
                     } else {
-                        parent.map(|node_id| NodeParent::Node { node_id })
+                        parent
+                            .into_iter()
+                            .map(|node_id| NodeParent::Node { node_id })
+                            .collect()
                     };
-                    let node = match dependency {
-                        Some(parent) => client.create_node_from(workflow, &prompt, &parent).await?,
-                        None => client.create_node(workflow, &prompt).await?,
+                    let node = if parents.is_empty() {
+                        client.create_node(workflow, &prompt).await?
+                    } else {
+                        client
+                            .create_node_from_parents(workflow, &prompt, &parents)
+                            .await?
                     };
                     print_node(node, args.json)?;
                 }

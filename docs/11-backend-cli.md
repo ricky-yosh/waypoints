@@ -254,9 +254,18 @@ base/upstream dependency:
 cargo run -p waypoints-cli -- node create-change --workflow 1 --node 2 --json
 ```
 
-The upstream node must have a current idle native change. An explicit `--base`
-is accepted only when it resolves to that same dependency; native creation
-currently requires one parent.
+Each upstream node must have a current idle native change. An explicit `--base`
+is accepted only for a single dependency and must resolve to that same revision.
+To combine parallel code, create a normal node with repeated `--parent` flags,
+then omit `--base` when creating its native change:
+
+```sh
+waypoints node create --workflow 1 --prompt "Integrate and test" --parent 2 --parent 3
+```
+
+Two, three, or more inputs use native jj merge behavior. Conflicts are reported
+and retained for explicit resolution, not silently repaired; see
+[combining parallel work](17-rooted-node-dependencies.md#combining-parallel-work).
 
 For a **legacy unbased workflow**, choose a base explicitly.
 `BASE_REVISION` accepts one existing change ID, commit ID, unique ID prefix, or
@@ -550,7 +559,7 @@ Methods:
 | `workflow.set_base` | `{workflow_id, source}` | Initial base selection for an unbased workflow; existing bases cannot be replaced |
 | `workflow.list` | `{project_path}` | Array of workflows ordered by ID |
 | `workflow.graph` | `{workflow_id}` | `{workflow, nodes, connections, base_nodes, connectivity, unresolved_dependency_operation?}`; saved metadata, not a jj query |
-| `node.create` | `{workflow_id, prompt, parent?}` | `{id, workflow_id, prompt}`; based workflows require an explicit parent |
+| `node.create` | `{workflow_id, prompt, parent?, parents?}` | `{id, workflow_id, prompt}`; based workflows require a parent or nonempty parent array, not both |
 | `node.get` | `{workflow_id, node_id}` | `{id, workflow_id, prompt}` |
 | `node.update` | `{workflow_id, node_id, prompt}` | Updated node, with the same ID |
 | `node.associate` | `{workflow_id, node_id, change_id}` | `{node, association, state}` with the selected current revision |

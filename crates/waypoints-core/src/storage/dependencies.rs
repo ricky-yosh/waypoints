@@ -285,20 +285,47 @@ pub(super) async fn validate_parent(
     workflow_id: i64,
     parent: Option<&NodeParent>,
 ) -> anyhow::Result<()> {
+    validate_parents(
+        tx,
+        workflow_id,
+        parent.map_or(&[][..], std::slice::from_ref),
+    )
+    .await
+}
+
+pub(super) async fn validate_parents(
+    tx: &turso::Connection,
+    workflow_id: i64,
+    parents: &[NodeParent],
+) -> anyhow::Result<()> {
     let graph = load_graph(tx, workflow_id).await?;
-    match (graph.workflow.base.is_some(), parent) {
-        (false, None) => Ok(()),
-        (false, Some(_)) => anyhow::bail!("select a workflow base before attaching nodes"),
-        (true, None) => {
+    match (graph.workflow.base.is_some(), parents.is_empty()) {
+        (false, true) => Ok(()),
+        (false, false) => anyhow::bail!("select a workflow base before attaching nodes"),
+        (true, true) => {
             anyhow::bail!("based workflows require an explicit dependency: --from-base or --parent")
         }
-        (true, Some(parent)) => {
+        (true, false) => {
             require_rooted(&graph)?;
-            if let NodeParent::Node { node_id } = parent {
-                anyhow::ensure!(
-                    graph.nodes.iter().any(|node| node.id == *node_id),
-                    "upstream node {node_id} not found in this workflow"
-                );
+            let nodes: HashSet<_> = graph.nodes.iter().map(|node| node.id).collect();
+            let mut selected = HashSet::new();
+            for parent in parents {
+                match parent {
+                    NodeParent::Node { node_id } => {
+                        anyhow::ensure!(
+                            selected.insert(*node_id),
+                            "duplicate node dependencies are not allowed"
+                        );
+                        anyhow::ensure!(
+                            nodes.contains(node_id),
+                            "upstream node {node_id} not found in this workflow"
+                        );
+                    }
+                    NodeParent::WorkflowBase {} => anyhow::ensure!(
+                        parents.len() == 1,
+                        "the workflow base cannot be combined with upstream nodes"
+                    ),
+                }
             }
             Ok(())
         }
@@ -334,7 +361,7 @@ pub(super) async fn detach_created_node(
     tx: &turso::Connection,
     workflow_id: i64,
     node_id: i64,
-    parent: Option<&NodeParent>,
+    parents: &[NodeParent],
 ) -> anyhow::Result<()> {
     let graph = load_graph(tx, workflow_id).await?;
     let incoming: Vec<_> = graph
@@ -344,11 +371,15 @@ pub(super) async fn detach_created_node(
         .map(|edge| edge.source_id)
         .collect();
     let is_base = graph.base_nodes.contains(&node_id);
-    let matches = match parent {
-        None => !is_base && incoming.is_empty(),
-        Some(NodeParent::WorkflowBase {}) => is_base && incoming.is_empty(),
-        Some(NodeParent::Node { node_id }) => !is_base && incoming == [*node_id],
-    };
+    let mut expected: Vec<_> = parents
+        .iter()
+        .filter_map(|parent| match parent {
+            NodeParent::Node { node_id } => Some(*node_id),
+            NodeParent::WorkflowBase {} => None,
+        })
+        .collect();
+    expected.sort();
+    let matches = is_base == parents.contains(&NodeParent::WorkflowBase {}) && incoming == expected;
     anyhow::ensure!(
         matches,
         "node dependencies changed; cannot partially undo node creation"

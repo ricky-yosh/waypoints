@@ -14,8 +14,8 @@ completed research from validation still needed.
 2. **Session reuse — partially verified.** Same-session follow-up and `session/load` after an adapter restart passed with Codex in the temporary spike, including history replay and conversation-only recall. An unprompted session failed to reload. Rust explicit continuation and automatic post-turn snapshotting also passed manual Codex checks. Interrupted-run recovery is now fake-peer/native-jj tested, preserving partial work without replay. Resume without replay, fork, and different-working-directory loading remain untested.
 3. **jj workflow — partially verified.** Changes, separate workspaces, rewrites,
    abandonment, conflicts, and interrupted-operation recovery have executable
-   coverage, including read-only current-node/saved-run diffs. Native multi-parent
-   product operations, general revision-history browsing, and the
+   coverage, including read-only current-node/saved-run diffs and native multi-parent
+   creation with fake-agent execution. Editing merge-parent sets, general revision-history browsing, and the
    complete upstream-edit acceptance workflow remain incomplete. Editor handoff
    behavior still needs validation.
 4. **Turso — persistence foundation implemented.** Reopen, additive upgrades,
@@ -57,8 +57,11 @@ every step is available today. Individual feature tests do not replace it.
   this feature.
 - **Not yet complete:** edit upstream work and surface native ancestry mismatch,
   stale physical checkouts, native conflicts, and stale agent context distinctly.
-- **Not yet complete:** explicitly combine branch results through a supported
-  native multi-parent operation.
+- Combine branch results through native multi-parent creation, with clean/conflicted
+  two-/three-parent tests and fake-agent snapshot/review coverage. A disposable
+  two-parent clean merge also passed [manual Codex acceptance](17-rooted-node-dependencies.md#manual-codex-acceptance).
+  Real-agent three-parent/conflicted integration and editing existing merge-parent
+  sets remain separate work.
 
 GUI integration remains pending. Its acceptance must include CLI edits appearing
 in the GUI through backend refresh, not a second local store or workflow engine.

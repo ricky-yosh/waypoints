@@ -291,7 +291,7 @@ impl Storage {
     ) -> Result<Node, StorageError> {
         validate_prompt(prompt)?;
         Ok(self
-            .create_node_with_history(workflow_id, prompt, None)
+            .create_node_with_history(workflow_id, prompt, &[])
             .await?)
     }
 
@@ -307,9 +307,31 @@ impl Storage {
         prompt: &str,
         parent: &NodeParent,
     ) -> Result<Node, StorageError> {
+        self.create_node_from_parents(workflow_id, prompt, std::slice::from_ref(parent))
+            .await
+    }
+
+    /// Creates a node with all selected upstream dependencies as one undoable action.
+    ///
+    /// Select one or more distinct nodes from this rooted based workflow, or
+    /// the workflow base alone. This saves metadata without creating native code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty/duplicate/cross-workflow parents, an unrooted
+    /// workflow, a base mixed with nodes, a blank prompt, or storage failure.
+    pub async fn create_node_from_parents(
+        &mut self,
+        workflow_id: i64,
+        prompt: &str,
+        parents: &[NodeParent],
+    ) -> Result<Node, StorageError> {
         validate_prompt(prompt)?;
+        if parents.is_empty() {
+            return Err(anyhow::anyhow!("select at least one node dependency").into());
+        }
         Ok(self
-            .create_node_with_history(workflow_id, prompt, Some(parent))
+            .create_node_with_history(workflow_id, prompt, parents)
             .await?)
     }
 
@@ -460,7 +482,8 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error for legacy/unrooted graphs, unavailable/busy upstream work,
-    /// multiple parents (not yet supported for creation), or native/storage failures.
+    /// duplicate native parents, or native/storage failures. Multiple dependencies
+    /// produce a native merge; conflicts are recorded, not automatically resolved.
     pub async fn create_node_change_from_dependency(
         &mut self,
         workflow_id: i64,
@@ -512,19 +535,20 @@ impl Storage {
                     Some(base) => Some(jj::resolve_base(&root, base).await?),
                     None => None,
                 };
-                let base = match dependency {
+                let parents = match dependency {
                     Some((dependency_root, parents)) => {
-                        anyhow::ensure!(root == dependency_root && parents.len() == 1,
-                            "native creation currently requires exactly one saved dependency in the same repository");
-                        let expected = parents.into_iter().next().context("node has no dependency")?;
+                        anyhow::ensure!(root == dependency_root,
+                            "saved dependencies must belong to the same repository");
                         if let Some(selected) = selected {
-                            anyhow::ensure!(selected.commit_id == expected.commit_id,
+                            anyhow::ensure!(parents.len() == 1 && selected.commit_id == parents[0].commit_id,
                                 "requested native base differs from the node's saved dependency");
                         }
-                        expected
+                        parents
                     }
-                    None => selected.context("legacy workflows require an explicit --base for native change creation")?,
+                    None => vec![selected.context("legacy workflows require an explicit --base for native change creation")?],
                 };
+                let unique: std::collections::HashSet<_> = parents.iter().map(|parent| &parent.commit_id).collect();
+                anyhow::ensure!(unique.len() == parents.len(), "saved dependencies resolve to duplicate native revisions");
                 let reserved = connection.execute(
                     "INSERT INTO node_change_creations (node_id)
                      SELECT ?1 WHERE NOT EXISTS (SELECT 1 FROM node_changes WHERE node_id = ?1)",
@@ -535,7 +559,7 @@ impl Storage {
                     reserved == 1,
                     "node already has a change association"
                 );
-                let revision = jj::create_change(&root, &base).await
+                let revision = jj::create_change_from_parents(&root, &parents).await
                     .context("native creation may have succeeded; inspect jj before explicitly associating the result")?;
                 Ok::<_, anyhow::Error>((root, revision))
             },

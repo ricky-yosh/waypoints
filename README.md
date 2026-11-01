@@ -3,7 +3,7 @@
 Status: early headless implementation on macOS/Linux. Core/backend/CLI support
 persistent rooted workflows, native jj changes and on-demand workspaces, ACP runs
 and continuation, automatic successful-turn snapshots, metadata undo/redo, native
-reparenting, native deletion with retained workspace folders, read-only native code review,
+reparenting, multi-parent native creation, native deletion with retained workspace folders, read-only native code review,
 an informational upstream-revision hint, and undoable prompt-only move/delete.
 Explicit recovery handles clear interrupted outcomes; ambiguous states remain
 blocked. GUI integration, revision-history browsing, and downstream context-staleness
