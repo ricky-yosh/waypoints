@@ -27,6 +27,11 @@ downstream staleness, or workflow-level checkpoints are implemented.
 
 ## Model
 
+The [rooted native dependency decision](15-native-dependency-editing.md) supersedes
+planning-only connection semantics in this broader design. Native abandonment in
+chains, branches, merges, conflicting children, and another editing workspace is
+now tested on jj 0.46.0. Node deletion and safe cleanup are not implemented yet.
+
 - Each phase node is associated with an evolving jj change, initially built on its selected upstream code revision. Saved workflow connections and native ancestry are distinct relationships.
 - Parallel phases are sibling changes on the same parent.
 - Simultaneous editing of different nodes needs separate working directories: allocate jj workspaces on demand. Idle nodes and browsing historical revisions do not each require a permanent workspace. Two agents editing different code states must not share one folder.

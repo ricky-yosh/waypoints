@@ -15,6 +15,14 @@ Write down what you learn; it becomes the spec for the real core crate.
 
 **Current decision: core and CLI first, GUI later.** This supersedes the earlier requirement to include a node UI in the first usable slice.
 
+**Next dependency-editing milestone:** establish an explicit workflow base and
+rooted graph validation, then implement acknowledged native node deletion and
+reconnection with durable recovery and safe workspace cleanup. Metadata-only
+removal is no longer the default target. See
+[agreed rules and native validation](15-native-dependency-editing.md).
+Explicit [base selection](16-workflow-bases.md) is implemented; rooted connectivity
+and legacy graph adoption are still the next step.
+
 1. Define the foundation: projects identified by local folders, branching workflows, prompt nodes, and saved relationships distinct from native jj ancestry. Workflows are the sidebar items; agent sessions remain harness-owned.
 2. Implement the headless core and persistence: register projects and manage multiple workflows, with explicit project/workflow identity and selection. Introduce basic jj queries/associations without building a new code-history system.
 3. Expose operations through the local JSON-RPC backend and thin CLI. Keep database access in the backend; support noninteractive commands, structured output, and clear errors.

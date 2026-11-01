@@ -41,6 +41,13 @@ Recommended starting topology: one backend per open repository, shared by its cl
 
 ## Workflow model and native history
 
+**Revised product direction:** the workflow graph will represent rooted native
+code dependencies. Deleting a node with native work abandons its jj change and
+reflects jj's descendant reconnection, with safe workspace cleanup and an explicit
+undo boundary. This supersedes planning-only connection/removal semantics below;
+current commands have not yet migrated. See the
+[decision, native validation, and implementation sequence](15-native-dependency-editing.md).
+
 - A project identifies a local project folder/repository and groups workflows. The CLI selects projects and workflows explicitly; the later GUI presents that organization in its sidebar.
 - A workflow contains prompt nodes and saved connections, with branching supported from the start. See the [interfaces and parallel implementations example](01-concept.md#project-workflow-and-node-example).
 - A node represents a prompt/assignment associated with an evolving jj change, not a frozen commit or a single agent turn. A change ID follows evolving work; commit IDs identify exact code revisions. Resolve native divergence explicitly rather than assuming a change ID always identifies one current commit.
@@ -54,13 +61,13 @@ Recommended starting topology: one backend per open repository, shared by its cl
 
 Implement a small, project-owned undo/redo system rather than adopting a dedicated undo crate or generic command framework. Reuse the project's existing storage and serialization dependencies. The required customization is in workflow semantics and transactional persistence, not a general-purpose undo engine.
 
-- **Scope:** saved prompt edits, phase creation/deletion, workflow connections, ordering, and layout. Code changes, jj operations, agent execution, and conversations are outside this history; let jj handle code recovery.
+- **Scope:** saved prompt edits and other metadata-only edits, including the currently implemented node/connection creation operations. Future native dependency edits and node deletion establish an explicit undo boundary rather than becoming reversible metadata commands. Code changes, jj operations, agent execution, and conversations are outside this history; let jj handle code recovery.
 - **Ownership:** one chronological history per repository, shared by GUI and CLI clients. The backend serializes edits, undo, and redo.
 - **Records:** represent supported edits as explicit, versioned data with enough before/after information to reverse and reapply them. Do not persist executable closures. Redo restores recorded values and identities rather than rerunning arbitrary side effects.
 - **Atomicity:** commit each workflow mutation and its history record/cursor update in the same database transaction. Undo and redo are transactional too; failures must not advance the cursor.
 - **Persistence:** retain history and its current position across application restarts. Load saved workflow state directly rather than reconstructing it by replaying all commands. This edit history is not event sourcing or a durable client-notification log.
 - **Branching:** a new saved edit after undo discards the redo tail, atomically with the new edit. Selective undo and branching histories are not initial requirements.
-- **Grouping:** one meaningful action is one undo step. Saving a prompt creates one step; typing retains normal local input undo. Deleting a phase includes its removed workflow links in the same step and does not abandon its jj change.
+- **Grouping:** one meaningful metadata action is one undo step. Saving a prompt creates one step; typing retains normal local input undo. The revised native node deletion policy is outside ordinary metadata undo; it abandons the associated change and reconciles dependent graph links.
 - **Feedback:** expose what undo/redo will do, such as "Undo delete phase," to both clients.
 - **Upgrades:** migrate stored history formats or explicitly invalidate incompatible history without deleting the current workflow; never silently misinterpret old records.
 

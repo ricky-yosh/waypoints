@@ -16,7 +16,7 @@ use crate::protocol::{
     AssociateParams, ConnectParams, ContinueRunParams, CreateChangeParams, CreateNodeParams,
     CreateParams, CreateWorkspaceParams, HistoryParams, MAX_FRAME, NodeParams, PROTOCOL_VERSION,
     PermissionParams, ProjectParams, RecoverRunParams, RunEventsParams, RunParams, StartRunParams,
-    TIMEOUT, UpdateNodeParams, WorkflowParams, read_frame,
+    TIMEOUT, UpdateNodeParams, WorkflowBaseParams, WorkflowParams, read_frame,
 };
 use crate::runs::Runs;
 use crate::{BackendError, BackendInfo, Config};
@@ -301,8 +301,36 @@ async fn dispatch(
             Err(error) => Err(error),
         },
         "workflow.create" => match parameters::<CreateParams>(params) {
+            Ok(params) => {
+                let result = match params.base {
+                    Some(source) => {
+                        storage
+                            .create_workflow_from(&params.project_path, &params.name, &source)
+                            .await
+                    }
+                    None => {
+                        storage
+                            .create_workflow(&params.project_path, &params.name)
+                            .await
+                    }
+                };
+                result
+                    .map(|workflow| json!(workflow))
+                    .map_err(|error| (-32000, format!("{error:#}")))
+            }
+            Err(error) => Err(error),
+        },
+        "workflow.get" => match parameters::<WorkflowParams>(params) {
             Ok(params) => storage
-                .create_workflow(&params.project_path, &params.name)
+                .workflow(params.workflow_id)
+                .await
+                .map(|workflow| json!(workflow))
+                .map_err(|error| (-32000, format!("{error:#}"))),
+            Err(error) => Err(error),
+        },
+        "workflow.set_base" => match parameters::<WorkflowBaseParams>(params) {
+            Ok(params) => storage
+                .set_workflow_base(params.workflow_id, &params.source)
                 .await
                 .map(|workflow| json!(workflow))
                 .map_err(|error| (-32000, format!("{error:#}"))),

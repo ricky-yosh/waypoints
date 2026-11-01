@@ -5,6 +5,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use waypoints_core::run::RecoveryConfirmation;
+use waypoints_core::workflow::BaseSource;
 
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 // Bound memory usage even when a client sends a frame without a newline.
@@ -50,6 +51,15 @@ pub(crate) struct HistoryParams {
 pub(crate) struct CreateParams {
     pub project_path: PathBuf,
     pub name: String,
+    #[serde(default)]
+    pub base: Option<BaseSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowBaseParams {
+    pub workflow_id: i64,
+    pub source: BaseSource,
 }
 
 #[derive(Deserialize)]

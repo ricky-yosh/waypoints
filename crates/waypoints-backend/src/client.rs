@@ -15,6 +15,7 @@ use waypoints_core::run::{RecoveryConfirmation, RunRecovery};
 use waypoints_core::storage::{
     Connection, HistoryStatus, Node, NodeChange, Workflow, WorkflowGraph,
 };
+use waypoints_core::workflow::BaseSource;
 use waypoints_core::workspace::NodeWorkspace;
 
 use crate::config::sidecar;
@@ -198,6 +199,54 @@ impl Client {
         self.call(
             "workflow.create",
             json!({"project_path": project, "name": name}),
+        )
+        .await
+    }
+
+    /// Creates a workflow from an explicit bookmark or native revision, without editing code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input, failed native selection, or RPC failure.
+    pub async fn create_workflow_from(
+        &self,
+        project: &Path,
+        name: &str,
+        source: &BaseSource,
+    ) -> Result<Workflow, BackendError> {
+        let project = project
+            .canonicalize()
+            .context("resolving project directory")?;
+        self.call(
+            "workflow.create",
+            json!({"project_path":project, "name":name, "base":source}),
+        )
+        .await
+    }
+
+    /// Reads a workflow's saved base without querying native state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing workflow, unreadable data, or RPC failure.
+    pub async fn workflow(&self, workflow_id: i64) -> Result<Workflow, BackendError> {
+        self.call("workflow.get", json!({"workflow_id": workflow_id}))
+            .await
+    }
+
+    /// Selects an initial base for an unbased workflow; never replaces a saved base.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an existing base, failed native selection, or RPC failure.
+    pub async fn set_workflow_base(
+        &self,
+        workflow_id: i64,
+        source: &BaseSource,
+    ) -> Result<Workflow, BackendError> {
+        self.call(
+            "workflow.set_base",
+            json!({"workflow_id":workflow_id,"source":source}),
         )
         .await
     }

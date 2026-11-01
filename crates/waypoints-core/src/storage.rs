@@ -9,7 +9,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::jj::{self, ChangeAssociation, ChangeState};
+use crate::workflow::WorkflowBase;
 
+mod bases;
 mod history;
 mod runs;
 mod workspaces;
@@ -26,6 +28,9 @@ pub struct Workflow {
     pub project_path: PathBuf,
     /// The user-provided workflow name.
     pub name: String,
+    /// Exact saved starting point, or none for an unbased/legacy workflow.
+    #[serde(default)]
+    pub base: Option<WorkflowBase>,
 }
 
 /// A prompt-bearing node belonging to one workflow.
@@ -200,6 +205,7 @@ impl Storage {
         let storage = Self { database };
         storage.initialize_runs().await?;
         storage.initialize_history().await?;
+        storage.initialize_bases().await?;
         Ok(storage)
     }
 
@@ -217,29 +223,9 @@ impl Storage {
         project_path: &Path,
         name: &str,
     ) -> Result<Workflow, StorageError> {
-        if name.trim().is_empty() {
-            return Err(anyhow::anyhow!("workflow name must not be blank").into());
-        }
-        let project_path = canonical_project(project_path)?;
-        let project = project_path
-            .to_str()
-            .context("project path must be UTF-8")?;
-        let connection = self
-            .database
-            .connect()
-            .context("connecting to workflow database")?;
-        connection
-            .execute(
-                "INSERT INTO workflows (project_path, name) VALUES (?1, ?2)",
-                [project, name],
-            )
-            .await
-            .context("creating workflow")?;
-        Ok(Workflow {
-            id: connection.last_insert_rowid(),
-            project_path,
-            name: name.to_owned(),
-        })
+        Ok(self
+            .create_workflow_record(project_path, name, None)
+            .await?)
     }
 
     /// Lists a project's saved workflows in ascending identifier order.
@@ -259,21 +245,16 @@ impl Storage {
             .context("connecting to workflow database")?;
         let mut rows = connection
             .query(
-                "SELECT id, project_path, name FROM workflows WHERE project_path = ?1 ORDER BY id",
+                "SELECT w.id, w.project_path, w.name, b.record FROM workflows w
+                 LEFT JOIN workflow_bases b ON b.workflow_id = w.id
+                 WHERE w.project_path = ?1 ORDER BY w.id",
                 [project],
             )
             .await
             .context("listing workflows")?;
         let mut workflows = Vec::new();
         while let Some(row) = rows.next().await.context("reading workflow row")? {
-            workflows.push(Workflow {
-                id: row.get(0).context("reading workflow identifier")?,
-                project_path: PathBuf::from(
-                    row.get::<String>(1)
-                        .context("reading workflow project path")?,
-                ),
-                name: row.get(2).context("reading workflow name")?,
-            });
+            workflows.push(decode_workflow(&row)?);
         }
         Ok(workflows)
     }
@@ -615,7 +596,8 @@ impl Storage {
             .context("connecting to workflow database")?;
         let mut rows = connection
             .query(
-                "SELECT id, project_path, name FROM workflows WHERE id = ?1",
+                "SELECT w.id, w.project_path, w.name, b.record FROM workflows w
+                 LEFT JOIN workflow_bases b ON b.workflow_id = w.id WHERE w.id = ?1",
                 [workflow_id],
             )
             .await
@@ -625,14 +607,7 @@ impl Storage {
             .await
             .context("reading workflow row")?
             .with_context(|| format!("workflow {workflow_id} not found"))?;
-        let workflow = Workflow {
-            id: row.get(0).context("reading workflow identifier")?,
-            project_path: PathBuf::from(
-                row.get::<String>(1)
-                    .context("reading workflow project path")?,
-            ),
-            name: row.get(2).context("reading workflow name")?,
-        };
+        let workflow = decode_workflow(&row)?;
         let mut rows = connection
             .query(
                 "SELECT id, workflow_id, prompt FROM nodes WHERE workflow_id = ?1 ORDER BY id",
@@ -680,6 +655,19 @@ fn decode_node(row: &turso::Row) -> anyhow::Result<Node> {
         id: row.get(0).context("reading node identifier")?,
         workflow_id: row.get(1).context("reading node workflow identifier")?,
         prompt: row.get(2).context("reading node prompt")?,
+    })
+}
+
+fn decode_workflow(row: &turso::Row) -> anyhow::Result<Workflow> {
+    let record: Option<String> = row.get(3).context("reading workflow base")?;
+    Ok(Workflow {
+        id: row.get(0).context("reading workflow identifier")?,
+        project_path: PathBuf::from(row.get::<String>(1).context("reading project path")?),
+        name: row.get(2).context("reading workflow name")?,
+        base: record
+            .map(|record| serde_json::from_str(&record))
+            .transpose()
+            .context("decoding saved workflow base")?,
     })
 }
 

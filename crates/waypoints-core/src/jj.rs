@@ -9,6 +9,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::workflow::BaseSource;
+
 /// A saved association with an evolving native change, not a frozen commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -105,6 +107,30 @@ pub(crate) async fn resolve_base(repository: &Path, base: &str) -> anyhow::Resul
         "select one existing, non-divergent base revision"
     );
     Ok(revisions.remove(0))
+}
+
+pub(crate) async fn resolve_workflow_base(
+    repository: &Path,
+    source: &BaseSource,
+) -> anyhow::Result<Revision> {
+    match source {
+        BaseSource::Revision { id } => resolve_base(repository, id).await,
+        BaseSource::Bookmark { name } => {
+            anyhow::ensure!(
+                !name.trim().is_empty() && !name.contains(['\0', '\r', '\n']),
+                "base bookmark name must not be blank or contain control separators"
+            );
+            // Bookmark names are literal data, never revset source or glob patterns.
+            let quoted = serde_json::to_string(name)?;
+            let revset = format!("bookmarks(exact:{quoted})");
+            let mut revisions = revision_set(repository, &revset).await?;
+            anyhow::ensure!(
+                revisions.len() == 1,
+                "base bookmark {name:?} must have exactly one target; it is missing or conflicted"
+            );
+            Ok(revisions.remove(0))
+        }
+    }
 }
 
 pub(crate) async fn create_change(repository: &Path, base: &Revision) -> anyhow::Result<Revision> {

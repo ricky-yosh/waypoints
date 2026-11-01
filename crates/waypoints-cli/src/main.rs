@@ -9,6 +9,7 @@ use waypoints_backend::{Client, Config};
 use waypoints_core::jj::ChangeState;
 use waypoints_core::run::RecoveryConfirmation;
 use waypoints_core::storage::{HistoryStatus, Node, NodeChange};
+use waypoints_core::workflow::BaseSource;
 use waypoints_core::workspace::{NodeWorkspace, WorkspaceState};
 
 #[derive(Parser)]
@@ -162,6 +163,30 @@ enum WorkflowCommand {
         project: PathBuf,
         #[arg(long)]
         name: String,
+        /// Start from an exact local jj bookmark name, e.g. main or feature/auth.
+        #[arg(long, conflicts_with = "base_revision")]
+        base: Option<String>,
+        /// Start from a commit/change ID or unique prefix instead of a bookmark.
+        #[arg(long, conflicts_with = "base")]
+        base_revision: Option<String>,
+    },
+    /// Inspect saved workflow metadata and its fixed base without querying jj.
+    Get {
+        #[arg(long)]
+        workflow: i64,
+    },
+    /// Select an initial base for an unbased workflow; does not rebase existing nodes.
+    SetBase {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(
+            long,
+            conflicts_with = "base_revision",
+            required_unless_present = "base_revision"
+        )]
+        base: Option<String>,
+        #[arg(long, conflicts_with = "base", required_unless_present = "base")]
+        base_revision: Option<String>,
     },
     List {
         #[arg(long)]
@@ -401,13 +426,53 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::Workflow { command } => {
             let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
             match command {
-                WorkflowCommand::Create { project, name } => {
-                    let workflow = client.create_workflow(&project, &name).await?;
+                WorkflowCommand::Create {
+                    project,
+                    name,
+                    base,
+                    base_revision,
+                } => {
+                    let workflow = match base_source(base, base_revision) {
+                        Some(source) => {
+                            client
+                                .create_workflow_from(&project, &name, &source)
+                                .await?
+                        }
+                        None => client.create_workflow(&project, &name).await?,
+                    };
                     if args.json {
                         println!("{}", serde_json::to_string(&workflow)?);
                     } else {
                         println!("Created workflow {}: {}", workflow.id, workflow.name);
                     }
+                }
+                WorkflowCommand::Get { workflow } => {
+                    let workflow = client.workflow(workflow).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&workflow)?
+                        } else {
+                            serde_json::to_string_pretty(&workflow)?
+                        }
+                    );
+                }
+                WorkflowCommand::SetBase {
+                    workflow,
+                    base,
+                    base_revision,
+                } => {
+                    let source = base_source(base, base_revision)
+                        .context("select --base or --base-revision")?;
+                    let workflow = client.set_workflow_base(workflow, &source).await?;
+                    println!(
+                        "{}",
+                        if args.json {
+                            serde_json::to_string(&workflow)?
+                        } else {
+                            serde_json::to_string_pretty(&workflow)?
+                        }
+                    );
                 }
                 WorkflowCommand::List { project } => {
                     let workflows = client.list_workflows(&project).await?;
@@ -519,6 +584,12 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn base_source(bookmark: Option<String>, revision: Option<String>) -> Option<BaseSource> {
+    bookmark
+        .map(|name| BaseSource::Bookmark { name })
+        .or_else(|| revision.map(|id| BaseSource::Revision { id }))
 }
 
 fn print_history(status: HistoryStatus, json: bool) -> anyhow::Result<()> {

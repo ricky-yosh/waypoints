@@ -6,6 +6,7 @@ use std::process::Command;
 use tempfile::TempDir;
 use waypoints_core::jj::ChangeState;
 use waypoints_core::storage::Storage;
+use waypoints_core::workflow::BaseSource;
 use waypoints_core::workspace::WorkspaceState;
 
 struct Repository {
@@ -72,6 +73,431 @@ fn run(test: impl Future<Output = anyhow::Result<()>>) -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(test)
+}
+
+fn recorded_value(repo: &Repository, revision: &str, template: &str) -> anyhow::Result<String> {
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op=@",
+        "log",
+        "--no-graph",
+        "-r",
+        revision,
+        "-T",
+        template,
+    ])
+}
+
+fn recorded_parents(repo: &Repository, revision: &str) -> anyhow::Result<Vec<String>> {
+    let output = recorded_value(
+        repo,
+        revision,
+        r#"parents.map(|p| p.change_id()).join("\n")"#,
+    )?;
+    let mut parents = output.lines().map(str::to_owned).collect::<Vec<_>>();
+    parents.sort();
+    Ok(parents)
+}
+
+#[test]
+fn workflow_base_pins_bookmark_without_snapshot_and_survives_movement_and_restart()
+-> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        fs::write(repo.project.join("baseline.txt"), "main baseline\n")?;
+        repo.jj(&["describe", "-m", "Main baseline"])?;
+        repo.jj(&["bookmark", "create", "main"])?;
+        let commit = recorded_value(&repo, "@", "commit_id")?;
+        let change = recorded_value(&repo, "@", "change_id")?;
+        fs::write(repo.project.join("dirty.txt"), "Do not snapshot\n")?;
+        let operation = repo.operation()?;
+        let checkout = fs::read(repo.project.join(".jj/working_copy/tree_state"))?;
+        let database = repo.directory.path().join("workflow.db");
+        let mut storage = Storage::open(&database).await?;
+        let source = BaseSource::Bookmark {
+            name: "main".to_owned(),
+        };
+        let workflow = storage
+            .create_workflow_from(&repo.project, "From main", &source)
+            .await?;
+        let base = workflow.base.as_ref().expect("saved base");
+        assert_eq!(base.source, source);
+        assert_eq!(base.revision.commit_id, commit);
+        assert_eq!(base.revision.change_id, change);
+        assert_eq!(base.repository_path, fs::canonicalize(&repo.project)?);
+        assert_eq!(
+            repo.operation()?,
+            operation,
+            "selection must not snapshot or write native history"
+        );
+        assert_eq!(
+            fs::read(repo.project.join(".jj/working_copy/tree_state"))?,
+            checkout
+        );
+        assert_eq!(
+            fs::read_to_string(repo.project.join("dirty.txt"))?,
+            "Do not snapshot\n"
+        );
+        repo.jj(&["new", "-m", "Main advanced"])?;
+        repo.jj(&["bookmark", "set", "main", "-r", "@"])?;
+        assert_ne!(recorded_value(&repo, "main", "commit_id")?, commit);
+        assert!(
+            storage
+                .set_workflow_base(workflow.id, &source)
+                .await
+                .is_err()
+        );
+        drop(storage);
+        let storage = Storage::open(&database).await?;
+        assert_eq!(storage.workflow(workflow.id).await?, workflow);
+        assert_eq!(
+            storage.list_workflows(&repo.project).await?,
+            vec![workflow.clone()]
+        );
+        assert_eq!(
+            storage.workflow_graph(workflow.id).await?.workflow,
+            workflow
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn workflow_bases_accept_alternate_bookmarks_and_revision_ids_without_guessing()
+-> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        repo.jj(&["describe", "-m", "Feature base"])?;
+        repo.jj(&["bookmark", "create", "feature/auth"])?;
+        let commit = recorded_value(&repo, "@", "commit_id")?;
+        let change = recorded_value(&repo, "@", "change_id")?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+        for source in [
+            BaseSource::Bookmark {
+                name: "feature/auth".to_owned(),
+            },
+            BaseSource::Revision { id: commit.clone() },
+            BaseSource::Revision {
+                id: commit[..12].to_owned(),
+            },
+            BaseSource::Revision { id: change },
+        ] {
+            let workflow = storage
+                .create_workflow_from(&repo.project, "Alternate", &source)
+                .await?;
+            let base = workflow.base.expect("saved base");
+            assert_eq!(base.source, source);
+            assert_eq!(base.revision.commit_id, commit);
+        }
+        let before = storage.list_workflows(&repo.project).await?;
+        let operation = repo.operation()?;
+        for source in [
+            BaseSource::Bookmark {
+                name: "missing".to_owned(),
+            },
+            BaseSource::Bookmark {
+                name: "feature/*".to_owned(),
+            },
+            BaseSource::Bookmark {
+                name: "feature/auth\") | all() | bookmarks(\"".to_owned(),
+            },
+            BaseSource::Bookmark {
+                name: " \n".to_owned(),
+            },
+            BaseSource::Revision { id: "@".to_owned() },
+            BaseSource::Revision {
+                id: "all()".to_owned(),
+            },
+            BaseSource::Revision {
+                id: "0000000000000000000000000000000000000001".to_owned(),
+            },
+        ] {
+            assert!(
+                storage
+                    .create_workflow_from(&repo.project, "Invalid", &source)
+                    .await
+                    .is_err(),
+                "{source:?}"
+            );
+            assert_eq!(storage.list_workflows(&repo.project).await?, before);
+        }
+        assert_eq!(repo.operation()?, operation);
+        Ok(())
+    })
+}
+
+#[test]
+fn legacy_base_selection_is_one_time_metadata_only_and_preserves_graph_and_history()
+-> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        repo.jj(&["bookmark", "create", "main"])?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+        let workflow = storage.create_workflow(&repo.project, "Legacy").await?;
+        assert!(workflow.base.is_none());
+        let node = storage.create_node(workflow.id, "Keep assignment").await?;
+        let graph = storage.workflow_graph(workflow.id).await?;
+        let history = storage.history_status(&repo.project).await?;
+        let operation = repo.operation()?;
+        let source = BaseSource::Bookmark {
+            name: "main".to_owned(),
+        };
+        assert!(storage.set_workflow_base(9999, &source).await.is_err());
+        let based = storage.set_workflow_base(workflow.id, &source).await?;
+        assert!(based.base.is_some());
+        let after = storage.workflow_graph(workflow.id).await?;
+        assert_eq!(after.nodes, graph.nodes);
+        assert_eq!(after.connections, graph.connections);
+        assert_eq!(storage.node(workflow.id, node.id).await?, node);
+        assert_eq!(storage.history_status(&repo.project).await?, history);
+        assert_eq!(repo.operation()?, operation);
+        assert!(
+            storage
+                .set_workflow_base(workflow.id, &source)
+                .await
+                .is_err()
+        );
+        assert_eq!(storage.workflow(workflow.id).await?, based);
+        Ok(())
+    })
+}
+
+#[test]
+fn workflow_base_selection_rejects_conflicted_bookmarks_without_saving() -> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        repo.jj(&["bookmark", "create", "main"])?;
+        repo.jj(&["new", "-m", "Left"])?;
+        let left = repo.value("change_id")?;
+        repo.jj(&["new", "root()", "-m", "Right"])?;
+        let right = repo.value("change_id")?;
+        let operation = repo.operation()?;
+        repo.jj(&["bookmark", "set", "main", "-r", &left])?;
+        repo.jj(&[
+            "--at-op",
+            &operation,
+            "bookmark",
+            "set",
+            "main",
+            "-r",
+            &right,
+            "--allow-backwards",
+        ])?;
+        repo.jj(&["log", "--no-graph", "-r", "@", "-T", "commit_id"])?;
+        let mut storage = Storage::open(&repo.directory.path().join("workflow.db")).await?;
+        let error = storage
+            .create_workflow_from(
+                &repo.project,
+                "Conflicted",
+                &BaseSource::Bookmark {
+                    name: "main".to_owned(),
+                },
+            )
+            .await
+            .expect_err("conflicted bookmark must fail");
+        assert!(
+            error.to_string().contains("missing or conflicted"),
+            "{error}"
+        );
+        assert!(storage.list_workflows(&repo.project).await?.is_empty());
+        Ok(())
+    })
+}
+
+#[test]
+fn native_abandon_reconnects_chain_and_removes_only_abandoned_contribution() -> anyhow::Result<()> {
+    let repo = Repository::new()?;
+    fs::write(repo.project.join("interfaces.txt"), "interfaces\n")?;
+    repo.jj(&["describe", "-m", "Interfaces"])?;
+    let interfaces = repo.value("change_id")?;
+    let base_commit = repo.value("commit_id")?;
+    repo.jj(&["new", "-m", "Authentication"])?;
+    fs::write(repo.project.join("authentication.txt"), "authentication\n")?;
+    repo.jj(&["describe", "-m", "Authentication"])?;
+    let authentication = repo.value("change_id")?;
+    repo.jj(&["new", "-m", "Review"])?;
+    fs::write(repo.project.join("review.txt"), "independent review work\n")?;
+    repo.jj(&["describe", "-m", "Review"])?;
+    let review = repo.value("change_id")?;
+    let old_review_commit = repo.value("commit_id")?;
+
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op=@",
+        "abandon",
+        &authentication,
+    ])?;
+    assert_eq!(recorded_parents(&repo, &review)?, vec![interfaces.clone()]);
+    assert_eq!(
+        recorded_value(
+            &repo,
+            &format!("change_id(\"{authentication}\")"),
+            "change_id"
+        )?,
+        ""
+    );
+    assert_ne!(
+        recorded_value(&repo, &review, "commit_id")?,
+        old_review_commit
+    );
+    assert_eq!(
+        recorded_value(&repo, &interfaces, "commit_id")?,
+        base_commit
+    );
+    let files = repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op=@",
+        "file",
+        "list",
+        "-r",
+        &review,
+    ])?;
+    assert_eq!(files, "interfaces.txt\nreview.txt\n");
+    assert_eq!(recorded_value(&repo, &review, "conflict")?, "false");
+    Ok(())
+}
+
+#[test]
+fn native_abandon_rebases_all_children_not_only_selected_workflow_branch() -> anyhow::Result<()> {
+    let repo = Repository::new()?;
+    repo.jj(&["describe", "-m", "Base"])?;
+    let base = repo.value("change_id")?;
+    repo.jj(&["new", "-m", "Shared upstream"])?;
+    let upstream = repo.value("change_id")?;
+    let mut children = Vec::new();
+    for label in ["Authentication", "Images", "Outside this workflow"] {
+        repo.jj(&["new", &upstream, "-m", label])?;
+        children.push(repo.value("change_id")?);
+    }
+    repo.jj(&["--ignore-working-copy", "--at-op=@", "abandon", &upstream])?;
+    for child in children {
+        assert_eq!(recorded_parents(&repo, &child)?, vec![base.clone()]);
+    }
+    Ok(())
+}
+
+#[test]
+fn native_abandon_merge_reconnects_child_to_both_parents() -> anyhow::Result<()> {
+    let repo = Repository::new()?;
+    repo.jj(&["describe", "-m", "Base"])?;
+    let base = repo.value("change_id")?;
+    repo.jj(&["new", &base, "-m", "Authentication"])?;
+    let auth = repo.value("change_id")?;
+    repo.jj(&["new", &base, "-m", "Images"])?;
+    let images = repo.value("change_id")?;
+    repo.jj(&["new", &auth, &images, "-m", "Combined"])?;
+    let combined = repo.value("change_id")?;
+    repo.jj(&["new", "-m", "Review"])?;
+    let review = repo.value("change_id")?;
+    repo.jj(&["--ignore-working-copy", "--at-op=@", "abandon", &combined])?;
+    let mut expected = vec![auth, images];
+    expected.sort();
+    assert_eq!(recorded_parents(&repo, &review)?, expected);
+    Ok(())
+}
+
+#[test]
+fn native_abandon_merge_parent_retains_inherited_parent_even_when_redundant() -> anyhow::Result<()>
+{
+    let repo = Repository::new()?;
+    repo.jj(&["describe", "-m", "Base"])?;
+    let base = repo.value("change_id")?;
+    repo.jj(&["new", &base, "-m", "Authentication"])?;
+    let auth = repo.value("change_id")?;
+    repo.jj(&["new", &base, "-m", "Images"])?;
+    let images = repo.value("change_id")?;
+    repo.jj(&["new", &auth, &images, "-m", "Combined"])?;
+    let combined = repo.value("change_id")?;
+    repo.jj(&["--ignore-working-copy", "--at-op=@", "abandon", &auth])?;
+    // Native jj retains the inherited Base parent even though it is also an
+    // ancestor of Images. The graph must reflect the actual native result.
+    let mut expected = vec![base, images];
+    expected.sort();
+    assert_eq!(recorded_parents(&repo, &combined)?, expected);
+    Ok(())
+}
+
+#[test]
+fn native_abandon_records_dependent_child_conflicts_without_losing_identity() -> anyhow::Result<()>
+{
+    let repo = Repository::new()?;
+    repo.jj(&["describe", "-m", "Base"])?;
+    let base = repo.value("change_id")?;
+    repo.jj(&["new", "-m", "Authentication"])?;
+    fs::write(repo.project.join("auth.txt"), "authentication API\n")?;
+    repo.jj(&["describe", "-m", "Authentication"])?;
+    let auth = repo.value("change_id")?;
+    repo.jj(&["new", "-m", "Review depends on authentication"])?;
+    fs::write(
+        repo.project.join("auth.txt"),
+        "reviewed authentication API\n",
+    )?;
+    repo.jj(&["describe", "-m", "Review depends on authentication"])?;
+    let review = repo.value("change_id")?;
+    repo.jj(&["--ignore-working-copy", "--at-op=@", "abandon", &auth])?;
+    assert_eq!(recorded_parents(&repo, &review)?, vec![base]);
+    assert_eq!(recorded_value(&repo, &review, "change_id")?, review);
+    assert_eq!(recorded_value(&repo, &review, "conflict")?, "true");
+    Ok(())
+}
+
+#[test]
+fn native_abandon_does_not_remove_or_clean_a_workspace_editing_the_change() -> anyhow::Result<()> {
+    let repo = Repository::new()?;
+    repo.jj(&["describe", "-m", "Base"])?;
+    repo.jj(&["new", "-m", "Authentication"])?;
+    let auth = repo.value("change_id")?;
+    repo.jj(&["new", "-m", "Review"])?;
+    let workspace = repo.directory.path().join("auth-workspace");
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op=@",
+        "workspace",
+        "add",
+        "--name",
+        "auth",
+        "--no-colocate",
+        "--sparse-patterns",
+        "full",
+        "-r",
+        &auth,
+        workspace.to_str().expect("workspace path"),
+    ])?;
+    repo.jj_at(
+        &workspace,
+        &["--ignore-working-copy", "--at-op=@", "edit", &auth],
+    )?;
+    repo.jj_at(&workspace, &["workspace", "update-stale"])?;
+    fs::write(workspace.join("unrecorded.txt"), "Do not erase\n")?;
+    let checkout = fs::read(workspace.join(".jj/working_copy/tree_state"))?;
+    repo.jj(&["--ignore-working-copy", "--at-op=@", "abandon", &auth])?;
+    assert!(workspace.is_dir());
+    assert_eq!(
+        fs::read_to_string(workspace.join("unrecorded.txt"))?,
+        "Do not erase\n"
+    );
+    assert_eq!(
+        fs::read(workspace.join(".jj/working_copy/tree_state"))?,
+        checkout
+    );
+    let replacement = repo.jj_at(
+        &workspace,
+        &[
+            "--ignore-working-copy",
+            "--at-op=@",
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "change_id",
+        ],
+    )?;
+    assert_ne!(
+        replacement, auth,
+        "jj gives an abandoned working copy a replacement change"
+    );
+    Ok(())
 }
 
 #[test]

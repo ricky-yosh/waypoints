@@ -318,6 +318,10 @@ fn workflows_only_database_is_upgraded_without_losing_data() -> anyhow::Result<(
         assert_eq!(workflows.len(), 1);
         assert_eq!(workflows[0].id, 42);
         assert_eq!(workflows[0].name, " Old workflow ");
+        assert!(
+            workflows[0].base.is_none(),
+            "legacy data must not receive an inferred base"
+        );
         let graph = storage.workflow_graph(42).await?;
         assert_eq!(graph.workflow, workflows[0]);
         assert!(graph.nodes.is_empty());

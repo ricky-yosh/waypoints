@@ -19,6 +19,13 @@ background server's working directory.
 
 ## Save a branching workflow
 
+Workflows can now save an explicit native starting point with
+`workflow create --base main` or `--base-revision COMMIT_ID`. Inspect it with
+`workflow get --workflow ID`; use `workflow set-base` for one-time selection on
+an unbased workflow. Bookmark movement never silently changes the saved revision.
+See [workflow bases](16-workflow-bases.md) for selectors, RPC, and compatibility.
+Omitting a selector still creates an unbased workflow in this slice.
+
 Nodes contain saved prompts, with optional explicit associations to existing jj changes.
 They do not store agent conversations.
 Connections are directed saved relationships: they do not execute work or change
@@ -400,7 +407,9 @@ Methods:
 | `history.status` | `{project_path}` | `{project_path, undo, redo}` with pending edit IDs, workflow IDs, and labels |
 | `history.undo` | `{project_path, expected_edit_id}` | New metadata history status; stale/blocked actions are errors |
 | `history.redo` | `{project_path, expected_edit_id}` | New metadata history status; restores saved values/identities only |
-| `workflow.create` | `{project_path, name}` | `{id, project_path, name}` |
+| `workflow.create` | `{project_path, name, base?}` | `{id, project_path, name, base}`; nullable saved starting point |
+| `workflow.get` | `{workflow_id}` | Saved workflow including its nullable base, without querying jj |
+| `workflow.set_base` | `{workflow_id, source}` | Initial base selection for an unbased workflow; existing bases cannot be replaced |
 | `workflow.list` | `{project_path}` | Array of workflows ordered by ID |
 | `workflow.graph` | `{workflow_id}` | `{workflow, nodes, connections}` |
 | `node.create` | `{workflow_id, prompt}` | `{id, workflow_id, prompt}` |
@@ -466,6 +475,10 @@ exercise rewrites, abandonment, divergence, conflicts, and unchanged operation I
 when querying dirty working copies.
 
 ## Deliberately not included
+
+The [revised native dependency model](15-native-dependency-editing.md) is the next
+implementation direction, not current CLI behavior. Existing connections remain
+metadata-only and disconnected nodes remain accepted until an explicit migration.
 
 - Windows named pipes (the backend currently requires macOS/Linux).
 - GUI integration, subscriptions, or durable event replay.

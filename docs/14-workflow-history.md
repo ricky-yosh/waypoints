@@ -25,6 +25,11 @@ ordering, and layout are not implemented yet.
 
 ## Decision: acknowledge future code-changing connections
 
+The subsequent [rooted native dependency decision](15-native-dependency-editing.md)
+extends this policy to node deletion: abandon native work, reflect jj's descendant
+reconnection, and safely clean up its workspace. It replaces the proposal for
+metadata-only node removal. These operations remain unimplemented.
+
 **Agreed direction, not implemented:** a future connect/disconnect operation
 that rebases native jj work must explicitly acknowledge an undo boundary.
 Current `connection create` remains metadata-only and undoable; it does not

@@ -13,6 +13,8 @@ Interrupted runs have explicit read-only inspection and confirmed reservation
 recovery, fake-agent/native-jj tested without signalling saved PIDs or replaying work.
 Node creation, saved prompt edits, and connection creation support persistent
 [metadata undo/redo](docs/14-workflow-history.md), never code or conversation rewind.
+Workflows can explicitly save a fixed starting revision from `main`, another local
+bookmark, or a revision ID; see [workflow bases](docs/16-workflow-bases.md).
 GUI integration remains pending.
 An explicit workspace verification command can acknowledge a completed allocation
 after an interrupted creation, without changing local files or native history.
@@ -62,6 +64,8 @@ Waypoints turns a plan into a graph of phases. Each phase runs in a coding agent
 | [`12-codex-acp-spike.md`](docs/12-codex-acp-spike.md) | Tested Codex ACP behavior, setup, caveats, and the next production slice |
 | [`13-agent-run-lifecycle.md`](docs/13-agent-run-lifecycle.md) | Implemented background-run checkpoint, commands, bounds, cleanup, and remaining work |
 | [`14-workflow-history.md`](docs/14-workflow-history.md) | Persistent metadata undo/redo, CLI/RPC, native-history boundary, and validation |
+| [`15-native-dependency-editing.md`](docs/15-native-dependency-editing.md) | Agreed rooted code-dependency model, native abandonment tests, and implementation sequence |
+| [`16-workflow-bases.md`](docs/16-workflow-bases.md) | Explicit bookmark/revision starting points, persistence, CLI/RPC, and legacy compatibility |
 
 ## Decisions so far
 

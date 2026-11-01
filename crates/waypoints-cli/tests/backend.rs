@@ -3213,6 +3213,135 @@ impl Drop for OwnedServer {
 }
 
 #[test]
+fn workflow_base_cli_persists_exact_start_and_supports_explicit_alternatives() -> anyhow::Result<()>
+{
+    let fixture = Fixture::new()?;
+    jj(fixture.directory.path(), &["git", "init", "project"])?;
+    let project_path = fixture.directory.path().join("project");
+    let project = project_path.to_str().expect("project path");
+    fs::write(project_path.join("base.txt"), "Starting code\n")?;
+    jj(&project_path, &["describe", "-m", "Starting code"])?;
+    jj(&project_path, &["bookmark", "create", "main"])?;
+    jj(&project_path, &["bookmark", "create", "feature/auth"])?;
+    let commit = recorded_commit(&project_path)?;
+    let based = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Based",
+        "--base",
+        "main",
+    ])?;
+    assert_eq!(based["base"]["revision"]["commit_id"], commit);
+    assert_eq!(
+        based["base"]["source"],
+        json!({"kind":"bookmark", "name":"main"})
+    );
+    fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Alternate",
+        "--base",
+        "feature/auth",
+    ])?;
+    let exact = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Exact",
+        "--base-revision",
+        &commit,
+    ])?;
+    assert_eq!(exact["base"]["revision"]["commit_id"], commit);
+    assert_eq!(
+        exact["base"]["source"],
+        json!({"kind":"revision", "id":commit})
+    );
+    let legacy = fixture.success(&[
+        "workflow",
+        "create",
+        "--project",
+        project,
+        "--name",
+        "Legacy",
+    ])?;
+    assert!(legacy["base"].is_null());
+    let selected =
+        fixture.success(&["workflow", "set-base", "--workflow", "4", "--base", "main"])?;
+    assert_eq!(selected["base"], based["base"]);
+    jj(&project_path, &["new", "-m", "Main advances"])?;
+    jj(&project_path, &["bookmark", "set", "main", "-r", "@"])?;
+    fixture.stop()?;
+    assert_eq!(
+        fixture.success(&["workflow", "get", "--workflow", "1"])?,
+        based
+    );
+    assert_eq!(
+        fixture.success(&["workflow", "graph", "--workflow", "1"])?["workflow"],
+        based
+    );
+    assert_eq!(
+        fixture.success(&["workflow", "list", "--project", project])?[0],
+        based
+    );
+    let refused = fixture
+        .command()
+        .args(["workflow", "set-base", "--workflow", "1", "--base", "main"])
+        .output()?;
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("already has a base"));
+    let mut frame = serde_json::to_vec(&json!({
+        "jsonrpc":"2.0", "id":1, "method":"workflow.create",
+        "params":{"project_path":project,"name":"Malformed","base":{"kind":"bookmark","name":"main","force":true}}
+    }))?;
+    frame.push(b'\n');
+    assert_eq!(fixture.rpc(&frame)?["error"]["code"], -32602);
+    for args in [
+        vec![
+            "workflow",
+            "create",
+            "--project",
+            project,
+            "--name",
+            "Missing",
+            "--base",
+            "missing",
+        ],
+        vec![
+            "workflow",
+            "create",
+            "--project",
+            project,
+            "--name",
+            "Both",
+            "--base",
+            "main",
+            "--base-revision",
+            &commit,
+        ],
+        vec!["workflow", "set-base", "--workflow", "1"],
+    ] {
+        assert!(!fixture.command().args(args).output()?.status.success());
+    }
+    assert_eq!(
+        fixture
+            .success(&["workflow", "list", "--project", project])?
+            .as_array()
+            .expect("workflows")
+            .len(),
+        4
+    );
+    Ok(())
+}
+
+#[test]
 fn metadata_history_is_shared_persistent_and_rejects_stale_cli_and_rpc_actions()
 -> anyhow::Result<()> {
     let fixture = Fixture::new()?;

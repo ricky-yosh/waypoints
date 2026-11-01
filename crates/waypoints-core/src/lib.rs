@@ -3,6 +3,7 @@
 pub mod jj;
 pub mod run;
 pub mod storage;
+pub mod workflow;
 pub mod workspace;
 
 pub fn add(left: u64, right: u64) -> u64 {
