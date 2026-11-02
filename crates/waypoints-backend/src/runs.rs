@@ -459,10 +459,37 @@ impl Runs {
             // write succeeds; snapshot_pending remains set until that acknowledgement.
             live.dirty = true;
         }
+        let mut failure = None;
         // Workers send their final outcome only after stopping and reaping their process.
         loop {
             while let Some(write) = self.next_write() {
-                let persisted = write.persist(storage).await?;
+                let id = write.run.id;
+                let snapshot = write.snapshot;
+                let persisted = match write.persist(storage).await {
+                    Ok(persisted) => persisted,
+                    Err(error) => {
+                        // Storage failure must not skip cancellation and joining
+                        // the other owned agents. Retain the first error to report
+                        // only after process cleanup has finished.
+                        let detail = format!("saving snapshot preparation failed: {error:#}");
+                        failure.get_or_insert(error);
+                        if snapshot {
+                            let live = self.live.get_mut(&id).expect("write for owned run");
+                            // No snapshot task was started: preparation requires
+                            // a successful write. Do not wait for an outcome that
+                            // cannot arrive or retry native work during shutdown.
+                            live.snapshot_pending = false;
+                            live.status.run.state = RunState::Interrupted {
+                                detail,
+                                phase: InterruptionPhase::Finalization,
+                            };
+                            // Try to save the interruption once, retaining the
+                            // reservation even if storage becomes writable again.
+                            live.dirty = true;
+                        }
+                        continue;
+                    }
+                };
                 self.persisted(persisted)?;
             }
             if self
@@ -490,7 +517,12 @@ impl Runs {
             self.apply(id, update)?;
         }
         for live in self.live.values_mut() {
-            (&mut live.task).await.context("joining agent task")?;
+            if let Err(error) = (&mut live.task).await.context("joining agent task") {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         Ok(())
     }

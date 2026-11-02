@@ -130,7 +130,10 @@ still require explicit recovery.
 
 Shutdown acknowledges promptly, then waits for the owned storage/native outcome
 and agent/snapshot cleanup before releasing ownership locks. No native mutation
-is cancelled by dropping its future. External jj/filesystem writers remain
+is cancelled by dropping its future. Repeated run-metadata write failures do not
+skip owned-agent cleanup; the error is returned after cleanup. A failed snapshot
+preparation write does not start native work and leaves an interrupted reservation
+for explicit recovery. External jj/filesystem writers remain
 outside Waypoints' serialization guarantee.
 
 ## Evidence
@@ -141,6 +144,8 @@ clean/fresh workspace updates, preserved dirty failure, unsafe allocation refusa
 restart and injected readiness-write failure; typed errors and unknown-data
 fallback; and live cancellation/permission/status/events during gated native work.
 The scheduling tests also cover conflicting mutation refusal and orderly shutdown.
+Injected terminal/preparation write failures cover owned process-group cleanup,
+snapshot admission, and retained reservations after restart.
 Existing crash/finalization, permission-expiry, startup and concurrent-client
 regressions remain part of the full headless suite. These checks use deterministic
 test agents, not new real-Codex acceptance.

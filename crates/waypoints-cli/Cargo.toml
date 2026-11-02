@@ -17,3 +17,4 @@ waypoints-core = { path = "../waypoints-core" }
 
 [dev-dependencies]
 tempfile = "3"
+turso = { version = "0.8.3", default-features = false }

@@ -3,6 +3,179 @@ use waypoints_backend::{Client, Config};
 use waypoints_core::storage::StorageFailure;
 
 #[test]
+fn persistent_run_write_failures_do_not_skip_owned_process_cleanup() -> anyhow::Result<()> {
+    for (condition, preparation_fails) in [
+        ("NEW.active = 0", false),
+        (
+            "NEW.active = 0 OR json_extract(NEW.record, '$.state.status') = 'finalizing'",
+            true,
+        ),
+    ] {
+        let (fixture, agent, workspace) = run_fixture("hang")?;
+        fixture.success(&["node", "create", "--workflow", "1", "--prompt", "complete"])?;
+        fixture.success(&[
+            "node",
+            "create-change",
+            "--workflow",
+            "1",
+            "--node",
+            "2",
+            "--base",
+            "root()",
+        ])?;
+        let second = fixture.directory.path().join("second-workspace");
+        fixture.success(&[
+            "node",
+            "workspace",
+            "create",
+            "--workflow",
+            "1",
+            "--node",
+            "2",
+            "--directory",
+            second.to_str().expect("workspace path"),
+        ])?;
+        fixture.stop()?;
+        let project = fixture.directory.path().join("project");
+        let native_head = || {
+            jj(
+                &project,
+                &[
+                    "--ignore-working-copy",
+                    "--at-op=@",
+                    "op",
+                    "log",
+                    "--no-graph",
+                    "--limit",
+                    "1",
+                    "-T",
+                    "id",
+                ],
+            )
+        };
+        let before = native_head()?;
+        tokio::runtime::Builder::new_current_thread()
+            .build()?
+            .block_on(async {
+                let database =
+                    turso::Builder::new_local(fixture.database.to_str().expect("database path"))
+                        .build()
+                        .await?;
+                database
+                    .connect()?
+                    .execute(
+                        &format!(
+                            "CREATE TRIGGER reject_run_write BEFORE UPDATE ON agent_runs
+                             WHEN {condition}
+                             BEGIN SELECT RAISE(FAIL, 'injected run write failure'); END"
+                        ),
+                        (),
+                    )
+                    .await?;
+                Ok::<_, anyhow::Error>(())
+            })?;
+        let log = fixture.directory.path().join("foreground.log");
+        let mut server = OwnedServer(
+            fixture
+                .command()
+                .arg("serve")
+                .stdout(Stdio::null())
+                .stderr(fs::File::create(&log)?)
+                .spawn()?,
+        );
+        wait_for_file(&fixture.socket);
+        start_run(&fixture, &agent)?;
+        let _cleanup = OwnedTestAgentGroup(&workspace);
+        wait_for_file(&workspace.join("descendant.pid"));
+        fixture.success(&[
+            "run",
+            "start",
+            "--workflow",
+            "1",
+            "--node",
+            "2",
+            "--executable",
+            agent.to_str().expect("agent path"),
+        ])?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = server.0.try_wait()? {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "failed persistence blocked shutdown: {}",
+                fs::read_to_string(&log)?
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(!status.success());
+        assert!(fs::read_to_string(&log)?.contains("injected run write failure"));
+        assert_process_stopped(&workspace.join("adapter.pid"))?;
+        assert_process_stopped(&workspace.join("descendant.pid"))?;
+        assert_process_stopped(&second.join("adapter.pid"))?;
+        let after = native_head()?;
+        assert_eq!(
+            after == before,
+            preparation_fails,
+            "snapshot must start only after preparation metadata was saved"
+        );
+
+        // Failed terminal writes must not pretend the reservation was released,
+        // nor replay the successful agent or its unfinished snapshot on restart.
+        for id in ["1", "2"] {
+            let status = fixture.success(&["run", "status", "--run", id])?;
+            assert_eq!(status["run"]["state"]["status"], "interrupted", "{status}");
+            assert_eq!(status["run"]["snapshot"]["status"], "not_recorded");
+            if id == "2" {
+                assert_eq!(status["run"]["state"]["phase"], "finalization");
+            }
+            let output = fixture
+                .command()
+                .args([
+                    "run",
+                    "start",
+                    "--workflow",
+                    "1",
+                    "--node",
+                    id,
+                    "--executable",
+                ])
+                .arg(&agent)
+                .output()?;
+            assert!(
+                !output.status.success(),
+                "lost node {id} reservation after restart"
+            );
+        }
+        assert_eq!(native_head()?, after, "restart replayed native work");
+    }
+    Ok(())
+}
+
+// Clean up this test's freshly launched group even when the regression fails.
+struct OwnedTestAgentGroup<'a>(&'a Path);
+
+impl Drop for OwnedTestAgentGroup<'_> {
+    fn drop(&mut self) {
+        let child = self.0.join("descendant.pid");
+        let Ok(pid) = fs::read_to_string(child) else {
+            return;
+        };
+        let Ok(output) = Command::new("ps")
+            .args(["-p", pid.trim(), "-o", "stat="])
+            .output()
+        else {
+            return;
+        };
+        let state = String::from_utf8_lossy(&output.stdout);
+        if output.status.success() && !state.trim().starts_with('Z') {
+            let _ = stop_fixture_agent_group(self.0);
+        }
+    }
+}
+
+#[test]
 fn named_rpc_parameters_and_error_diagnostics_are_stable_while_idle() -> anyhow::Result<()> {
     let fixture = Fixture::new()?;
     fixture.start()?;

@@ -8222,6 +8222,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "turso",
  "waypoints-backend",
  "waypoints-core",
 ]
