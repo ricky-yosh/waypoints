@@ -13,6 +13,10 @@ use tempfile::TempDir;
 
 #[path = "backend/archive.rs"]
 mod archive;
+#[path = "backend/discovery.rs"]
+mod discovery;
+#[path = "backend/frontend_backend.rs"]
+mod frontend_backend;
 #[path = "backend/multiple_parents.rs"]
 mod multiple_parents;
 #[path = "backend/planning.rs"]

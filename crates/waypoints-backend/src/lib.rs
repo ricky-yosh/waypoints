@@ -12,6 +12,7 @@ mod server;
 pub use client::Client;
 pub use config::Config;
 pub use protocol::BackendInfo;
+pub use protocol::RpcError;
 pub use runs::{Permission, PermissionOption, RunEvent, RunEventOrigin, RunEvents, RunStatus};
 pub use server::serve;
 
@@ -30,6 +31,11 @@ pub struct BackendError {
 }
 
 impl BackendError {
+    /// Returns the intact remote error, or none for local startup/transport/protocol failures.
+    pub fn rpc_error(&self) -> Option<&RpcError> {
+        self.inner.downcast_ref()
+    }
+
     /// Whether startup was refused because another process holds an ownership lock.
     pub fn is_ownership_unavailable(&self) -> bool {
         matches!(

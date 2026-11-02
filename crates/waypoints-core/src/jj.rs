@@ -128,6 +128,44 @@ pub(crate) async fn repository_root(project: &Path) -> anyhow::Result<PathBuf> {
         .context("resolving jj workspace root")
 }
 
+pub(crate) async fn local_bookmarks(
+    repository: &Path,
+    operation: &str,
+) -> anyhow::Result<Vec<crate::repository::LocalBookmark>> {
+    // Render native ref terms directly: a revset union would lose removed targets
+    // and cannot distinguish a conflicted ref from a divergent change.
+    let target = r#""{\"revision\":" ++ "{\"change_id\":" ++ json(c.change_id()) ++ ",\"commit_id\":" ++ json(c.commit_id()) ++ ",\"description\":" ++ json(c.description()) ++ ",\"conflicted\":" ++ json(c.conflict()) ++ "},\"divergent\":" ++ json(c.divergent()) ++ "}""#;
+    let template = format!(
+        r#"if(!remote && present, "{{\"name\":" ++ json(name) ++ ",\"conflicted\":" ++ json(conflict) ++ ",\"added_targets\":[" ++ added_targets.map(|c| {target}).join(",") ++ "],\"removed_targets\":[" ++ removed_targets.map(|c| {target}).join(",") ++ "]}}\n")"#
+    );
+    let output = query(
+        repository,
+        &[
+            &format!("--at-op={operation}"),
+            "bookmark",
+            "list",
+            "-T",
+            &template,
+        ],
+    )
+    .await?;
+    let mut bookmarks: Vec<crate::repository::LocalBookmark> =
+        serde_json::Deserializer::from_slice(&output)
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .context("decoding jj local bookmark targets")?;
+    bookmarks.sort_by(|left, right| left.name.cmp(&right.name));
+    for bookmark in &mut bookmarks {
+        bookmark
+            .added_targets
+            .sort_by(|a, b| a.revision.commit_id.cmp(&b.revision.commit_id));
+        bookmark
+            .removed_targets
+            .sort_by(|a, b| a.revision.commit_id.cmp(&b.revision.commit_id));
+    }
+    Ok(bookmarks)
+}
+
 pub(crate) async fn revisions(repository: &Path, change_id: &str) -> anyhow::Result<Vec<Revision>> {
     validate_change_id(change_id)?;
     // change_id() reports divergence as multiple commits and an absent ID as an empty set.
@@ -608,6 +646,33 @@ pub(crate) async fn ensure_mutable(repository: &Path, revision: &Revision) -> an
     anyhow::ensure!(
         output == b"false",
         "cannot edit an immutable revision in a node workspace"
+    );
+    Ok(())
+}
+
+pub(crate) async fn update_stale_workspace(
+    association: &crate::workspace::WorkspaceAssociation,
+) -> anyhow::Result<()> {
+    // Do not silently merge divergent operation heads, including ones created
+    // when jj preserves unsaved stale edits. Such outcomes need manual inspection.
+    let output = run_command(
+        &association.directory,
+        &[
+            "--at-op=@",
+            "--quiet",
+            "--config",
+            "snapshot.auto-update-stale=false",
+            "workspace",
+            "update-stale",
+        ],
+        WorkingCopy::Update,
+        WORKSPACE_TIMEOUT,
+    )
+    .await?;
+    anyhow::ensure!(
+        output.stderr.is_empty(),
+        "jj update-stale reported diagnostics; inspect files and native state: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(())
 }

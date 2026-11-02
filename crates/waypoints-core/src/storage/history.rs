@@ -207,9 +207,13 @@ impl Storage {
                  AND NOT EXISTS (SELECT 1 FROM deleted_nodes WHERE node_id = nodes.id)",
                 [workflow_id, node_id],
             ).await?;
-                let row = rows.next().await?.with_context(|| {
-                    format!("node {node_id} not found in workflow {workflow_id}")
-                })?;
+                let row = rows
+                    .next()
+                    .await?
+                    .ok_or(super::StorageFailure::MissingNode {
+                        workflow_id,
+                        node_id,
+                    })?;
                 let before = decode_node(&row)?;
                 drop(rows);
                 if before.prompt != prompt {
@@ -384,7 +388,7 @@ async fn project_for_workflow(tx: &turso::Connection, id: i64) -> anyhow::Result
     let row = rows
         .next()
         .await?
-        .with_context(|| format!("workflow {id} not found"))?;
+        .ok_or(super::StorageFailure::MissingWorkflow { workflow_id: id })?;
     Ok(PathBuf::from(row.get::<String>(0)?))
 }
 

@@ -10,6 +10,8 @@ use super::{Storage, StorageError};
 use crate::jj::{self, ChangeState};
 use crate::workspace::{NodeWorkspace, WorkspaceAssociation, WorkspaceState};
 
+mod update;
+
 // Leave ten seconds for database writes and transport within the workspace RPC deadline.
 const CREATION_TIMEOUT: Duration = Duration::from_secs(110);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(4);
@@ -245,9 +247,10 @@ impl Storage {
         let saved = self
             .saved_workspace(node_id)
             .await?
+            .ok_or(super::StorageFailure::WorkspaceNotReady { node_id })
             .context("node has no saved workspace; allocate one before starting an agent")?;
         if !saved.ready {
-            return Err(anyhow::anyhow!(
+            return Err(anyhow::Error::new(super::StorageFailure::WorkspaceNotReady { node_id }).context(
                 "workspace allocation is incomplete; explicitly verify it before starting an agent"
             )
             .into());

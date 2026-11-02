@@ -501,8 +501,10 @@ Workspace creation has a 110-second total allocation deadline and a 60-second
 limit per mutation subprocess, with the same 1 MiB per-stream output bound.
 The client allows 120 seconds for this method; ordinary requests keep their
 five-second deadline. Workspace status has a four-second native-query budget.
-The backend still serializes requests, so a long checkout can delay other
-requests. Timing out a client never authorizes automatic retry.
+The backend serializes storage work, but live run controls bypass a long checkout.
+Other requests receive an explicit not-started busy response; the shared client
+can retry that refusal within its original deadline. Timing out a client never
+authorizes automatic retry. See [scheduling](25-backend-frontend-readiness.md#scheduling-and-run-controls).
 
 Tested with jj 0.46.0, including workspace root templates, `--no-colocate`,
 `--sparse-patterns full`, and `workspace update-stale`.
@@ -545,8 +547,11 @@ the saved allocation and files unchanged:
 - **Missing directory or mismatched identity/target:** inspect `node refresh`,
   the saved workspace details, and native `jj workspace list` before manual recovery.
 - **Unfinished or stale checkout:** inspect local files and native history first.
-  If appropriate, manually run `jj workspace update-stale` **inside the saved
-  directory**, then verify again. Verification never runs this mutating command.
+  A ready, matching dedicated allocation can use
+  `waypoints node workspace update-stale --workflow 1 --node 2` explicitly.
+  Incomplete or uncertain outcomes require manual reconciliation before
+  verification; see [update rules](25-backend-frontend-readiness.md#explicit-stale-checkout-update).
+  Verification never runs this mutating command.
 - **Unsupported native output:** use the tested jj version; do not edit the
   database flag to bypass verification.
 
@@ -625,17 +630,20 @@ launching the companion `waypoints` executable; the GUI does not call CLI workfl
 commands or access the database.
 
 Transport: a local Unix socket, one newline-delimited JSON-RPC 2.0 request per
-connection. Clients reconnect for each request. The backend serializes requests.
+connection. Clients reconnect for each request. The backend serializes storage work.
 Frames are limited to 1 MiB. The server's frame reads/response writes have
 five-second timeouts. Clients allow five seconds for ordinary requests and
-120 seconds for `node.workspace.create`, `node.reparent`, `node.delete`,
+120 seconds for `node.workspace.create`, `node.workspace.update_stale`, `node.reparent`, `node.delete`,
 `node.operation_recovery`, `node.recover_operation`, `node.resume_deletion`,
 `run.restore`, `node.restore_revision`, `node.restore_impact`, `node.restore_with_descendants`,
 and `run.recover_restore`, including the older
-reparent recovery aliases. Long native requests still serialize other requests;
-agent execution and snapshot tasks run in the background.
-Storage mutations are not cancelled by a server-side transport timeout. Requests
-are not automatically retried: a lost response may follow a successful mutation.
+reparent recovery aliases. Live run status/events/cancellation/permissions bypass
+the storage lane; other requests get a not-started busy refusal while it is occupied.
+Agent execution and snapshot tasks run in the background.
+Storage mutations are not cancelled by a server-side transport timeout. The shared
+client retries only explicit not-started busy refusals, within the original deadline;
+lost responses and transport failures are never retried. See
+[structured errors and scheduling](25-backend-frontend-readiness.md#structured-errors).
 
 Methods:
 
@@ -643,6 +651,7 @@ Methods:
 |---|---|---|
 | `backend.info` | `{}` | `{pid, database, protocol_version}` |
 | `backend.shutdown` | `{}` | `null` |
+| `repository.inspect` | `{project_path}` | Canonical project/workspace paths, pinned native operation and complete local bookmark target/conflict facts; readonly |
 | `history.status` | `{project_path}` | `{project_path, undo, redo}` with pending edit IDs, workflow IDs, and labels |
 | `history.undo` | `{project_path, expected_edit_id}` | New metadata history status; stale/blocked actions are errors |
 | `history.redo` | `{project_path, expected_edit_id}` | New metadata history status; restores saved values/identities only |
@@ -673,6 +682,7 @@ Methods:
 | `node.workspace.create` | `{workflow_id, node_id, directory}` | `{node, workspace, state}` for a new or already-saved workspace |
 | `node.workspace.status` | `{workflow_id, node_id}` | `{node, workspace, state}` observed without updating files |
 | `node.workspace.verify` | `{workflow_id, node_id}` | `{node, workspace, state}` marked ready only after read-only checkout verification |
+| `node.workspace.update_stale` | `{workflow_id, node_id}` | `{outcome, workspace}`; explicit checked update, `updated` or readonly `already_fresh`; uncertain outcomes stay incomplete |
 | `node.refresh` | `{workflow_id, node_id}` | `{node, association, state}` with freshly queried native status |
 | `node.review` | `{workflow_id, node_id}` | `{revision, parent_commit_ids, summary, patch}` for one current recorded revision |
 | `node.revisions` | `{workflow_id, node_id, page_size, cursor?}` | Operation-pinned `NodeRevisionPage`; page size 1–100, opaque next cursor |

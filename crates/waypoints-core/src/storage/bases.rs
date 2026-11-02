@@ -120,7 +120,7 @@ impl Storage {
             let row = rows
                 .next()
                 .await?
-                .with_context(|| format!("workflow {workflow_id} not found"))?;
+                .ok_or(super::StorageFailure::MissingWorkflow { workflow_id })?;
             decode_workflow(&row)
         }
         .await?)

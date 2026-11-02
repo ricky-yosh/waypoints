@@ -90,6 +90,7 @@ manually validated adapter, not a guarantee that every ACP agent is supported.
 | [`22-native-revision-history.md`](docs/22-native-revision-history.md) | Native evolution browsing, pagination, exact previews, and retention limits |
 | [`23-restore-impact.md`](docs/23-restore-impact.md) | Read-only conservative impact preview and confirmation inputs |
 | [`24-downstream-restoration.md`](docs/24-downstream-restoration.md) | Confirmed same-workflow downstream restoration, session barriers, recovery, and real-Codex acceptance |
+| [`25-backend-frontend-readiness.md`](docs/25-backend-frontend-readiness.md) | Repository/base discovery, explicit stale-workspace updates, structured failures, and responsive live run controls |
 
 ## Decisions so far
 

@@ -176,7 +176,13 @@ fn confirmed_restore_checkpoints_dirty_descendants_and_requires_fresh_sessions_e
                 .await
                 .is_err()
         );
-        repo.jj_at(&child_dir, &["workspace", "update-stale"])?;
+        let update = storage
+            .update_stale_node_workspace(workflow.id, child.id)
+            .await?;
+        assert_eq!(
+            update.outcome,
+            waypoints_core::workspace::WorkspaceUpdateOutcome::Updated
+        );
         assert_eq!(fs::read_to_string(child_dir.join("api.txt"))?, "API A\n");
         assert_eq!(
             fs::read_to_string(child_dir.join("login.txt"))?,

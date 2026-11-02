@@ -29,8 +29,9 @@ Core and backend client expose
 JSON object and `confirmation` as `"restore_and_rebase"`.
 The response is a `RestoreOperation`.
 Unknown parameter fields and invalid confirmation values are rejected.
-Client deadline is 120 seconds, with a 110-second core budget. This remains a
-serialized request and may delay other controls.
+Client deadline is 120 seconds, with a 110-second core budget. This owns the
+serialized storage lane; live run controls bypass it, while other requests
+receive the [not-started busy response](25-backend-frontend-readiness.md#scheduling-and-run-controls).
 
 ## Narrow supported scope
 

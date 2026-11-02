@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use waypoints_core::jj::Revision;
-use waypoints_core::run::{InterruptionPhase, RecoveryConfirmation, Run, RunState, SnapshotState};
+use waypoints_core::run::{InterruptionPhase, Run, RunSnapshot, RunState, SnapshotState};
 use waypoints_core::storage::Storage;
 
 use crate::protocol::read_frame;
@@ -58,7 +58,7 @@ pub struct PermissionOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RunStatus {
-    /// Captured assignment and last persisted state.
+    /// Captured assignment and latest live state, or saved state after restart.
     pub run: Run,
     /// Pending live request; absent after restart.
     pub permission: Option<Permission>,
@@ -105,12 +105,30 @@ pub struct RunEvents {
 
 struct Live {
     status: RunStatus,
+    persisted_state: RunState,
     events: VecDeque<(RunEvent, usize)>,
     bytes: usize,
     sequence: u64,
+    dirty: bool,
+    snapshot_pending: bool,
     cancel: watch::Sender<bool>,
     replies: mpsc::Sender<(u64, String)>,
     task: JoinHandle<()>,
+}
+
+impl Live {
+    fn observed_status(&self) -> RunStatus {
+        let mut status = self.status.clone();
+        // Public completion requires a successful metadata write, not merely
+        // a native snapshot outcome received while the storage lane is occupied.
+        if matches!(status.run.state, RunState::Completed)
+            && !matches!(self.persisted_state, RunState::Completed)
+        {
+            status.run.state = RunState::Finalizing;
+            status.run.snapshot = SnapshotState::NotRecorded;
+        }
+        status
+    }
 }
 
 pub(crate) enum Update {
@@ -127,6 +145,30 @@ pub(crate) struct Runs {
     live: BTreeMap<i64, Live>,
     tx: mpsc::Sender<(i64, Update)>,
     pub(crate) rx: mpsc::Receiver<(i64, Update)>,
+}
+
+pub(crate) struct RunWrite {
+    run: Run,
+    snapshot: bool,
+}
+
+pub(crate) type PersistedRun = (i64, RunState, Option<Result<RunSnapshot, String>>);
+
+impl RunWrite {
+    pub(crate) async fn persist(self, storage: &mut Storage) -> anyhow::Result<PersistedRun> {
+        storage.save_run(&self.run).await?;
+        let snapshot = if self.snapshot {
+            Some(
+                storage
+                    .prepare_run_snapshot(self.run.id)
+                    .await
+                    .map_err(|error| format!("{error:#}")),
+            )
+        } else {
+            None
+        };
+        Ok((self.run.id, self.run.state, snapshot))
+    }
 }
 
 impl Runs {
@@ -167,10 +209,13 @@ impl Runs {
         self.live.insert(
             status.run.id,
             Live {
+                persisted_state: status.run.state.clone(),
                 status: status.clone(),
                 events: VecDeque::new(),
                 bytes: 0,
                 sequence: 0,
+                dirty: false,
+                snapshot_pending: false,
                 cancel,
                 replies,
                 task,
@@ -182,7 +227,7 @@ impl Runs {
     pub(crate) fn status(&self, run: Run) -> RunStatus {
         self.live
             .get(&run.id)
-            .map(|live| live.status.clone())
+            .map(Live::observed_status)
             .unwrap_or(RunStatus {
                 run,
                 permission: None,
@@ -200,7 +245,7 @@ impl Runs {
             .map(|(event, _)| event.sequence)
             .unwrap_or(live.sequence + 1);
         Ok(RunEvents {
-            status: live.status.clone(),
+            status: live.observed_status(),
             events: live
                 .events
                 .iter()
@@ -212,11 +257,11 @@ impl Runs {
         })
     }
 
-    pub(crate) async fn cancel(
-        &mut self,
-        id: i64,
-        storage: &mut Storage,
-    ) -> anyhow::Result<RunStatus> {
+    pub(crate) fn live_status(&self, id: i64) -> Option<RunStatus> {
+        self.live.get(&id).map(Live::observed_status)
+    }
+
+    pub(crate) fn cancel(&mut self, id: i64) -> anyhow::Result<RunStatus> {
         let live = self
             .live
             .get_mut(&id)
@@ -228,39 +273,37 @@ impl Runs {
             live.cancel.send_replace(true);
             live.status.run.state = RunState::Cancelling;
             live.status.permission = None;
-            storage.save_run(&live.status.run).await?;
+            live.dirty = true;
         }
-        Ok(live.status.clone())
+        Ok(live.observed_status())
     }
 
-    pub(crate) async fn recover(
-        &mut self,
-        id: i64,
-        confirmation: RecoveryConfirmation,
-        storage: &mut Storage,
-    ) -> anyhow::Result<RunStatus> {
+    pub(crate) fn ensure_recoverable(&self, id: i64) -> anyhow::Result<()> {
         if let Some(live) = self.live.get(&id) {
             anyhow::ensure!(
                 live.task.is_finished(),
                 "run still has an owned task; wait for it to stop before recovery"
             );
         }
-        let run = storage.recover_run(id, confirmation).await?;
+        Ok(())
+    }
+
+    pub(crate) fn recovered(&mut self, run: Run) -> RunStatus {
         // A cleanup-failed run may still have a retained live event buffer.
         // Do not let that cached interruption override the durable recovery.
-        if let Some(live) = self.live.get_mut(&id) {
+        if let Some(live) = self.live.get_mut(&run.id) {
+            live.persisted_state = run.state.clone();
             live.status.run = run.clone();
             live.status.permission = None;
         }
-        Ok(self.status(run))
+        self.status(run)
     }
 
-    pub(crate) async fn respond(
+    pub(crate) fn respond(
         &mut self,
         id: i64,
         permission_id: u64,
         option_id: String,
-        storage: &mut Storage,
     ) -> anyhow::Result<RunStatus> {
         let live = self
             .live
@@ -287,16 +330,11 @@ impl Runs {
             .context("permission reply queue unavailable")?;
         live.status.permission = None;
         live.status.run.state = RunState::Running;
-        storage.save_run(&live.status.run).await?;
-        Ok(live.status.clone())
+        live.dirty = true;
+        Ok(live.observed_status())
     }
 
-    pub(crate) async fn apply(
-        &mut self,
-        id: i64,
-        update: Update,
-        storage: &mut Storage,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn apply(&mut self, id: i64, update: Update) -> anyhow::Result<()> {
         let live = self.live.get_mut(&id).context("update for unknown run")?;
         match update {
             Update::Event(update, origin) => {
@@ -338,31 +376,10 @@ impl Runs {
                     // Cleanup is confirmed. Persist ownership across native work;
                     // clients must never observe completed before finalization.
                     live.status.run.state = RunState::Finalizing;
-                    storage.save_run(&live.status.run).await?;
-                    let operation = storage.prepare_run_snapshot(id).await;
-                    match operation {
-                        Ok(operation) => {
-                            (&mut live.task)
-                                .await
-                                .context("joining completed agent task")?;
-                            let tx = self.tx.clone();
-                            live.task = tokio::spawn(async move {
-                                let result = operation
-                                    .record()
-                                    .await
-                                    .map_err(|error| format!("{error:#}"));
-                                let _ = tx.send((id, Update::Snapshotted(result))).await;
-                            });
-                            return Ok(());
-                        }
-                        Err(error) => {
-                            live.status.run.snapshot = SnapshotState::Failed {
-                                detail: format!("{error:#}"),
-                            };
-                        }
-                    }
+                    live.snapshot_pending = true;
+                } else {
+                    live.status.run.state = state;
                 }
-                live.status.run.state = state;
             }
             Update::Snapshotted(result) => {
                 anyhow::ensure!(
@@ -376,7 +393,48 @@ impl Runs {
                 live.status.run.state = RunState::Completed;
             }
         }
-        storage.save_run(&live.status.run).await?;
+        live.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn next_write(&mut self) -> Option<RunWrite> {
+        let live = self.live.values_mut().find(|live| live.dirty)?;
+        live.dirty = false;
+        Some(RunWrite {
+            run: live.status.run.clone(),
+            snapshot: live.snapshot_pending,
+        })
+    }
+
+    pub(crate) fn persisted(&mut self, (id, state, snapshot): PersistedRun) -> anyhow::Result<()> {
+        let live = self.live.get_mut(&id).context("write for unknown run")?;
+        live.persisted_state = state;
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        live.snapshot_pending = false;
+        match snapshot {
+            Ok(operation) => {
+                let tx = self.tx.clone();
+                let previous = std::mem::replace(&mut live.task, tokio::spawn(async {}));
+                // Join the finished worker inside its replacement task, not the
+                // scheduler: it may have sent its outcome just before returning.
+                live.task = tokio::spawn(async move {
+                    let result = async {
+                        previous.await.context("joining completed agent task")?;
+                        operation.record().await
+                    }
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                    let _ = tx.send((id, Update::Snapshotted(result))).await;
+                });
+            }
+            Err(detail) => {
+                live.status.run.snapshot = SnapshotState::Failed { detail };
+                live.status.run.state = RunState::Completed;
+                live.dirty = true;
+            }
+        }
         Ok(())
     }
 
@@ -387,16 +445,33 @@ impl Runs {
             .count()
     }
 
-    pub(crate) async fn shutdown(&mut self, storage: &mut Storage) -> anyhow::Result<()> {
+    pub(crate) fn cancel_all(&mut self) {
         for live in self.live.values() {
             live.cancel.send_replace(true);
         }
+    }
+
+    pub(crate) async fn shutdown(&mut self, storage: &mut Storage) -> anyhow::Result<()> {
+        for live in self.live.values_mut() {
+            live.cancel.send_replace(true);
+            // Also retry a write that failed while leaving the serving loop.
+            // Native snapshot recording is only scheduled after its preparation
+            // write succeeds; snapshot_pending remains set until that acknowledgement.
+            live.dirty = true;
+        }
         // Workers send their final outcome only after stopping and reaping their process.
-        while self
-            .live
-            .values()
-            .any(|live| !terminal(&live.status.run.state))
-        {
+        loop {
+            while let Some(write) = self.next_write() {
+                let persisted = write.persist(storage).await?;
+                self.persisted(persisted)?;
+            }
+            if self
+                .live
+                .values()
+                .all(|live| terminal(&live.status.run.state))
+            {
+                break;
+            }
             // Snapshotting is non-cancellable once cleanup has finished. Keep
             // locks and reservations until its bounded native operation settles.
             let wait = if self
@@ -412,7 +487,7 @@ impl Runs {
                 .await
                 .context("agent shutdown timed out; reservations retained")?
                 .context("agent update channel closed")?;
-            self.apply(id, update, storage).await?;
+            self.apply(id, update)?;
         }
         for live in self.live.values_mut() {
             (&mut live.task).await.context("joining agent task")?;

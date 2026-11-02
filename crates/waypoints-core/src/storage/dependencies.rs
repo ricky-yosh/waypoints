@@ -3,8 +3,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
-use anyhow::Context;
-
 use super::{Connection, Storage, StorageError, WorkflowGraph, decode_node, decode_workflow};
 use crate::jj::{self, ChangeState, Revision};
 use crate::workflow::{GraphConnectivity, NodeParent};
@@ -185,7 +183,7 @@ pub(super) async fn load_graph(
     let row = rows
         .next()
         .await?
-        .with_context(|| format!("workflow {workflow_id} not found"))?;
+        .ok_or(super::StorageFailure::MissingWorkflow { workflow_id })?;
     let workflow = decode_workflow(&row)?;
     drop(rows);
     let mut rows = connection

@@ -12,6 +12,8 @@ use waypoints_core::storage::{
 use waypoints_core::workflow::{BaseSource, GraphConnectivity, NodeParent};
 use waypoints_core::workspace::WorkspaceState;
 
+#[path = "jj/discovery.rs"]
+mod discovery;
 #[path = "jj/multiple_parents.rs"]
 mod multiple_parents;
 #[path = "jj/planning.rs"]
@@ -24,6 +26,8 @@ mod revisions;
 mod upstream;
 #[path = "jj/workspace_deletion.rs"]
 mod workspace_deletion;
+#[path = "jj/workspace_update.rs"]
+mod workspace_update;
 
 struct Repository {
     directory: TempDir,

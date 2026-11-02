@@ -13,12 +13,135 @@ pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const MAX_FRAME: usize = 1024 * 1024;
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 
+/// A remote JSON-RPC failure, preserving unknown and legacy server details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpcError {
+    code: i32,
+    message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+}
+
+impl RpcError {
+    pub(crate) fn new(code: i32, message: String) -> Self {
+        Self {
+            code,
+            message,
+            data: None,
+        }
+    }
+
+    pub(crate) fn busy() -> Self {
+        Self {
+            code: -32001,
+            message: "backend storage operation in progress; request was not started".to_owned(),
+            data: Some(serde_json::json!({"kind":"backend_busy"})),
+        }
+    }
+
+    /// Whether the backend explicitly rejected this request before starting it.
+    ///
+    /// This is not a transport timeout and does not describe requests whose
+    /// response was lost after execution started.
+    pub fn is_busy(&self) -> bool {
+        self.code == -32001
+            && self.data.as_ref().and_then(|data| data["kind"].as_str()) == Some("backend_busy")
+    }
+
+    /// The original JSON-RPC error code, including standard validation codes.
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+
+    /// The server's human-readable diagnostic; not a classification API.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The original optional data, including unknown future server schemas.
+    pub fn data(&self) -> Option<&serde_json::Value> {
+        self.data.as_ref()
+    }
+
+    /// Decodes only recognized explicit storage refusals, never English messages.
+    pub fn failure(&self) -> Option<waypoints_core::storage::StorageFailure> {
+        if self.code != -32000 {
+            return None;
+        }
+        serde_json::from_value(self.data.as_ref()?.clone()).ok()
+    }
+
+    pub(crate) fn from_cause(cause: impl Into<anyhow::Error>) -> Self {
+        let cause = cause.into();
+        let failure = cause
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<waypoints_core::storage::StorageFailure>());
+        Self {
+            code: -32000,
+            message: format!("{cause:#}"),
+            data: failure.map(|failure| serde_json::json!(failure)),
+        }
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Retain the CLI's existing JSON-quoted remote message presentation.
+        write!(
+            formatter,
+            "backend error {}: {}",
+            self.code,
+            serde_json::json!(self.message)
+        )
+    }
+}
+
+impl std::error::Error for RpcError {}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use waypoints_core::storage::StorageFailure;
+
+    #[test]
+    fn remote_errors_preserve_legacy_and_unknown_data_without_guessing_categories()
+    -> anyhow::Result<()> {
+        for data in [
+            None,
+            Some(serde_json::json!({"kind":"future_failure","detail":[1,2]})),
+        ] {
+            let mut value =
+                serde_json::json!({"code":-32000,"message":"node is reserved by run 7"});
+            if let Some(data) = &data {
+                value["data"] = data.clone();
+            }
+            let error: RpcError = serde_json::from_value(value.clone())?;
+            assert_eq!(error.data(), data.as_ref());
+            assert!(error.failure().is_none(), "diagnostics must not be parsed");
+            assert!(!error.is_busy());
+            assert_eq!(serde_json::to_value(error)?, value);
+        }
+        let cause = anyhow::Error::new(StorageFailure::MissingRun { run_id: 7 })
+            .context("while inspecting");
+        let error = RpcError::from_cause(cause);
+        assert_eq!(
+            error.failure(),
+            Some(StorageFailure::MissingRun { run_id: 7 })
+        );
+        let error = RpcError::busy();
+        assert!(error.is_busy());
+        assert!(error.failure().is_none());
+        Ok(())
+    }
+}
+
 // Native work and full-graph verification have bounded longer deadlines.
 // Ordinary requests keep their short deadline.
 pub(crate) fn request_timeout(method: &str) -> Duration {
     if matches!(
         method,
         "node.workspace.create"
+            | "node.workspace.update_stale"
             | "node.reparent"
             | "node.delete"
             | "node.operation_recovery"

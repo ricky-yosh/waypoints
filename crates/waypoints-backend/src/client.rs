@@ -212,6 +212,22 @@ impl Client {
         .await
     }
 
+    /// Inspects an existing project's local bookmark choices without selecting a base.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid projects, native query failures, or transport failures.
+    pub async fn inspect_repository(
+        &self,
+        project: &Path,
+    ) -> Result<waypoints_core::repository::RepositoryInspection, BackendError> {
+        let project = project
+            .canonicalize()
+            .context("resolving project directory")?;
+        self.call("repository.inspect", json!({"project_path": project}))
+            .await
+    }
+
     /// Creates a workflow through the backend.
     ///
     /// # Errors
@@ -638,6 +654,25 @@ impl Client {
     ) -> Result<NodeWorkspace, BackendError> {
         self.call(
             "node.workspace.status",
+            json!({"workflow_id": workflow_id, "node_id": node_id}),
+        )
+        .await
+    }
+
+    /// Explicitly updates a stale dedicated checkout; fresh checkouts are a readonly no-op.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsafe/busy/mismatched/incomplete allocations and unresolved native
+    /// operations. Failure may follow file changes; never replay automatically.
+    /// Inspect workspace status and native files before explicit verification.
+    pub async fn update_stale_node_workspace(
+        &self,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<waypoints_core::workspace::WorkspaceUpdate, BackendError> {
+        self.call(
+            "node.workspace.update_stale",
             json!({"workflow_id": workflow_id, "node_id": node_id}),
         )
         .await
@@ -1098,14 +1133,31 @@ impl Client {
         method: &str,
         params: Value,
     ) -> Result<T, BackendError> {
-        Ok(timeout(crate::protocol::request_timeout(method), async {
-            let stream = UnixStream::connect(&self.config.socket)
-                .await
-                .context("connecting to backend")?;
-            exchange(stream, method, params).await
-        })
-        .await
-        .context("backend request timed out")??)
+        let deadline = Instant::now() + crate::protocol::request_timeout(method);
+        // Only an explicit negative acknowledgement proves no operation started.
+        // Lost responses, transport failures, and other domain errors are never retried.
+        let delay = std::time::Duration::from_millis(50);
+        loop {
+            let result = timeout_at(deadline, async {
+                let stream = UnixStream::connect(&self.config.socket)
+                    .await
+                    .context("connecting to backend")?;
+                exchange(stream, method, params.clone()).await
+            })
+            .await
+            .context("backend request timed out")?;
+            match result {
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::RpcError>()
+                        .is_some_and(crate::RpcError::is_busy)
+                        && Instant::now() + delay < deadline =>
+                {
+                    sleep(delay).await;
+                }
+                result => return Ok(result?),
+            }
+        }
     }
 }
 
@@ -1140,7 +1192,9 @@ async fn exchange<T: DeserializeOwned>(
             "invalid backend response"
         );
         if let Some(error) = response.get("error") {
-            anyhow::bail!("backend error {}: {}", error["code"], error["message"]);
+            return Err(serde_json::from_value::<crate::RpcError>(error.clone())
+                .context("decoding backend error")?
+                .into());
         }
         serde_json::from_value(
             response

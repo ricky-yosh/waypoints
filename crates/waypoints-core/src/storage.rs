@@ -130,6 +130,55 @@ pub struct StorageError {
     inner: anyhow::Error,
 }
 
+/// Explicit actionable storage refusals; other failures retain their diagnostic causes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StorageFailure {
+    /// No workflow with this database-local identifier exists.
+    MissingWorkflow { workflow_id: i64 },
+    /// No visible node with this identifier belongs to the requested workflow.
+    MissingNode { workflow_id: i64, node_id: i64 },
+    /// No saved run with this database-local identifier exists.
+    MissingRun { run_id: i64 },
+    /// A run still reserves this node, including interrupted runs.
+    NodeBusy { node_id: i64, run_id: i64 },
+    /// A required workspace is absent or its allocation is not acknowledged ready.
+    WorkspaceNotReady { node_id: i64 },
+}
+
+impl fmt::Display for StorageFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingWorkflow { workflow_id } => {
+                write!(formatter, "workflow {workflow_id} not found")
+            }
+            Self::MissingNode {
+                workflow_id,
+                node_id,
+            } => write!(
+                formatter,
+                "node {node_id} not found in workflow {workflow_id}"
+            ),
+            Self::MissingRun { .. } => formatter.write_str("run not found"),
+            Self::NodeBusy { run_id, .. } => write!(
+                formatter,
+                "node is reserved by run {run_id}; inspect its status first"
+            ),
+            Self::WorkspaceNotReady { .. } => formatter.write_str("workspace is not ready"),
+        }
+    }
+}
+
+impl Error for StorageFailure {}
+
+impl StorageError {
+    /// Returns an explicit refusal, even when wrapped in diagnostic context.
+    pub fn failure(&self) -> Option<&StorageFailure> {
+        self.inner.downcast_ref()
+    }
+}
+
 impl fmt::Display for StorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.inner.fmt(formatter)
@@ -145,6 +194,14 @@ impl Error for StorageError {
 impl From<anyhow::Error> for StorageError {
     fn from(inner: anyhow::Error) -> Self {
         Self { inner }
+    }
+}
+
+impl From<StorageFailure> for StorageError {
+    fn from(failure: StorageFailure) -> Self {
+        Self {
+            inner: failure.into(),
+        }
     }
 }
 
@@ -425,11 +482,14 @@ impl Storage {
             )
             .await
             .context("querying node")?;
-        let row = rows
-            .next()
-            .await
-            .context("reading node row")?
-            .with_context(|| format!("node {node_id} not found in workflow {workflow_id}"))?;
+        let row =
+            rows.next()
+                .await
+                .context("reading node row")?
+                .ok_or(StorageFailure::MissingNode {
+                    workflow_id,
+                    node_id,
+                })?;
         Ok(decode_node(&row)?)
     }
 

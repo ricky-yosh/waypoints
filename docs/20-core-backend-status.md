@@ -35,6 +35,10 @@ work merely by appearing in a document.
 |---|---|---|
 | Persistent workflows and prompt graphs | Canonical project-folder selection; multiple workflows; undoable renaming; no separate project registry | [Backend/CLI](11-backend-cli.md), [renaming](14-workflow-history.md#workflow-renaming) |
 | Workflow archive/unarchive | Reversible persistent list visibility; active list by default, archived/all filters; no deletion, execution gate, jj/file changes, or Undo/Redo changes | [Archiving](11-backend-cli.md#archive-and-unarchive) |
+| Repository/base discovery | Canonical project/workspace paths and operation-pinned local bookmarks with complete conflict/divergence facts; no guessed base or native writes | [Discovery](25-backend-frontend-readiness.md#repository-and-base-discovery) |
+| Explicit stale workspace update | Checked dedicated allocation, no active writers, durable incomplete reservation before native update; postflight verification, no blind replay or generic repair | [Workspace update](25-backend-frontend-readiness.md#explicit-stale-checkout-update) |
+| Structured failures | Preserved remote code/message/data, small typed storage-refusal subset, distinct not-started scheduler busy response and generic fallback | [Errors](25-backend-frontend-readiness.md#structured-errors) |
+| Responsive live run controls | One storage lane with bounded independent socket framing and live control/update handling; durable writes may lag, native mutations still serialized | [Scheduling](25-backend-frontend-readiness.md#scheduling-and-run-controls) |
 | Fixed workflow bases | Explicit local bookmark or revision, resolved once; omitting a selector still creates an unbased legacy workflow | [Workflow bases](16-workflow-bases.md) |
 | Rooted node creation | New based-workflow nodes explicitly attach to the base or one or more upstream nodes; prompt creation does not create code | [Rooted nodes](17-rooted-node-dependencies.md) |
 | Native association and change creation | Unique native changes; based nodes require matching parents; one or more upstream nodes can create clean or conflicted native merges | [Backend/CLI](11-backend-cli.md#associate-a-node-with-an-existing-jj-change), [combining work](17-rooted-node-dependencies.md#combining-parallel-work) |
@@ -55,8 +59,8 @@ work merely by appearing in a document.
 | Native deletion with retained folders | Abandon one native change, reconnect children, deregister its ready matching saved workspace while retaining every file and historical record; explicit resume for partial abandonment | [Deletion](19-native-node-deletion.md) |
 | Interrupted dependency-operation recovery | Resolve clearly applied/unapplied reparent or delete without repeating jj; ambiguous states remain blocked | [Shared recovery](18-native-reparenting.md#explicit-recovery-for-clear-outcomes), [deletion recovery](19-native-node-deletion.md#shared-safety-and-recovery) |
 
-The local backend runs on macOS/Linux, owns the database, and serializes requests
-and metadata writes. It is selected by database/socket configuration, not
+The local backend runs on macOS/Linux, owns the database, and serializes storage
+operations and metadata writes while allowing live run controls through. It is selected by database/socket configuration, not
 automatically one process per repository. One database can contain workflows for
 multiple project folders. Clients never open the store directly.
 
@@ -99,7 +103,7 @@ upstream hint remain unchanged.
 | Base and project/workflow management | Explicit base updates, whether new workflows should require/default a base, project registration, and broader workflow management |
 | Review and execution policy | Human review gates distinct from tool permissions; context handoff between phases; additional agent configuration/capability support |
 | Operational durability and portability | A documented backup/restore workflow, broader schema/history upgrade and downgrade policy beyond the targeted restore-journal migration, repository relocation/replacement, and whether portable workflow import/export is wanted |
-| Control responsiveness | Whether serialized long native operations delaying cancellation/permission requests is acceptable, or requires a different scheduling design |
+| Control scalability | Live controls now bypass storage; broader read concurrency, admission under heavy load, and durable state write latency remain bounded-design tradeoffs |
 | GUI | Backend integration and product UI remain pending; GUI work must not introduce a separate workflow engine |
 
 No MCP adapter, custom agent loop, transcript archive, or durable notification
@@ -133,5 +137,6 @@ the same pending request can start successfully when a previously unavailable
 ownership lock is released. Clients retry only a starter's explicit lock-contention
 exit status, within the original deadline; see [lifecycle](11-backend-cli.md#lifecycle).
 This closes the reproduced handoff gap, not proof that every previously observed
-intermittent restart failure had that cause. Serialized native requests can also
-delay run controls; this is a documented limit, not a general concurrency guarantee.
+intermittent restart failure had that cause. Live controls now bypass serialized
+native requests; that does not permit concurrent native/storage mutations or
+guarantee responsiveness under saturated admission.

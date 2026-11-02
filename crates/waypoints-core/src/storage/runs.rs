@@ -242,7 +242,10 @@ impl Storage {
             let mut rows = connection
                 .query("SELECT record, active FROM agent_runs WHERE id = ?1", [id])
                 .await?;
-            let row = rows.next().await?.context("run not found")?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(super::StorageFailure::MissingRun { run_id: id })?;
             let record: String = row.get(0)?;
             let active: i64 = row.get(1)?;
             drop(rows);
@@ -313,7 +316,10 @@ impl Storage {
             let mut rows = connection
                 .query("SELECT id, record FROM agent_runs WHERE id = ?1", [id])
                 .await?;
-            let row = rows.next().await?.context("run not found")?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(super::StorageFailure::MissingRun { run_id: id })?;
             let mut run: Run = serde_json::from_str(&row.get::<String>(1)?)?;
             run.id = row.get(0)?;
             Ok::<_, anyhow::Error>(run)
@@ -457,9 +463,11 @@ impl Storage {
             .context("checking node reservation")?;
         if let Some(row) = rows.next().await.context("checking active run")? {
             let id: i64 = row.get(0).context("reading active run identifier")?;
-            return Err(
-                anyhow::anyhow!("node is reserved by run {id}; inspect its status first").into(),
-            );
+            return Err(anyhow::Error::new(super::StorageFailure::NodeBusy {
+                node_id,
+                run_id: id,
+            })
+            .into());
         }
         Ok(())
     }

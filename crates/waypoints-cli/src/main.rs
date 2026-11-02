@@ -39,6 +39,11 @@ struct Args {
 enum Command {
     /// Run the backend in the foreground (normally started automatically).
     Serve,
+    /// Inspect existing repositories without selecting a base or changing native state.
+    Repository {
+        #[command(subcommand)]
+        command: RepositoryCommand,
+    },
     /// Create, list, or inspect saved workflows.
     Workflow {
         #[command(subcommand)]
@@ -68,6 +73,15 @@ enum Command {
     Run {
         #[command(subcommand)]
         command: RunCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepositoryCommand {
+    /// Discover the canonical project, jj workspace root, and local bookmark targets.
+    Inspect {
+        #[arg(long)]
+        project: PathBuf,
     },
 }
 
@@ -459,6 +473,13 @@ enum NodeCommand {
 
 #[derive(Subcommand)]
 enum WorkspaceCommand {
+    /// Explicitly update a stale dedicated checkout with native jj; never switch or recreate it.
+    UpdateStale {
+        #[arg(long)]
+        workflow: i64,
+        #[arg(long)]
+        node: i64,
+    },
     /// Verify checkout completion and mark a saved allocation ready; never alter files or jj history.
     Verify {
         #[arg(long)]
@@ -539,6 +560,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let config = Config::new(&database, &socket)?;
     match args.command {
         Command::Serve => waypoints_backend::serve(&config).await?,
+        Command::Repository {
+            command: RepositoryCommand::Inspect { project },
+        } => {
+            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let inspection = client.inspect_repository(&project).await?;
+            println!(
+                "{}",
+                if args.json {
+                    serde_json::to_string(&inspection)?
+                } else {
+                    serde_json::to_string_pretty(&inspection)?
+                }
+            );
+        }
         Command::Run { command } => {
             // Explicit starts/continuations and durable queries may launch the backend.
             // Live controls must not conceal a restart.
@@ -833,6 +868,16 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
             match command {
                 NodeCommand::Workspace { command } => {
+                    if let WorkspaceCommand::UpdateStale { workflow, node } = command {
+                        let result = client.update_stale_node_workspace(workflow, node).await?;
+                        if args.json {
+                            println!("{}", serde_json::to_string(&result)?);
+                        } else {
+                            println!("Workspace update: {:?}", result.outcome);
+                            print_node_workspace(result.workspace, false)?;
+                        }
+                        return Ok(());
+                    }
                     let value = match command {
                         WorkspaceCommand::Create {
                             workflow,
@@ -850,6 +895,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         WorkspaceCommand::Status { workflow, node } => {
                             client.node_workspace(workflow, node).await?
                         }
+                        WorkspaceCommand::UpdateStale { .. } => unreachable!("handled above"),
                     };
                     print_node_workspace(value, args.json)?;
                 }

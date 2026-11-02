@@ -303,10 +303,12 @@ Do not delete files, replay prompts, or silently assume a workspace is safe.
 Processes that detach from the adapter's process group are outside the cleanup
 guarantee and must also be considered during manual process inspection.
 
-Ordinary requests remain serialized. A different slow native operation or slow
-socket client can still delay control requests. This checkpoint removes the
-agent's entire execution time from the request handler; it does not promise
-general concurrency for all native/storage operations.
+Storage work remains serialized, but live status/events/cancellation/permission
+requests and worker updates bypass that lane. Slow individual socket clients
+use bounded framing tasks rather than owning dispatch. Metadata writes can lag
+live controls; saved reservations remain conservative, and successful completion
+is exposed only after its metadata write. This is not general concurrent native
+mutation support. See [scheduling and limits](25-backend-frontend-readiness.md#scheduling-and-run-controls).
 
 ## Recovering interrupted runs
 

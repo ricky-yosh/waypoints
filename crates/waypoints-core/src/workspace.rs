@@ -55,3 +55,24 @@ pub struct NodeWorkspace {
     /// Current state; repository access failures are returned as errors.
     pub state: WorkspaceState,
 }
+
+/// Whether an explicit stale-checkout update invoked native jj.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkspaceUpdateOutcome {
+    /// The checkout already matched; no snapshot or native mutation was performed.
+    AlreadyFresh,
+    /// Native jj updated the checkout and postflight verified its identity and freshness.
+    Updated,
+}
+
+/// A checked explicit update result, not permission to continue pre-restore sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WorkspaceUpdate {
+    /// Whether native update-stale was needed.
+    pub outcome: WorkspaceUpdateOutcome,
+    /// The saved allocation and verified current revision after the request.
+    pub workspace: NodeWorkspace,
+}
