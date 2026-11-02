@@ -85,7 +85,9 @@ selection to make it fit. A change owned by a based node cannot also be assigned
 to another node, including through a legacy workflow.
 
 These are creation/association checks, not continuous monitoring of external jj
-edits. General ancestry reconciliation and downstream staleness are still pending.
+edits. General ancestry reconciliation remains unimplemented.
+[V1 reflects native changes/conflicts](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness),
+not inferred downstream-context validity.
 
 ## Combining parallel work
 

@@ -30,8 +30,8 @@ background server's working directory.
 
 For based workflows, use the [rooted node flow](17-rooted-node-dependencies.md):
 `node create --from-base` or `--parent NODE_ID`, then `node create-change` from
-that saved dependency. The metadata-only connection examples below remain the
-**legacy unbased** flow, not a way to bypass native dependency editing.
+that saved dependency. The examples below continue the based-workflow quick start.
+Legacy metadata-only connections are a separate compatibility path.
 
 To move existing native work, use `node reparent --workflow ID --node ID
 --parent UPSTREAM_ID --accept-undo-boundary` (or `--from-base`).
@@ -66,32 +66,36 @@ Nodes contain saved prompts, with optional explicit associations to existing jj 
 They do not store agent conversations.
 In based workflows, attachments represent native code dependencies; checked
 reparent/delete operations change jj ancestry. Connections never automatically
-execute work. The examples below are specifically for **legacy unbased**
-metadata-only connections. All commands use the backend, never the database directly.
+execute work. Creating a prompt and its initial attachments is metadata-only;
+creating its code is a separate explicit action. All commands use the backend,
+never the database directly.
 
 First create or list workflows to find the workflow ID. For a new empty database
 the first workflow has ID 1; use the actual IDs returned by your commands.
 
 ```sh
-cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Interfaces + placeholders"
-cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Authentication"
-cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Image uploading"
-cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Settings"
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Interfaces + placeholders" --from-base
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Authentication" --parent 1
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Image uploading" --parent 1
+cargo run -p waypoints-cli -- node create --workflow 1 --prompt "Settings" --parent 1
 ```
 
 Using the returned node IDs (1–4 in a new database):
 
 ```sh
-cargo run -p waypoints-cli -- connection create --workflow 1 --source 1 --target 2
-cargo run -p waypoints-cli -- connection create --workflow 1 --source 1 --target 3
-cargo run -p waypoints-cli -- connection create --workflow 1 --source 1 --target 4
 cargo run -p waypoints-cli -- node update --workflow 1 --node 2 --prompt "Implement authentication and tests"
 cargo run -p waypoints-cli -- node get --workflow 1 --node 2 --json
 cargo run -p waypoints-cli -- workflow graph --workflow 1 --json
 ```
 
+For legacy planning-only graphs, create a workflow without base flags, create
+nodes without dependency flags, and use `connection create --workflow ID
+--source SOURCE_ID --target TARGET_ID`. That command is refused in based workflows;
+it never rebases code or replaces the rooted creation/reparent paths.
+
 Graph JSON contains `workflow`, `nodes`, `connections`, `base_nodes`, and
-`connectivity` (`unbased`, `rooted`, or `needs_adoption`). Nodes are ordered by
+tagged `connectivity` (for example `{"status":"rooted"}`; other statuses are
+`unbased` and `needs_adoption`). Nodes are ordered by
 ID; connections by source then target ID. Node IDs are database-local and stable
 when prompts are edited. Prompts are preserved verbatim, but blank/whitespace-only
 prompts are rejected. Missing workflows/nodes, cross-workflow links, self-links,
@@ -143,8 +147,9 @@ additive methods; an older running backend reports "method not found" for them.
 ## Associate a node with an existing jj change
 
 These commands require `jj` on the **backend's PATH**. Tested with jj 0.46.0;
-older versions need the `json()` template function, `change_id()` revset function,
-and the global flags used below. Basic workflows and graphs do not require jj.
+compatibility with other versions is not established merely by the presence of
+`json()`, `change_id()`, or similarly named flags. Legacy metadata-only workflows
+and graph edits do not require jj.
 The workflow's project directory must be inside an existing jj workspace.
 
 First inspect change IDs in that project, without snapshotting dirty files:
@@ -201,8 +206,9 @@ return an error. The owning process is terminated on timeout.
 
 Associations survive backend restarts. Neither association nor refresh creates
 changes. Explicit change and workspace creation are described below.
-General existing-checkout switching/repair and
-downstream context-staleness tracking are not implemented.
+General existing-checkout switching/repair is not implemented.
+Inferred downstream-context-staleness tracking is outside
+[v1 scope](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness).
 [Agent execution and saved-session continuation](13-agent-run-lifecycle.md) are
 implemented; [saved-result restoration](21-saved-result-restoration.md) separately
 restores old code within the same leaf node/change and requires a fresh session.
@@ -294,9 +300,11 @@ change parents, launch an agent, or rewind conversation history. Start a fresh
 run afterwards; all earlier sessions on that node are barred from continuation.
 Exact-commit selection requires a full lowercase commit ID and the node's own
 change ID; related-change squash entries remain preview-only. Direct selections
-have null `run_id` and never create fake runs. The initial version requires a ready exclusive workspace, unchanged parent
+have null `run_id` and never create fake runs. The ordinary `run restore` and
+`node restore` paths require a ready exclusive workspace, unchanged parent
 commits, no saved/native descendants, and no active/interrupted runs in the
-database. See [restoration](21-saved-result-restoration.md) for preservation,
+database; the separately confirmed downstream path has its own scope above.
+See [restoration](21-saved-result-restoration.md) for preservation,
 durable uncertainty, explicit `run recover-restore`, and retention limits.
 
 ## Create a change for an unassociated node
@@ -456,9 +464,11 @@ jj --ignore-working-copy --at-op=@ workspace list
 jj --ignore-working-copy --at-op=@ op log
 ```
 
-Native recovery is manual in this slice. No automatic repair, forget, replace,
-or deletion command is implemented. A completed checkout can be acknowledged
+Recovery of an incomplete allocation is manual. Repeating allocation does not
+repair, forget, replace or delete it; a completed checkout can be acknowledged
 with the explicit verification command below, including after manual native repairs.
+This is distinct from [native node deletion](19-native-node-deletion.md), which
+can deregister an already-ready saved workspace while retaining its folder.
 
 Workspace creation has a 110-second total allocation deadline and a 60-second
 limit per mutation subprocess, with the same 1 MiB per-stream output bound.
@@ -650,7 +660,7 @@ Methods:
 | `run.start` | `{workflow_id, node_id, executable}` | `{run, permission}`; returns before ACP initialization finishes |
 | `run.continue` | `{run_id, prompt}` | New `{run, permission}` loading the selected stopped run's saved session; no fresh fallback |
 | `run.list` | `{workflow_id, node_id}` | Array of run statuses ordered by ID, including historical runs for deleted nodes |
-| `run.status` | `{run_id}` | `{run, permission}` including any pending live approval |
+| `run.status` | `{run_id}` | `{run, permission}` including any pending live tool-permission request |
 | `run.inputs` | `{run_id}` | Read-only direct upstream comparison: `unchanged`, `changed`, or `unknown` with `detail` |
 | `run.recovery` | `{run_id}` | `{run, workspace}`; read-only recovery checks, not process-exit proof |
 | `run.recover` | `{run_id, confirmation: "processes_stopped"}` | `{run, permission}`; explicitly recovered reservation after fresh checks |
@@ -727,6 +737,8 @@ not full context-staleness tracking. Human-readable `run status` shows it;
 the existing `run.status` JSON response shape. Capture and comparison never change
 agent context or run eligibility.
 
-The visual revision picker, broader cross-workflow/unmanaged restoration, full context staleness,
-workspace cleanup, editing native merge-parent sets, broader reconciliation, and operational/product decisions
-remain discussion items, not features authorized by this reference.
+The visual revision picker, broader cross-workflow/unmanaged restoration,
+workspace folder cleanup, editing native merge-parent sets, broader reconciliation,
+and operational/product decisions remain discussion items, not features authorized
+by this reference. General inferred-context-staleness tracking is not a v1
+requirement; this does not relax native validation or existing session barriers.

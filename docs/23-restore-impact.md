@@ -52,7 +52,7 @@ Build API                source change
 | `changes` | Source plus all visible native descendants, with exact code-parent IDs, existing conflict flags, immutable flags, and owning saved node IDs |
 | `tasks` | Source, native-owned tasks across workflows sharing this repository, and transitive saved-graph descendants of all those tasks |
 | `workspaces` | Native workspaces whose recorded commit is in `changes`, including unmanaged workspaces; physical metadata is `current_recorded`, `stale`, or explicitly `unknown` |
-| `sessions` | Historical runs grouped by task/session ID; null means no session was established or persisted. `source_node` distinguishes the source's existing fresh-session-on-apply rule from potential downstream context staleness |
+| `sessions` | Historical runs grouped by task/session ID; null means no session was established or persisted. `source_node` identifies source versus downstream references, not reasoning freshness; checked application bars all old affected sessions |
 | `active_run_ids` | All database-wide active/interrupted run reservations, including unrelated work |
 | `observed_blockers` | Known parent/workspace/immutability/downstream/run/reservation obstacles; not an exhaustive apply preflight |
 | `notes` | Limits that must remain visible when presenting or interpreting the report |
@@ -92,7 +92,8 @@ not silently adopted into the selected workflow.
 - Session references do not prove causal inputs, actual reasoning freshness,
   harness retention, or continuation eligibility. Applying existing leaf
   restore requires a fresh session on the source; checked downstream application
-  bars all pre-existing affected sessions. Broader context policy remains undecided.
+  bars all pre-existing affected sessions.
+  [V1 does not infer context staleness](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness).
   Preview never changes or resumes any session.
 - Active runs and unresolved restore/dependency reservations are surfaced when
   the source remains readable; they do not hide the report behind a mutation
@@ -101,8 +102,8 @@ not silently adopted into the selected workflow.
 - [Ordinary restore](21-saved-result-restoration.md) still refuses saved/native
   descendants. [Explicit checked application](24-downstream-restoration.md) now
   supports a native-aligned same-workflow subtree. Cross-workflow/unmanaged
-  reconciliation, automatic conflict/workspace repair and general context policy
-  remain separate work.
+  reconciliation and automatic conflict/workspace repair remain outside this
+  application scope; general context tracking is not a v1 requirement.
 
 ## Validation
 
@@ -132,4 +133,6 @@ graph, files and empty restore journal stayed unchanged; no agent run was
 created. The fixture backend was stopped afterwards.
 
 Editing workspace paths in this evidence were turn-local scratch directories,
-not durable/reusable workspaces. No GUI or fresh real-Codex run was exercised.
+not durable/reusable workspaces. This initial preview-only smoke exercised no
+agent or GUI; subsequent [real-Codex acceptance](24-downstream-restoration.md#manual-real-codex-acceptance)
+validated preview together with confirmed downstream application and fresh sessions.

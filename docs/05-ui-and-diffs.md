@@ -1,19 +1,24 @@
 # UI and diff viewing
 
+This is a future UI sketch, not an implemented screen inventory or an ordered
+roadmap. The app crate is a placeholder. The GUI must use the shared backend;
+see [current scope](20-core-backend-status.md) and the
+[native-feedback decision](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness).
+
 ## Views
 
 - **Plan blocks:** phases made of points, edited as a document.
-- **Node canvas:** the phase graph with stale and conflict marks, version stacks per node. This is the hardest part (GPUI has no React Flow equivalent) and the least needed to prove the idea; build it last.
+- **Node canvas:** the workflow graph reflecting native revisions and conflict flags, with revision history inside each node rather than extra revision nodes. No inferred-context-staleness marks or gates for v1.
 - **Phase view:** markdown notes and diffs for the selected phase.
 - **Run stream:** live agent output for running phases (watching it is a core value).
 
 ## Seeing code introduced by each phase, without a multibuffer
 
-1. **While a phase runs:** ACP edit tool calls carry diff content. Show a small card under the phase: file name, +N/-M, click to expand.
-2. **After a phase:** ask jj for the diff of that change. Show the file list in the phase block; expanding a file shows hunks as read-only colored text.
-3. **Deep review:** do not rebuild it. Offer "Open in Zed" on the phase's workspace, or an external diff tool via `jj diff --tool`. Check what the author uses for reviewing agent code today and target that first.
+1. **While a phase runs:** ACP edit tool calls can carry proposed diff content, but shell edits may have none. Distinguish proposals/replayed events from completed work and show stream gaps; do not treat events as authoritative file state.
+2. **After a phase:** use backend review of its exact saved revision, or explicitly select the current recorded revision. These may differ. Native jj supplies the summary/patch; the GUI must not snapshot or independently invoke jj for review.
+3. **Deep review:** editor handoff remains to be designed and validated. Zed or a native external diff tool is a candidate, not an implemented command or fixed requirement. Do not build a custom multibuffer.
 
 ## Components
 
-- Use `gpui-component` for Markdown rendering and read-only code or diff text (it has Markdown and simple HTML rendering, a code editor with Tree-sitter highlighting, dock layout, virtualized tables and lists, charts, and 60+ components).
+- Use the selected `gpui-kit` dependency and its component layer. Consult the installed design/coding guides and verify APIs against the pinned version before choosing Markdown or read-only diff components.
 - Avoid depending on Zed's internal editor crates; they are probably not meant to be embedded and may break between versions (not verified).

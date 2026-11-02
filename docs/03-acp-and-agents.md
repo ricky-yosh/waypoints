@@ -1,24 +1,38 @@
 # ACP and agents
 
+This page explains the protocol and earlier adapter research. The
+[run lifecycle](13-agent-run-lifecycle.md) is the authoritative contract for
+implemented behavior; protocol capabilities below are not all Waypoints features.
+
 ## Which side is the tool?
 
-The app is the ACP **client** (the role editors like Zed play). It launches an agent as a subprocess and talks JSON-RPC 2.0 over stdin/stdout. It is not an ACP agent. An ACP agent is something an editor launches; this tool wants to do the launching, with its own canvas.
+The Waypoints backend is the ACP **client** (the role editors like Zed play).
+It launches an agent as a subprocess and talks JSON-RPC 2.0 over stdin/stdout.
+Neither the CLI nor the future GUI hosts a separate agent loop.
 
 ## Basic message flow
 
-- `initialize` (negotiate version and capabilities), `authenticate` if required.
+- `initialize` negotiates version and capabilities. Authentication belongs to
+  the agent; Waypoints currently requires existing authentication.
 - `session/new` (with a working directory) or a way to reuse a session.
 - `session/prompt` to send a prompt; the agent streams `session/update` notifications (message chunks, thought chunks, tool calls and updates, plans, mode changes).
-- The agent may call back: `session/request_permission`, file reads/writes, terminals.
+- The agent may request `session/request_permission`. The protocol also permits
+  client file/terminal callbacks, but Waypoints does not advertise or implement them.
 - `session/cancel` interrupts; the turn ends with a stop reason on the `session/prompt` response.
 
 ## Why ACP over headless CLI
 
-Headless CLI runs (for Claude Code: `claude -p`, `--output-format stream-json`, `--resume`, `--fork-session`) work, but unattended agents cannot ask permission mid-run, so people end up disabling permissions. The author also reported issues trying headless mode. ACP gives permission callbacks (the hook for approval gates), cancel, typed streaming events, and a long-lived session.
+ACP was selected for typed streaming, explicit tool-permission callbacks,
+cancellation, and capability-negotiated session loading. Waypoints does not add
+a second one-shot agent CLI path. Its own headless CLI controls the ACP-backed
+backend; it is not an alternative agent harness. Tool permissions are not human
+code-review gates.
 
 ## Agent support
 
-All of these go through ACP; some natively, some via adapters. This is a snapshot (late 2026) taken from the `acp-cli` registry; verify before depending on it.
+Earlier registry research found the following candidates. This is not a tested
+Waypoints support matrix or a promise about current package names, flags, or
+capabilities; verify them before adding another adapter.
 
 - **Native ACP:** Gemini CLI (`gemini --acp`), GitHub Copilot (`copilot --acp --stdio`), Cursor (`cursor-agent acp`), Goose (`goose acp`), Kiro (`kiro-cli-chat acp`), Kimi (`kimi acp`), Qwen Code (`qwen --acp`), Droid, OpenClaw, and newer entries such as iFlow, Qoder, Trae.
 - **Via adapter or launcher:** Claude (`@agentclientprotocol/claude-agent-acp`; older name `@zed-industries/claude-agent-acp` also appears), Codex (`@agentclientprotocol/codex-acp`; replaces `@zed-industries/codex-acp`), OpenCode, Kilocode, Pi.
@@ -32,23 +46,26 @@ to be installed. Keep the transport independent of the selected executable, but
 negotiate capabilities rather than assuming all agents behave identically.
 The [completed spike](12-codex-acp-spike.md) used a temporary client. The
 [backend lifecycle](13-agent-run-lifecycle.md) now implements background runs,
-controls, and explicit continuation. Its fresh-run path was manually validated
-with Codex; the subsequent manual continuation check was also reported successful.
-Automatic native snapshotting follows successful turns and passed the manual
-real-Codex acceptance check. Explicit interrupted-run recovery is fake-agent/native-jj
+controls, and explicit continuation. Fresh sessions, same-session follow-up,
+automatic snapshots, restoration and explicit fresh execution after restoration
+have [manual real-Codex acceptance](24-downstream-restoration.md#manual-real-codex-acceptance).
+Explicit interrupted-run recovery is fake-agent/native-jj
 tested; it never signals saved PIDs or automatically replays work.
 Do not add a temporary one-shot CLI path.
 
 ## Session reuse
 
-Reuse is optional per agent. Check capabilities at `initialize` (default is `loadSession: false`).
+Reuse is optional per agent. Check capabilities at `initialize` (default is
+`loadSession: false`). The following are protocol/research concepts, not a list
+of implemented Waypoints commands:
 
 - `session/load`: restores context and replays history to the client (handle replay so it is not drawn as new output).
 - `session/resume`: continues a session without replay; meant for agents that do not store full history.
 - `session/list`: lists sessions the agent knows.
 - `session/close`: cancels work and frees resources.
 - `session/fork`: unstable; behind a feature flag in the Rust crate and an unstable capability in the spec.
-- v2 direction: `list`, `resume`, `close` become required for agents that advertise sessions; replay folds into `resume`; fork stays optional.
+- Proposed protocol changes must be checked against the selected version;
+  Waypoints currently negotiates ACP version 1.
 
 The implemented `run continue` explicitly loads the same saved session in the
 same workspace after checking capability support. It never substitutes a fresh
@@ -69,4 +86,9 @@ ACP diff. Native jj is authoritative. Other adapters remain unverified.
 
 ## Permissions
 
-Use `session/request_permission` as the hook for approval gates. Combine with a separate jj workspace per phase so a bad run is easy to throw away.
+Waypoints exposes offered single-use tool decisions through
+`session/request_permission`; it never grants blanket approval implicitly.
+Workspaces isolate simultaneous code editing, not the agent's OS privileges.
+Permission enforcement depends on the trusted executable. Denial/cancellation
+does not discard partial files, and deleting a native node retains its folder.
+Human code-review approval is a separate, unimplemented capability.

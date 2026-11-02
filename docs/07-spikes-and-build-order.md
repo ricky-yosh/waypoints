@@ -16,14 +16,16 @@ completed research from validation still needed.
    abandonment, conflicts, and interrupted-operation recovery have executable
    coverage, including read-only current-node/saved-run diffs and native multi-parent
    creation with fake-agent execution, plus paginated native evolution and exact
-   previews. Editing merge-parent sets, a visual revision picker, and the
-   complete upstream-edit acceptance workflow remain incomplete. Editor handoff
-   behavior still needs validation.
+   previews. Clean leaf and checked API/login downstream restoration also have
+   real-Codex acceptance. Editing merge-parent sets, a visual picker, and broader
+   external-edit/reconciliation scenarios remain outside those checks. Editor
+   handoff behavior still needs validation.
 4. **Turso — persistence foundation implemented.** Reopen, additive upgrades,
    transactional metadata history, and injected SQL-failure tests exist. Backup/
    restore procedures and non-additive migration policy remain discussion items.
 
-Write down what you learn; it becomes the spec for the real core crate.
+Preserve each spike's observations and limits, but use the current feature
+contracts rather than an old research target as the implementation specification.
 
 ## Build order
 
@@ -61,11 +63,15 @@ every step is available today. Individual feature tests do not replace it.
   work, workspaces and sessions; it does not simulate conflicts or apply downstream
   changes. [Confirmed same-workflow application](24-downstream-restoration.md)
   now checkpoints edits and rebases checked descendants, with explicit fresh
-  sessions and manual stale-checkout reconciliation. A visual picker and broader
-  affected-work reconciliation remain incomplete.
+  sessions and manual stale-checkout reconciliation. The integrated clean
+  API/login restore flow passed [real-Codex acceptance](24-downstream-restoration.md#manual-real-codex-acceptance),
+  including old-session refusal, explicit fresh execution and backend restart.
+  A visual picker and broader affected-work reconciliation remain incomplete.
   Same-session `run continue` is not code restoration.
-- **Not yet complete:** edit upstream work and surface native ancestry mismatch,
-  stale physical checkouts, native conflicts, and stale agent context distinctly.
+- **Integration check still partial:** edit upstream work and reflect native jj
+  changes/conflicts while reporting stale physical checkouts separately. A general
+  agent-context-staleness detector is not required; users infer changed assumptions.
+  See the [v1 scope decision](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness).
 - Combine branch results through native multi-parent creation, with clean/conflicted
   two-/three-parent tests and fake-agent snapshot/review coverage. A disposable
   two-parent clean merge also passed [manual Codex acceptance](17-rooted-node-dependencies.md#manual-codex-acceptance).
@@ -79,7 +85,7 @@ No MCP adapter, transcript archive, or durable notification replay is required. 
 
 ## Open questions
 
-- How should the visual picker, downstream restoration and native retention limits be exposed beyond implemented browsing and same-change run/commit restoration?
+- How should the GUI expose revision browsing, ordinary/confirmed downstream restoration and native retention limits without implying permanent storage or automatic reruns?
 - Does the Claude ACP adapter emit diff content for edits?
 - Which agents in practice support resume, load, or fork, and does a session survive a change of working directory?
 - Does Zed show a phase's diff correctly in a colocated jj repo?
@@ -88,7 +94,7 @@ No MCP adapter, transcript archive, or durable notification replay is required. 
 
 ## Unverified claims to re-check
 
-- Exact `jj` flags and revsets listed in `04-jj-snapshots.md`.
-- Stability and package names of the Claude and Codex ACP adapters.
+- Compatibility with jj versions beyond the tested 0.46.0 and any new command paths; existing native paths have executable coverage, not blanket support for every version.
+- Other adapters and future Codex adapter versions; 2.5.0 has the documented manual checks.
 - Whether Zed's internal crates can be embedded.
 - Whether Proa supports service workers or PWA behavior (see `08-proa-and-web.md`).

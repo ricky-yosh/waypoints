@@ -29,7 +29,7 @@ CLI -----------+
 - **Shared operations:** both clients query and mutate workflows through the backend. It coordinates Waypoints-initiated writes and jj operations; jj remains the source of truth for native version-control state.
 - **Agent interface:** the CLI supports structured JSON output, noninteractive invocation, clear errors and exit codes, explicit project/workflow selection, and bounded event polling. A continuous terminal renderer is not implemented.
 - **Persistence:** save workflow prompts, links, and native-change associations so they survive restarts. Conversations and transcripts remain in the existing harness; do not store them in Waypoints.
-- **Updates:** current clients poll run status/events and fetch current saved state after reconnect. No subscriptions, durable notification log, or notification replay are required. Native refresh reports current/missing/divergent revisions and conflicts; general ancestry reconciliation and downstream context-staleness tracking are not implemented.
+- **Updates:** current clients poll run status/events and fetch current saved state after reconnect. No subscriptions, durable notification log, or notification replay are required. Native refresh reports current/missing/divergent revisions and conflicts, not a full ancestry assessment. General reconciliation is not implemented; inferred context-staleness tracking is outside v1 scope under the decision below.
 - **Human-paced execution:** a workflow connection does not automatically run the next phase.
 - **UI debugging is separate:** the native GPUI inspector helps develop the GUI. Agents do not need to click the GUI to perform workflow operations. Screenshots, when useful for visual verification, need not be stored persistently.
 
@@ -58,9 +58,10 @@ existing harnesses. See [acceptance and research](07-spikes-and-build-order.md).
 
 **Implemented for based workflows:** the graph represents native code dependencies
 rooted at a fixed saved base. Node creation attaches metadata atomically; later
-native creation uses that dependency. Checked reparenting and deletion without
-workspaces change jj and reconcile the graph with an acknowledged undo boundary.
-Workspace cleanup and broader reconciliation remain pending.
+native creation uses that dependency. Checked reparenting and deletion change jj
+and reconcile the graph with an acknowledged undo boundary. Deletion can
+deregister a ready saved workspace while retaining all its files. Filesystem
+cleanup and broader reconciliation remain pending.
 [The native dependency decision](15-native-dependency-editing.md) supersedes the
 planning-only model. Legacy unbased commands retain that older behavior; no old
 graph is silently adopted.
@@ -78,7 +79,7 @@ graph is silently adopted.
 
 Implement a small, project-owned undo/redo system rather than adopting a dedicated undo crate or generic command framework. Reuse the project's existing storage and serialization dependencies. The required customization is in workflow semantics and transactional persistence, not a general-purpose undo engine.
 
-- **Scope:** node creation with its initial attachment, prompt edits, and legacy unbased connection creation. Native reparenting and deletion establish an explicit undo boundary rather than becoming reversible metadata commands. Code changes, jj operations, agent execution, and conversations are outside this history; let jj handle code recovery.
+- **Scope:** workflow renaming, node creation with its initial attachments, prompt edits, legacy unbased connection creation, and eligible prompt-only move/delete. Native reparenting and deletion establish an explicit undo boundary rather than becoming reversible metadata commands. Code changes, jj operations, agent execution, and conversations are outside this history; let jj handle code recovery.
 - **Ownership:** one chronological history per canonical project folder, shared by clients and workflows in that folder. This does not automatically group different subfolders of one repository. The backend serializes edits, undo, and redo.
 - **Records:** represent supported edits as explicit, versioned data with enough before/after information to reverse and reapply them. Do not persist executable closures. Redo restores recorded values and identities rather than rerunning arbitrary side effects.
 - **Atomicity:** commit each workflow mutation and its history record/cursor update in the same database transaction. Undo and redo are transactional too; failures must not advance the cursor.
@@ -88,8 +89,8 @@ Implement a small, project-owned undo/redo system rather than adopting a dedicat
 - **Feedback:** expose the next metadata action, such as "Edit prompt," with its stable edit ID and workflow ID. Native deletion is not an undoable metadata action.
 - **Upgrades:** migrate stored history formats or explicitly invalidate incompatible history without deleting the current workflow; never silently misinterpret old records.
 
-**Implemented first slice:** node creation, saved prompt edits, and connection
-creation have transactional, persistent undo/redo through the backend and CLI.
+**Implemented:** the supported metadata actions above have transactional,
+persistent undo/redo through the backend and CLI.
 History is shared across workflows in one canonical project folder, with explicit
 expected edit IDs to reject stale clients. Native/run references block undoing a
 node's creation rather than being deleted. Existing data is a non-undoable baseline.
@@ -114,15 +115,41 @@ harness-owned conversations, not a Waypoints chat or transcript store.
 - Save the agent's session ID for explicit loading when supported. Do not silently start fresh if loading fails.
 - A successful turn enters finalization after process cleanup, then completes with a separate snapshot outcome. This is not human code-review approval; workflow review gates are not implemented.
 
+## Decision: reflect native jj changes, not inferred context staleness
+
+For v1, jj is the source of truth for code state. Surface its revisions,
+rewrites, divergence and conflict flags directly; do not build a separate
+conflict detector or infer that an agent's reasoning is invalid.
+
+- Users infer changed assumptions from code history and dependencies, and
+  explicitly choose what to review, test or rerun. A clean rebase is not proof
+  of behavioral correctness, but does not require an additional warning state.
+- Do not add a separate downstream "upstream changed" or "stale context" badge,
+  acknowledgement step, or execution gate for v1. General causal/transitive
+  context tracking is not a prerequisite for the GUI or v1 completion.
+- Keep stale **physical checkout** diagnostics distinct from native conflicts;
+  they describe files needing explicit reconciliation, not agent assumptions.
+- Retain existing restore-specific fresh-session barriers and other operation
+  safety checks. This decision does not relax them or automatically update files.
+- The existing best-effort CLI upstream-input hint may remain informational;
+  it is not an invalidation policy or a requirement for a new GUI indicator.
+- Never automatically rerun tasks, inject context or resolve conflicts.
+
+This supersedes earlier suggestions that general downstream context-staleness
+tracking must be implemented before the GUI or treated as a v1 completeness gap.
+Broader native graph reconciliation remains a separate discussion.
+
 ## Phase states (product sketch, not the current API)
 
 draft -> ready -> running -> awaiting approval -> done
 
-Plus: failed, stale (an upstream phase changed), conflicted (jj reports a conflict).
+Plus: failed and conflicted (jj reports a conflict). The earlier proposed
+downstream `stale` phase state is not part of v1; see the decision above.
 
 Current run states, native conflict flags, graph connectivity, and workspace
 readiness are separate values, not this single phase state machine.
 `awaiting_permission` means an ACP tool decision, not a code-review gate.
+The sketched review-approval states are not approved v1 requirements.
 See the [run-state contract](13-agent-run-lifecycle.md#lifecycle-and-ownership).
 
 ## Data to store (product sketch)
@@ -139,7 +166,7 @@ workflow review state are currently captured.
 
 ## Re-running and "nodes extending onward"
 
-Refining a phase can evolve the same node's native jj change through multiple commit revisions. Do not assume every turn creates a new child change or an application-owned code snapshot. Preserve exact native revision references where needed to identify inputs. Users explicitly choose whether to continue a change or create an alternative; follow native jj ancestry and surface divergence, conflicts, and stale downstream context. See [jj snapshots](04-jj-snapshots.md).
+Refining a phase can evolve the same node's native jj change through multiple commit revisions. Do not assume every turn creates a new child change or an application-owned code snapshot. Preserve exact native revision references where needed to identify inputs. Users explicitly choose whether to continue a change or create an alternative; follow native jj ancestry and surface divergence and conflicts, not inferred downstream context staleness. See [jj snapshots](04-jj-snapshots.md).
 
 ## Unavailable saved context
 

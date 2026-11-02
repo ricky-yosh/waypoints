@@ -14,8 +14,11 @@ change with a new commit ID. This is separate from the earlier temporary-client
 [Codex spike](12-codex-acp-spike.md).
 
 Continuation is implemented and validated with a deterministic ACP peer through
-the real CLI/backend, including restart and replay. The subsequent manual
-real-Codex continuation check was reported successful by the user.
+the real CLI/backend, including restart and replay. It also passed the later
+[real-Codex leaf](21-saved-result-restoration.md#manual-codex-acceptance) and
+[downstream restoration](24-downstream-restoration.md#manual-real-codex-acceptance)
+acceptance flows, including same-session follow-up and explicit fresh execution
+after restoration.
 
 Successful turns automatically snapshot their workspace and record the exact
 native revision before releasing ownership. This is fake-peer/native-jj tested
@@ -66,6 +69,9 @@ proof of what the agent actually read**. It does not check graph/native ancestry
 alignment, physical checkout freshness, transitive inputs, or agent reasoning.
 Observations are not atomic with external jj writers or agent execution; no
 native objects are pinned against garbage collection.
+The [v1 scope decision](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness)
+keeps this existing hint informational; it does not require a new GUI badge,
+context-validity verdict, acknowledgement, or execution gate.
 
 ## CLI
 
@@ -116,7 +122,8 @@ and duplicate replies are rejected. An unanswered request expires after
 Start, continue, list, status, and recovery inspection can auto-start the backend.
 Events, cancellation, permission replies, and recovery confirmation require an
 existing backend, so they do not conceal a restart.
-Without `--json`, these commands currently print pretty JSON.
+Without `--json`, most of these commands print pretty JSON. Human-readable
+`run status` also appends the upstream hint; `run inputs` prints that hint directly.
 
 ## Explicit continuation
 
@@ -142,9 +149,11 @@ Rules:
 - Select the latest run for that session. Continuing an older run is not a
   conversation fork or rollback; Waypoints refuses it and names the newer run.
   The harness may also have changed its session history outside Waypoints.
-- [Restoring a saved result](21-saved-result-restoration.md) bars continuation of
-  every pre-existing session on that node. Explicitly start a fresh session;
-  selecting old code never silently rewinds agent memory.
+- [Restoring code](21-saved-result-restoration.md) bars continuation of every
+  pre-existing session on the source node. [Confirmed downstream restoration](24-downstream-restoration.md)
+  also bars old sessions on every affected task, even after a clean rebase.
+  Explicitly start fresh after checkout reconciliation; selecting old code never
+  silently rewinds agent memory.
 - The same executable path, workspace directory, and jj change are reused.
   Read-only checkout verification runs again; dirty local edits are allowed.
   A changed node association or externally switched workspace is refused rather
@@ -384,8 +393,9 @@ output but no structured ACP edit diff. Native jj remains authoritative for the
 actual file changes.
 
 Successful run completion includes the automatic recording boundary above.
-Ordinary `node refresh`, workspace verification, and polling remain read-only;
-they never snapshot additional edits.
+Ordinary `node refresh` and polling remain read-only; workspace verification may
+acknowledge readiness in the database, but never changes files/native history
+or snapshots additional edits.
 
 ## Validation
 
@@ -446,4 +456,5 @@ The manual check passed for run 4: status reported `completed` and snapshot
 `saved`; its commit ID matched read-only node refresh and the requested line was
 present in `hello.txt`. Recovery tests deliberately crash only disposable fake
 agents/backends; this change did not crash or recover the user's real Codex session.
-Deliberate finalization retry remains a future slice.
+There is no finalization-retry command; adding one would require a separate
+decision about attributing code after an uncertain native write.

@@ -259,7 +259,9 @@ and the no-automatic-retry rule apply.
 
 Automated tests cover:
 
-- Undo/redo of all three action types with exact prompt values and node identities.
+- Undo/redo of supported actions, including rename, rooted single-/multi-parent
+  creation, prompt edits, legacy connections, and prompt-only move/delete, with
+  exact values, identities and affected attachments.
 - Cursor and graph persistence across database/backend restart.
 - Chronology across workflows, project isolation, and reserved redo identities.
 - Redo-tail replacement; rejected/no-op edits preserving redo.

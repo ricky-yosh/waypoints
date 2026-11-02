@@ -1,5 +1,9 @@
 # Proa and the web side
 
+Historical web-framework research, not an adopted Waypoints dependency or a
+current feature plan. Verify descriptions, package capabilities, pricing and
+hosting claims below before relying on them.
+
 ## What Proa is
 
 Proa (proa.so) is a new Rust web framework: batteries-included, server-rendered, Axum-native, with streaming SSR and Suspense, typed Markdown, and "RSJS" islands (interactivity written in Rust, compiled to a tiny JS runtime). Its pitch is multi-target rendering: one typed component renders to HTML and Markdown. Proa UI is a Shadcn-style set of Rust components (about 58); some are free (Accordion, Table, Button, Card, Field) and some are Pro/paid (Calendar, Chart, Code Block, Chat). Databases connect through a DataLoader (SQLx, Diesel, Toasty). Deploy guides cover Railway, Coolify, and Docker. Benchmarks on its site date from September 2026, so treat it as an early project.

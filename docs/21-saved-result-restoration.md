@@ -3,7 +3,8 @@
 ## Meaning
 
 A node owns one evolving jj change. Each successful run can record an exact
-revision of that change: a different commit ID, with the same change ID.
+revision of that change. A rewrite changes the commit ID while retaining the
+change ID; a no-change turn can retain the existing commit ID.
 Manual revisions and pre-restore checkpoints can also be selected by exact
 commit ID, without an agent run. Restoration does **not** create another node or
 a child change.
@@ -62,8 +63,9 @@ Related-change squash history can be previewed, but cross-change restoration is
 refused before reservation or snapshotting. Missing/collected commits, divergent
 current changes and all existing workspace/downstream safeguards remain refused.
 
-`node restores` lists **all** attempts for the live node, whether selected by
-run or commit ID. `run restore-status` still lists only attempts explicitly
+`node restores` lists **all** attempts affecting the live node, whether selected
+by run or commit ID, including downstream operations initiated on an ancestor.
+`run restore-status` still lists only attempts explicitly
 selected through that run; selecting its commit directly does not invent run
 provenance. Both forms share the same native execution, checkpointing, session
 barrier, unresolved guard and recovery.
@@ -90,7 +92,9 @@ they are not invented agent runs or entries in `run list`.
 
 ## First-version safeguards
 
-Before reserving or changing code, restoration requires:
+These safeguards describe ordinary leaf `run restore` / `node restore`, not
+the separately confirmed [downstream path](24-downstream-restoration.md).
+Before reserving or changing code, ordinary restoration requires:
 
 - No active or interrupted agent runs **anywhere in this backend database**.
   This conservative rule also avoids competing background finalization.
@@ -155,7 +159,8 @@ Core and backend client expose `restore_run(run_id)`, `run_restores(run_id)`,
 `restore_node_revision(workflow_id, node_id, commit_id)`,
 `node_restores(workflow_id, node_id)`, and
 `recover_restore(operation_id, confirmation)`. Core also exposes
-`restore_operation(id)` for an individual journal record.
+`restore_operation(id)` for an individual journal record; this read-only getter
+has no direct RPC/CLI counterpart. Use node/run journal listing through those surfaces.
 
 | RPC method | Parameters | Result |
 |---|---|---|
@@ -211,9 +216,9 @@ Automated disposable native-jj/core and CLI/backend/fake-ACP tests cover:
   late index creation fails.
 
 Native [revision browsing and exact previews](22-native-revision-history.md) are
-available separately. Downstream rebasing, cross-change transplantation,
-historical prompt/conversation replay and indefinite native-object retention
-remain outside this restoration slice.
+available separately, and [confirmed same-workflow downstream rebasing](24-downstream-restoration.md)
+has its own contract. Cross-change/changed-parent restoration, historical
+prompt/conversation replay and indefinite native-object retention are not provided.
 
 ### Manual exact-commit CLI smoke
 
@@ -226,9 +231,10 @@ under ignored `target/exact-restore-acceptance.*/acceptance.json`; its editing
 workspace was turn-local scratch, not a persistent folder to reuse.
 
 The retained real-Codex fixture's prior run-selected restore record also remained
-identical when read through the upgraded backend. No new real-agent run was
-performed for the exact-commit command; fresh-session and uncertain-operation
-behavior have separate native-jj/fake-ACP coverage.
+identical when read through the upgraded backend. This exact-commit smoke was
+agent-free; it is distinct from the later [real-Codex downstream acceptance](24-downstream-restoration.md#manual-real-codex-acceptance),
+which selected an exact commit through the confirmed downstream command.
+Uncertain-operation behavior retains native-jj/fake-ACP coverage.
 
 ### Manual Codex acceptance
 

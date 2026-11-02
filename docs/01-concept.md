@@ -15,8 +15,8 @@ The workflow is the main object you work with. Workflows are grouped by project 
 - A node is associated with an evolving native jj change. Its historical code revisions are native jj commits, not a separate Waypoints snapshot system.
 - Users move backward and forward between nodes and workflows, inspect historical revisions, and explicitly continue work from a chosen revision.
 - In based workflows, connections express native code dependencies rooted at a saved base. Native jj state and workflow metadata remain separate stores, but checked dependency edits must keep them aligned. Legacy unbased links remain planning-only; never silently migrate them or guess associations from ancestry.
-- Upstream edits can make downstream work stale and introduce jj conflicts. Surface these consequences; do not automatically execute downstream nodes.
-- Agent conversations stay in existing harnesses. A phase may use fresh scoped context or explicitly continue an upstream conversation; Waypoints does not archive transcripts.
+- Upstream edits can change downstream code and introduce jj conflicts. Reflect native changes and conflicts; users infer changed assumptions and explicitly choose what to revisit. No separate inferred-context-staleness state is required for v1; see the [scope decision](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness).
+- Agent conversations stay in existing harnesses. A node can start fresh or explicitly continue its own eligible saved session. Cross-phase conversation/context handoff is not implemented; Waypoints does not archive transcripts.
 
 ## Project, workflow, and node example
 
@@ -40,11 +40,13 @@ Use **workflow**, not a new application-level "session," for the sidebar item. S
 - Nodes are scoped assignments; connections describe selected upstream inputs and intended dependencies.
 - Live streaming inside each node (watching output is a key value).
 - Reuse existing results; when a node changes, show affected downstream work and let the user decide what to revisit.
-- Gates: a node can pause for approval before passing output on.
+- Human code-review gates are an idea for discussion, not an implemented node state. ACP tool permissions are separate from review approval.
 - Fan-out and fan-in: try two approaches, then compare or merge.
 - Portable graphs that can be diffed and shared are an idea to discuss, not the current persistence format. Current workflow metadata lives in the backend-owned Turso database; import/export is not implemented.
 
 ## Example chain
+
+Product sketch, including a review gate that has not been implemented:
 
 Rough spec -> Plan -> (Approach A, Approach B in parallel) -> Review and compare -> Your approval gate.
 

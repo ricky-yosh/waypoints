@@ -1,7 +1,7 @@
 # jj snapshots per phase
 
 See [core/backend status](20-core-backend-status.md) for the capability inventory.
-This page separates implemented native integration from broader history/staleness design.
+This page explains native change/revision semantics and links to implemented contracts.
 
 ## Implemented slice
 
@@ -26,8 +26,8 @@ Successful agent turns now automatically snapshot their dedicated workspace and
 record an exact revision before releasing the run reservation. Native snapshot
 failures are distinct from agent failures; cancelled/failed turns are not
 automatically snapshotted. See [run finalization](13-agent-run-lifecycle.md#automatic-revision-recording).
-The model below remains the broader design, not a claim that the visual history
-picker, general downstream staleness, or workflow-level checkpoints are implemented.
+The visual history picker and workflow-level checkpoints are not implemented.
+General inferred-context-staleness tracking is outside v1 scope.
 
 ## Model
 
@@ -44,7 +44,7 @@ existing merge's parent set and safe filesystem cleanup remain pending.
 - Parallel phases are sibling changes on the same parent.
 - Simultaneous editing of different nodes needs separate working directories: allocate jj workspaces on demand. Idle nodes and browsing historical revisions do not each require a permanent workspace. Two agents editing different code states must not share one folder.
 - Combining parallel results is explicit: for a native merge, create a change with the selected results as parents. jj stores conflicts inside the commit instead of blocking, so a conflicted merge is a state clients can show.
-- Editing an earlier phase can cause jj to rebase descendants. Native conflict flags are queryable now; checked downstream restoration bars old affected sessions and reports stale checkouts. General context-staleness tracking and UI badges remain product work.
+- Editing an earlier phase can cause jj to rebase descendants. Reflect native revisions and conflicts; users infer changed assumptions. Checked downstream restoration bars old affected sessions and reports stale physical checkouts. A separate context-staleness badge or execution gate is outside v1 scope.
 - A change ID normally follows evolving work across rewrites; a commit ID identifies one exact revision. Divergence can give a change ID multiple visible revisions and requires an explicit choice.
 - jj's operation log supports repository recovery, not undo of workflow metadata, conversations, or external side effects. Workflow edits have their own transactional undo history.
 
@@ -71,10 +71,17 @@ harness session on the current change; it does not select historical code.
 
 Native code revisions do not preserve historical prompt text or rewind agent memory. Workflow prompt edits are stored separately; matching a prompt version to a code revision requires an explicit association. If an associated native change disappears, retain the saved node with a missing-change indication rather than deleting the workflow or automatically resurrecting repository history.
 
-## Two kinds of conflict
+## Native conflicts versus changed assumptions
 
-1. **Code conflicts:** jj handles these.
-2. **Context staleness (not fully tracked):** downstream reasoning or work was built on old upstream output even if the code merges cleanly. jj cannot see reasoning. A small [upstream-revision hint](13-agent-run-lifecycle.md#informational-upstream-hint) compares direct graph inputs observed before each run with current inputs. This is informational only, not causal/transitive context tracking or a rerun policy. Connections do not automatically trigger execution.
+jj supplies the code-conflict state. A clean rebase does not prove behavioral
+correctness, but Waypoints does not infer a second "context conflict" state.
+Users review native changes and decide what to test or rerun; connections never
+automatically trigger execution. See the [v1 scope decision](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness).
+
+The existing [upstream-revision hint](13-agent-run-lifecycle.md#informational-upstream-hint)
+compares direct graph inputs observed before each run with current inputs.
+It remains optional bookkeeping and informational output, not a causal tracker,
+agent-context verdict, new GUI-indicator requirement, or execution policy.
 
 ## Integration approach
 
@@ -87,5 +94,5 @@ failed turns preserve files without an automatic snapshot.
 
 - Design the visual revision picker and broader downstream reconciliation policy. Native history listing, exact previews, same-change restoration and checked same-workflow downstream application have headless coverage.
 - Define editing existing multi-parent dependency sets; creation, conflict materialization, and fake-agent execution/snapshot review now have product-path tests.
-- Exercise upstream edits through the complete workflow and define context-staleness behavior separately from native conflicts and stale physical checkouts.
+- Exercise broader upstream edits through the complete workflow, reflecting native revisions/conflicts and reporting stale physical checkouts without inferring agent-context validity. The narrower clean API/login restore flow passed [real-Codex acceptance](24-downstream-restoration.md#manual-real-codex-acceptance).
 - Whether Zed shows a phase's diff in a colocated repo (git HEAD pointing at the working copy's parent).

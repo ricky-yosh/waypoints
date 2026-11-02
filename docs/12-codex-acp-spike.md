@@ -53,8 +53,8 @@ Running bare `codex-acp` waits for an ACP client, rather than opening an
 interactive chat. In this installation, `codex-acp --help` also waited and was
 stopped by a timeout; `--version` worked.
 
-For the first production integration, use a user-installed executable. Managed
-downloads can be a later feature; they are not necessary to prove the connection.
+The subsequent production integration uses a user-installed executable. Managed
+downloads are not implemented or required for this connection.
 
 ## Checks performed
 
@@ -137,7 +137,7 @@ existing read-only refresh contract.
 - Production Rust ACP integration or GUI integration in this temporary-client spike.
   A later manual test validated the Rust fresh-run path; see the lifecycle document.
 
-## Next production slice
+## Subsequent production integration
 
 The subsequent [backend-owned lifecycle checkpoint](13-agent-run-lifecycle.md)
 implements fresh-session starts, bounded polling, approvals, and cancellation,
@@ -146,10 +146,13 @@ fake agent. Manual Codex tests validated the Rust fresh-run/file-edit path and
 continuation. Automatic snapshot finalization also passed the manual Codex check.
 Explicit reservation recovery is subsequently fake-agent/native-jj tested; it
 does not reconstruct interrupted run revisions or automatically replay work.
-The list below records the
-full target derived from this spike, not a claim that every item is implemented.
+Later [leaf restoration](21-saved-result-restoration.md#manual-codex-acceptance)
+and [downstream restoration](24-downstream-restoration.md#manual-real-codex-acceptance)
+acceptance exercised real Codex continuation, exact saved revisions and explicit
+fresh sessions after restoring code.
 
-Support one installed Codex adapter and one node workspace:
+The following original integration targets are now covered by the backend
+lifecycle, within its documented capability and output bounds:
 
 1. Launch the configured executable and negotiate capabilities.
 2. Create a session for the node workspace and send the saved prompt.
@@ -159,8 +162,10 @@ Support one installed Codex adapter and one node workspace:
    continuation, handling replay and load failures.
 6. Define the native snapshot boundary and refresh the node's jj association.
 
-Do not add a custom agent loop, one-shot `codex exec` fallback, transcript archive,
-managed installer, or multi-agent framework to this slice.
+The spike did not authorize a custom agent loop, one-shot `codex exec` fallback,
+transcript archive, managed installer, or multi-agent framework. See the
+[current inventory](20-core-backend-status.md) instead of treating this historical
+target list as the next implementation slice.
 
 ## References
 
