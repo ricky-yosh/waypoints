@@ -14,7 +14,7 @@ use tokio::time::{Instant, sleep, timeout, timeout_at};
 use waypoints_core::run::{RecoveryConfirmation, RunRecovery};
 use waypoints_core::storage::{
     Connection, DependencyOperation, DependencyRecovery, HistoryStatus, Node, NodeChange,
-    UndoBoundaryAcknowledgement, Workflow, WorkflowGraph,
+    UndoBoundaryAcknowledgement, Workflow, WorkflowFilter, WorkflowGraph,
 };
 use waypoints_core::workflow::{BaseSource, NodeParent};
 use waypoints_core::workspace::NodeWorkspace;
@@ -271,6 +271,26 @@ impl Client {
         .await
     }
 
+    /// Hides a workflow from the active list without stopping runs or changing code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing workflow, storage failure, or RPC failure.
+    pub async fn archive_workflow(&self, workflow_id: i64) -> Result<Workflow, BackendError> {
+        self.call("workflow.archive", json!({"workflow_id": workflow_id}))
+            .await
+    }
+
+    /// Returns an archived workflow to the active list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing workflow, storage failure, or RPC failure.
+    pub async fn unarchive_workflow(&self, workflow_id: i64) -> Result<Workflow, BackendError> {
+        self.call("workflow.unarchive", json!({"workflow_id": workflow_id}))
+            .await
+    }
+
     /// Reads a workflow's saved base without querying native state.
     ///
     /// # Errors
@@ -298,17 +318,34 @@ impl Client {
         .await
     }
 
-    /// Lists a project's workflows through the backend.
+    /// Lists a project's active workflows through the backend.
     ///
     /// # Errors
     ///
     /// Returns an error on invalid input, a server error, or a transport failure.
     pub async fn list_workflows(&self, project: &Path) -> Result<Vec<Workflow>, BackendError> {
+        self.list_workflows_filtered(project, WorkflowFilter::Active)
+            .await
+    }
+
+    /// Lists active, archived, or all workflows through the backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on invalid input, a server error, or a transport failure.
+    pub async fn list_workflows_filtered(
+        &self,
+        project: &Path,
+        filter: WorkflowFilter,
+    ) -> Result<Vec<Workflow>, BackendError> {
         let project = project
             .canonicalize()
             .context("resolving project directory")?;
-        self.call("workflow.list", json!({"project_path": project}))
-            .await
+        self.call(
+            "workflow.list",
+            json!({"project_path": project, "filter": filter}),
+        )
+        .await
     }
 
     /// Reads a workflow and its saved graph in deterministic order.

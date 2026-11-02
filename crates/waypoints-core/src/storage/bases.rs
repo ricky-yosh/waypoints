@@ -82,6 +82,7 @@ impl Storage {
                 project_path: project.clone(),
                 name: name.to_owned(),
                 base,
+                archived: false,
             })
         }
         .await;
@@ -109,7 +110,9 @@ impl Storage {
             let connection = self.database.connect()?;
             let mut rows = connection
                 .query(
-                    "SELECT w.id, w.project_path, w.name, b.record FROM workflows w
+                    "SELECT w.id, w.project_path, w.name, b.record,
+                 EXISTS (SELECT 1 FROM workflow_archives a WHERE a.workflow_id = w.id)
+                 FROM workflows w
                  LEFT JOIN workflow_bases b ON b.workflow_id = w.id WHERE w.id = ?1",
                     [workflow_id],
                 )

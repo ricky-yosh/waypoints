@@ -347,6 +347,19 @@ async fn dispatch(
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },
+        "workflow.archive" | "workflow.unarchive" => match parameters::<WorkflowParams>(params) {
+            Ok(params) => {
+                let result = if method == "workflow.archive" {
+                    storage.archive_workflow(params.workflow_id).await
+                } else {
+                    storage.unarchive_workflow(params.workflow_id).await
+                };
+                result
+                    .map(|workflow| json!(workflow))
+                    .map_err(|error| (-32000, format!("{error:#}")))
+            }
+            Err(error) => Err(error),
+        },
         "workflow.get" => match parameters::<WorkflowParams>(params) {
             Ok(params) => storage
                 .workflow(params.workflow_id)
@@ -363,9 +376,9 @@ async fn dispatch(
                 .map_err(|error| (-32000, format!("{error:#}"))),
             Err(error) => Err(error),
         },
-        "workflow.list" => match parameters::<ProjectParams>(params) {
+        "workflow.list" => match parameters::<crate::protocol::WorkflowListParams>(params) {
             Ok(params) => storage
-                .list_workflows(&params.project_path)
+                .list_workflows_filtered(&params.project_path, params.filter)
                 .await
                 .map(|workflows| json!(workflows))
                 .map_err(|error| (-32000, format!("{error:#}"))),

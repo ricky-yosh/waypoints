@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::jj::{self, ChangeAssociation, ChangeState};
 use crate::workflow::{GraphConnectivity, NodeParent, WorkflowBase};
 
+mod archive;
 mod bases;
 mod dependencies;
 mod history;
@@ -47,6 +48,23 @@ pub struct Workflow {
     /// Exact saved starting point, or none for an unbased/legacy workflow.
     #[serde(default)]
     pub base: Option<WorkflowBase>,
+    /// Hidden from the active list; all saved data and operations remain available.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// Selects which saved workflows appear in a project list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkflowFilter {
+    /// Workflows not archived; the default list.
+    #[default]
+    Active,
+    /// Only archived workflows.
+    Archived,
+    /// Both active and archived workflows.
+    All,
 }
 
 /// A prompt-bearing node belonging to one workflow.
@@ -228,6 +246,7 @@ impl Storage {
             .await
             .context("initializing node workspace schema")?;
         let storage = Self { database };
+        storage.initialize_archives().await?;
         storage.initialize_runs().await?;
         storage.initialize_history().await?;
         storage.initialize_bases().await?;
@@ -256,13 +275,27 @@ impl Storage {
             .await?)
     }
 
-    /// Lists a project's saved workflows in ascending identifier order.
+    /// Lists a project's active workflows in ascending identifier order.
     ///
     /// # Errors
     ///
     /// Returns an error for an invalid or non-UTF-8 project path, or if querying
     /// or decoding saved workflows fails.
     pub async fn list_workflows(&self, project_path: &Path) -> Result<Vec<Workflow>, StorageError> {
+        self.list_workflows_filtered(project_path, WorkflowFilter::Active)
+            .await
+    }
+
+    /// Lists active, archived, or all workflows in ascending identifier order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid project path or unreadable saved data.
+    pub async fn list_workflows_filtered(
+        &self,
+        project_path: &Path,
+        filter: WorkflowFilter,
+    ) -> Result<Vec<Workflow>, StorageError> {
         let project_path = canonical_project(project_path)?;
         let project = project_path
             .to_str()
@@ -273,7 +306,9 @@ impl Storage {
             .context("connecting to workflow database")?;
         let mut rows = connection
             .query(
-                "SELECT w.id, w.project_path, w.name, b.record FROM workflows w
+                "SELECT w.id, w.project_path, w.name, b.record,
+                 EXISTS (SELECT 1 FROM workflow_archives a WHERE a.workflow_id = w.id)
+                 FROM workflows w
                  LEFT JOIN workflow_bases b ON b.workflow_id = w.id
                  WHERE w.project_path = ?1 ORDER BY w.id",
                 [project],
@@ -282,7 +317,14 @@ impl Storage {
             .context("listing workflows")?;
         let mut workflows = Vec::new();
         while let Some(row) = rows.next().await.context("reading workflow row")? {
-            workflows.push(decode_workflow(&row)?);
+            let workflow = decode_workflow(&row)?;
+            if match filter {
+                WorkflowFilter::Active => !workflow.archived,
+                WorkflowFilter::Archived => workflow.archived,
+                WorkflowFilter::All => true,
+            } {
+                workflows.push(workflow);
+            }
         }
         Ok(workflows)
     }
@@ -761,6 +803,10 @@ fn decode_workflow(row: &turso::Row) -> anyhow::Result<Workflow> {
             .map(|record| serde_json::from_str(&record))
             .transpose()
             .context("decoding saved workflow base")?,
+        archived: row
+            .get::<i64>(4)
+            .context("reading workflow archive state")?
+            != 0,
     })
 }
 

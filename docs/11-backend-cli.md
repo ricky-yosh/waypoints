@@ -127,6 +127,33 @@ Nonblank names are preserved verbatim; duplicates are allowed. An identical name
 preserves Undo/Redo, and rejected edits change nothing. See
 [workflow renaming](14-workflow-history.md#workflow-renaming) for the history contract.
 
+### Archive and unarchive
+
+Archive finished workflows to keep the active list small without deleting anything:
+
+```sh
+waypoints workflow archive --workflow 1
+waypoints workflow list --project .                 # active only (default)
+waypoints workflow list --project . --archived       # archived only
+waypoints workflow list --project . --all            # both
+waypoints workflow unarchive --workflow 1
+```
+
+Workflow JSON includes `archived` (`false` for new and pre-existing workflows).
+Archive/unarchive return the updated workflow, are idempotent, and survive backend
+restarts. Plain list output marks archived entries with `[archived]`; `--archived`
+and `--all` cannot be combined.
+
+This is only list visibility, not a readonly state or an execution gate. Archived
+workflows remain accessible by ID, including their graph, native associations,
+workspaces, runs, reviews, and history. Existing operations remain available.
+Archiving does not stop runs, invoke jj, alter files, or change project Undo/Redo.
+Use unarchive to reverse it; it is not a metadata-history action. Opening an older
+database adds a `workflow_archives` table without rewriting existing workflows.
+Permanent workflow deletion and workspace-folder cleanup are not implemented.
+
+### Prompt-only subtree edits
+
 For an unmaterialized subtree in a rooted based workflow:
 
 ```sh
@@ -619,11 +646,13 @@ Methods:
 | `history.status` | `{project_path}` | `{project_path, undo, redo}` with pending edit IDs, workflow IDs, and labels |
 | `history.undo` | `{project_path, expected_edit_id}` | New metadata history status; stale/blocked actions are errors |
 | `history.redo` | `{project_path, expected_edit_id}` | New metadata history status; restores saved values/identities only |
-| `workflow.create` | `{project_path, name, base?}` | `{id, project_path, name, base}`; nullable saved starting point |
+| `workflow.create` | `{project_path, name, base?}` | `{id, project_path, name, base, archived}`; nullable saved starting point; initially active |
 | `workflow.rename` | `{workflow_id, name}` | Updated saved workflow; undoable name-only edit |
+| `workflow.archive` | `{workflow_id}` | Updated workflow with `archived: true`; idempotent visibility only |
+| `workflow.unarchive` | `{workflow_id}` | Updated workflow with `archived: false`; idempotent visibility only |
 | `workflow.get` | `{workflow_id}` | Saved workflow including its nullable base, without querying jj |
 | `workflow.set_base` | `{workflow_id, source}` | Initial base selection for an unbased workflow; existing bases cannot be replaced |
-| `workflow.list` | `{project_path}` | Array of workflows ordered by ID |
+| `workflow.list` | `{project_path, filter?}` | Array ordered by ID; filter is `active` (default), `archived`, or `all` |
 | `workflow.graph` | `{workflow_id}` | `{workflow, nodes, connections, base_nodes, connectivity, unresolved_dependency_operation?}`; saved metadata, not a jj query |
 | `node.create` | `{workflow_id, prompt, parent?, parents?}` | `{id, workflow_id, prompt}`; based workflows require a parent or nonempty parent array, not both |
 | `node.get` | `{workflow_id, node_id}` | `{id, workflow_id, prompt}` |

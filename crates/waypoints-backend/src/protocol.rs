@@ -5,7 +5,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use waypoints_core::run::RecoveryConfirmation;
-use waypoints_core::storage::UndoBoundaryAcknowledgement;
+use waypoints_core::storage::{UndoBoundaryAcknowledgement, WorkflowFilter};
 use waypoints_core::workflow::{BaseSource, NodeParent};
 
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
@@ -54,6 +54,14 @@ pub struct BackendInfo {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectParams {
     pub project_path: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowListParams {
+    pub project_path: PathBuf,
+    #[serde(default)]
+    pub filter: WorkflowFilter,
 }
 
 #[derive(Deserialize)]

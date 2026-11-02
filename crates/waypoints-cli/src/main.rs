@@ -9,7 +9,9 @@ use clap::{Parser, Subcommand};
 use waypoints_backend::{Client, Config};
 use waypoints_core::jj::ChangeState;
 use waypoints_core::run::RecoveryConfirmation;
-use waypoints_core::storage::{HistoryStatus, Node, NodeChange, UndoBoundaryAcknowledgement};
+use waypoints_core::storage::{
+    HistoryStatus, Node, NodeChange, UndoBoundaryAcknowledgement, WorkflowFilter,
+};
 use waypoints_core::workflow::{BaseSource, NodeParent};
 use waypoints_core::workspace::{NodeWorkspace, WorkspaceState};
 
@@ -187,6 +189,16 @@ enum RunCommand {
 
 #[derive(Subcommand)]
 enum WorkflowCommand {
+    /// Hide a workflow from the active list; retain all data, code, files, and runs.
+    Archive {
+        #[arg(long)]
+        workflow: i64,
+    },
+    /// Return a workflow to the active list.
+    Unarchive {
+        #[arg(long)]
+        workflow: i64,
+    },
     /// Rename a workflow; undoable metadata only, never changes code or runs.
     Rename {
         #[arg(long)]
@@ -231,9 +243,16 @@ enum WorkflowCommand {
         #[arg(long, conflicts_with = "base", required_unless_present = "base")]
         base_revision: Option<String>,
     },
+    /// List active workflows by default.
     List {
         #[arg(long)]
         project: PathBuf,
+        /// Show only archived workflows.
+        #[arg(long, conflicts_with = "all")]
+        archived: bool,
+        /// Show both active and archived workflows.
+        #[arg(long)]
+        all: bool,
     },
     Graph {
         #[arg(long)]
@@ -670,6 +689,22 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::Workflow { command } => {
             let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
             match command {
+                WorkflowCommand::Archive { workflow } => {
+                    let workflow = client.archive_workflow(workflow).await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&workflow)?);
+                    } else {
+                        println!("Archived workflow {}: {}", workflow.id, workflow.name);
+                    }
+                }
+                WorkflowCommand::Unarchive { workflow } => {
+                    let workflow = client.unarchive_workflow(workflow).await?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&workflow)?);
+                    } else {
+                        println!("Unarchived workflow {}: {}", workflow.id, workflow.name);
+                    }
+                }
                 WorkflowCommand::Rename { workflow, name } => {
                     let workflow = client.rename_workflow(workflow, &name).await?;
                     if args.json {
@@ -740,13 +775,29 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         }
                     );
                 }
-                WorkflowCommand::List { project } => {
-                    let workflows = client.list_workflows(&project).await?;
+                WorkflowCommand::List {
+                    project,
+                    archived,
+                    all,
+                } => {
+                    let filter = if all {
+                        WorkflowFilter::All
+                    } else if archived {
+                        WorkflowFilter::Archived
+                    } else {
+                        WorkflowFilter::Active
+                    };
+                    let workflows = client.list_workflows_filtered(&project, filter).await?;
                     if args.json {
                         println!("{}", serde_json::to_string(&workflows)?);
                     } else {
                         for workflow in workflows {
-                            println!("{}\t{}", workflow.id, workflow.name);
+                            println!(
+                                "{}\t{}{}",
+                                workflow.id,
+                                workflow.name,
+                                if workflow.archived { " [archived]" } else { "" }
+                            );
                         }
                     }
                 }

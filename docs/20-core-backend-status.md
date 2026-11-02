@@ -34,6 +34,7 @@ work merely by appearing in a document.
 | Capability | Current boundary | Detailed contract |
 |---|---|---|
 | Persistent workflows and prompt graphs | Canonical project-folder selection; multiple workflows; undoable renaming; no separate project registry | [Backend/CLI](11-backend-cli.md), [renaming](14-workflow-history.md#workflow-renaming) |
+| Workflow archive/unarchive | Reversible persistent list visibility; active list by default, archived/all filters; no deletion, execution gate, jj/file changes, or Undo/Redo changes | [Archiving](11-backend-cli.md#archive-and-unarchive) |
 | Fixed workflow bases | Explicit local bookmark or revision, resolved once; omitting a selector still creates an unbased legacy workflow | [Workflow bases](16-workflow-bases.md) |
 | Rooted node creation | New based-workflow nodes explicitly attach to the base or one or more upstream nodes; prompt creation does not create code | [Rooted nodes](17-rooted-node-dependencies.md) |
 | Native association and change creation | Unique native changes; based nodes require matching parents; one or more upstream nodes can create clean or conflicted native merges | [Backend/CLI](11-backend-cli.md#associate-a-node-with-an-existing-jj-change), [combining work](17-rooted-node-dependencies.md#combining-parallel-work) |
