@@ -175,7 +175,11 @@ impl Error for StorageFailure {}
 impl StorageError {
     /// Returns an explicit refusal, even when wrapped in diagnostic context.
     pub fn failure(&self) -> Option<&StorageFailure> {
-        self.inner.downcast_ref()
+        self.inner.downcast_ref().or_else(|| {
+            self.inner
+                .downcast_ref::<StorageError>()
+                .and_then(Self::failure)
+        })
     }
 }
 
@@ -187,7 +191,7 @@ impl fmt::Display for StorageError {
 
 impl Error for StorageError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.inner.as_ref())
+        self.inner.source()
     }
 }
 

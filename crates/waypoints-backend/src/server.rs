@@ -123,16 +123,25 @@ async fn run(config: &Config) -> anyhow::Result<()> {
                     if let Some((response, stop)) = control(&request, &info, &mut runs) {
                         respond(&mut connections, stream, response);
                         if stop { break; }
-                    } else if active.is_some() {
-                        respond(&mut connections, stream, busy(&request));
-                    } else if let Err(error) = prepare_request(&request, &mut runs) {
-                        respond(&mut connections, stream, reply(&request, Err(error)));
                     } else {
-                        let mut owned = storage.take().expect("idle scheduler owns storage");
-                        active = Some(Box::pin(async move {
-                            let response = dispatch(&request, &mut owned).await;
-                            (owned, Completion::Request { stream, request, response })
-                        }));
+                        let params = match StorageParams::decode(&request) {
+                            Ok(params) => params,
+                            Err(error) => {
+                                respond(&mut connections, stream, reply(&request, Err(error)));
+                                continue;
+                            }
+                        };
+                        if active.is_some() {
+                            respond(&mut connections, stream, busy(&request));
+                        } else if let Err(error) = prepare_request(&params, &mut runs) {
+                            respond(&mut connections, stream, reply(&request, Err(error)));
+                        } else {
+                            let mut owned = storage.take().expect("idle scheduler owns storage");
+                            active = Some(Box::pin(async move {
+                                let response = dispatch(&request, params, &mut owned).await;
+                                (owned, Completion::Request { stream, request, response })
+                            }));
+                        }
                     }
                 }
                 signal = tokio::signal::ctrl_c() => {
@@ -325,17 +334,14 @@ fn control(request: &Value, info: &BackendInfo, runs: &mut Runs) -> Option<(Opti
     Some((reply(request, result), stop))
 }
 
-fn prepare_request(request: &Value, runs: &mut Runs) -> Result<(), crate::RpcError> {
-    match request["method"].as_str() {
-        Some("run.start" | "run.continue") => {
+fn prepare_request(params: &StorageParams, runs: &mut Runs) -> Result<(), crate::RpcError> {
+    match params {
+        StorageParams::RunStart(_) | StorageParams::RunContinue(_) => {
             runs.ensure_capacity().map_err(crate::RpcError::from_cause)
         }
-        Some("run.recover") => {
-            let params: RecoverRunParams =
-                parameters(request.get("params").cloned().unwrap_or(json!({})))?;
-            runs.ensure_recoverable(params.run_id)
-                .map_err(crate::RpcError::from_cause)
-        }
+        StorageParams::RunRecover(params) => runs
+            .ensure_recoverable(params.run_id)
+            .map_err(crate::RpcError::from_cause),
         _ => Ok(()),
     }
 }
@@ -368,472 +374,439 @@ fn finish_request(
     Ok(reply(request, result))
 }
 
-async fn dispatch(request: &Value, storage: &mut Storage) -> Result<Value, crate::RpcError> {
+// Admission and execution share this typed method table. Validation needs no
+// storage access, and execution cannot skip it or decode a different schema.
+macro_rules! storage_requests {
+    ($( $($method:literal)|+ => $variant:ident($params:ty), )*) => {
+        enum StorageParams {
+            $( $variant($params), )*
+        }
+
+        #[cfg(test)]
+        const STORAGE_METHODS: &[&str] = &[$($($method,)+)*];
+
+        impl StorageParams {
+            fn decode(request: &Value) -> Result<Self, crate::RpcError> {
+                let params = request.get("params").cloned().unwrap_or(json!({}));
+                let parsed = match request["method"].as_str() {
+                    $( Some($($method)|+) => Self::$variant(parameters::<$params>(params)?), )*
+                    _ => return Err(crate::RpcError::new(-32601, "method not found".to_owned())),
+                };
+                if let Self::NodeCreate(params) = &parsed
+                    && params.parent.is_some() && params.parents.is_some()
+                {
+                    return Err(crate::RpcError::new(-32602, "select parent or parents, not both".to_owned()));
+                }
+                Ok(parsed)
+            }
+        }
+    };
+}
+
+storage_requests! {
+    "run.start" => RunStart(StartRunParams),
+    "run.continue" => RunContinue(ContinueRunParams),
+    "run.recovery" => RunRecovery(RunParams),
+    "run.recover" => RunRecover(RecoverRunParams),
+    "run.inputs" => RunInputs(RunParams),
+    "run.status" => RunStatus(RunParams),
+    "run.list" => RunList(NodeParams),
+    "history.status" => HistoryStatus(ProjectParams),
+    "history.undo" | "history.redo" => HistoryEdit(HistoryParams),
+    "repository.inspect" => RepositoryInspect(ProjectParams),
+    "workflow.create" => WorkflowCreate(CreateParams),
+    "workflow.adopt_roots" => WorkflowAdoptRoots(AdoptRootsParams),
+    "workflow.rename" => WorkflowRename(RenameWorkflowParams),
+    "workflow.archive" | "workflow.unarchive" => WorkflowArchive(WorkflowParams),
+    "workflow.get" => WorkflowGet(WorkflowParams),
+    "workflow.set_base" => WorkflowSetBase(WorkflowBaseParams),
+    "workflow.list" => WorkflowList(crate::protocol::WorkflowListParams),
+    "workflow.graph" => WorkflowGraph(WorkflowParams),
+    "node.resume_deletion" => NodeResumeDeletion(RecoverDependencyParams),
+    "node.move_prompt" => NodeMovePrompt(crate::protocol::MovePromptParams),
+    "node.delete_prompt" => NodeDeletePrompt(NodeParams),
+    "node.create" => NodeCreate(CreateNodeParams),
+    "node.get" => NodeGet(NodeParams),
+    "node.associate" => NodeAssociate(AssociateParams),
+    "node.operation_recovery" | "node.reparent_recovery" => NodeOperationRecovery(DependencyOperationParams),
+    "node.recover_operation" | "node.recover_reparent" => NodeRecoverOperation(RecoverDependencyParams),
+    "node.operations" => NodeOperations(WorkflowParams),
+    "node.delete" => NodeDelete(DeleteNodeParams),
+    "node.reparent" => NodeReparent(ReparentParams),
+    "node.create_change" => NodeCreateChange(CreateChangeParams),
+    "node.workspace.create" => NodeWorkspaceCreate(CreateWorkspaceParams),
+    "node.workspace.update_stale" => NodeWorkspaceUpdateStale(NodeParams),
+    "node.workspace.verify" => NodeWorkspaceVerify(NodeParams),
+    "node.workspace.status" => NodeWorkspaceStatus(NodeParams),
+    "node.revisions" => NodeRevisions(NodeRevisionsParams),
+    "node.restore_with_descendants" => NodeRestoreWithDescendants(Box<RestoreDescendantsParams>),
+    "node.restore_impact" => NodeRestoreImpact(NodeRevisionParams),
+    "node.restore_revision" => NodeRestoreRevision(NodeRevisionParams),
+    "node.restores" => NodeRestores(NodeParams),
+    "node.revision_review" => NodeRevisionReview(NodeRevisionParams),
+    "node.review" => NodeReview(NodeParams),
+    "run.restore" => RunRestore(RunParams),
+    "run.restore_status" => RunRestoreStatus(RunParams),
+    "run.recover_restore" => RunRecoverRestore(RecoverDependencyParams),
+    "run.review" => RunReview(RunParams),
+    "node.refresh" => NodeRefresh(NodeParams),
+    "node.update" => NodeUpdate(UpdateNodeParams),
+    "connection.create" => ConnectionCreate(ConnectParams),
+}
+
+async fn dispatch(
+    request: &Value,
+    params: StorageParams,
+    storage: &mut Storage,
+) -> Result<Value, crate::RpcError> {
     let method = request["method"]
         .as_str()
         .expect("validated request method");
-    let params = request.get("params").cloned().unwrap_or(json!({}));
-    match method {
-        "run.start" => match parameters::<StartRunParams>(params) {
-            Ok(params) => storage
-                .create_run(params.workflow_id, params.node_id, &params.executable)
-                .await
-                .map(|run| json!(run))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.continue" => match parameters::<ContinueRunParams>(params) {
-            Ok(params) => storage
-                .continue_run(params.run_id, &params.prompt)
-                .await
-                .map(|run| json!(run))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.recovery" => match parameters::<RunParams>(params) {
-            Ok(params) => storage
-                .inspect_run_recovery(params.run_id)
+    match params {
+        StorageParams::RunStart(params) => storage
+            .create_run(params.workflow_id, params.node_id, &params.executable)
+            .await
+            .map(|run| json!(run))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunContinue(params) => storage
+            .continue_run(params.run_id, &params.prompt)
+            .await
+            .map(|run| json!(run))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunRecovery(params) => storage
+            .inspect_run_recovery(params.run_id)
+            .await
+            .map(|inspection| json!(inspection))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunRecover(params) => storage
+            .recover_run(params.run_id, params.confirmation)
+            .await
+            .map(|status| json!(status))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunInputs(params) => storage
+            .run_upstream_status(params.run_id)
+            .await
+            .map(|status| json!(status))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunStatus(params) => storage
+            .run(params.run_id)
+            .await
+            .map(|run| json!(run))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunList(params) => storage
+            .node_runs(params.workflow_id, params.node_id)
+            .await
+            .map(|records| json!(records))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::HistoryStatus(params) => storage
+            .history_status(&params.project_path)
+            .await
+            .map(|status| json!(status))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::HistoryEdit(params) => {
+            let result = if method == "history.undo" {
+                storage
+                    .undo(&params.project_path, params.expected_edit_id)
+                    .await
+            } else {
+                storage
+                    .redo(&params.project_path, params.expected_edit_id)
+                    .await
+            };
+            result
+                .map(|status| json!(status))
+                .map_err(crate::RpcError::from_cause)
+        }
+        StorageParams::RepositoryInspect(params) => {
+            waypoints_core::repository::inspect(&params.project_path)
                 .await
                 .map(|inspection| json!(inspection))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.recover" => match parameters::<RecoverRunParams>(params) {
-            Ok(params) => storage
-                .recover_run(params.run_id, params.confirmation)
-                .await
-                .map(|status| json!(status))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.inputs" => match parameters::<RunParams>(params) {
-            Ok(params) => storage
-                .run_upstream_status(params.run_id)
-                .await
-                .map(|status| json!(status))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.status" => match parameters::<RunParams>(params) {
-            Ok(params) => storage
-                .run(params.run_id)
-                .await
-                .map(|run| json!(run))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.list" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .node_runs(params.workflow_id, params.node_id)
-                .await
-                .map(|records| json!(records))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "history.status" => match parameters::<ProjectParams>(params) {
-            Ok(params) => storage
-                .history_status(&params.project_path)
-                .await
-                .map(|status| json!(status))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "history.undo" | "history.redo" => match parameters::<HistoryParams>(params) {
-            Ok(params) => {
-                let result = if method == "history.undo" {
-                    storage
-                        .undo(&params.project_path, params.expected_edit_id)
-                        .await
-                } else {
-                    storage
-                        .redo(&params.project_path, params.expected_edit_id)
-                        .await
-                };
-                result
-                    .map(|status| json!(status))
-                    .map_err(crate::RpcError::from_cause)
-            }
-            Err(error) => Err(error),
-        },
-        "repository.inspect" => match parameters::<ProjectParams>(params) {
-            Ok(params) => waypoints_core::repository::inspect(&params.project_path)
-                .await
-                .map(|inspection| json!(inspection))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "workflow.create" => match parameters::<CreateParams>(params) {
-            Ok(params) => {
-                let result = match params.base {
-                    Some(source) => {
-                        storage
-                            .create_workflow_from(&params.project_path, &params.name, &source)
-                            .await
-                    }
-                    None => {
-                        storage
-                            .create_workflow(&params.project_path, &params.name)
-                            .await
-                    }
-                };
-                result
-                    .map(|workflow| json!(workflow))
-                    .map_err(crate::RpcError::from_cause)
-            }
-            Err(error) => Err(error),
-        },
-        "workflow.adopt_roots" => match parameters::<AdoptRootsParams>(params) {
-            Ok(params) => storage
-                .adopt_workflow_roots(params.workflow_id, &params.base_nodes)
-                .await
-                .map(|graph| json!(graph))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "workflow.rename" => match parameters::<RenameWorkflowParams>(params) {
-            Ok(params) => storage
-                .rename_workflow(params.workflow_id, &params.name)
-                .await
-                .map(|workflow| json!(workflow))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "workflow.archive" | "workflow.unarchive" => match parameters::<WorkflowParams>(params) {
-            Ok(params) => {
-                let result = if method == "workflow.archive" {
-                    storage.archive_workflow(params.workflow_id).await
-                } else {
-                    storage.unarchive_workflow(params.workflow_id).await
-                };
-                result
-                    .map(|workflow| json!(workflow))
-                    .map_err(crate::RpcError::from_cause)
-            }
-            Err(error) => Err(error),
-        },
-        "workflow.get" => match parameters::<WorkflowParams>(params) {
-            Ok(params) => storage
-                .workflow(params.workflow_id)
-                .await
-                .map(|workflow| json!(workflow))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "workflow.set_base" => match parameters::<WorkflowBaseParams>(params) {
-            Ok(params) => storage
-                .set_workflow_base(params.workflow_id, &params.source)
-                .await
-                .map(|workflow| json!(workflow))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "workflow.list" => match parameters::<crate::protocol::WorkflowListParams>(params) {
-            Ok(params) => storage
-                .list_workflows_filtered(&params.project_path, params.filter)
-                .await
-                .map(|workflows| json!(workflows))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "workflow.graph" => match parameters::<WorkflowParams>(params) {
-            Ok(params) => storage
-                .workflow_graph(params.workflow_id)
-                .await
-                .map(|graph| json!(graph))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.resume_deletion" => match parameters::<RecoverDependencyParams>(params) {
-            Ok(params) => storage
-                .resume_node_deletion(params.operation_id, params.confirmation)
-                .await
-                .map(|operation| json!(operation))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.move_prompt" => match parameters::<crate::protocol::MovePromptParams>(params) {
-            Ok(params) => storage
-                .move_prompt_node(params.workflow_id, params.node_id, &params.parent)
-                .await
-                .map(|graph| json!(graph))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.delete_prompt" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .delete_prompt_node(params.workflow_id, params.node_id)
-                .await
-                .map(|graph| json!(graph))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.create" => match parameters::<CreateNodeParams>(params) {
-            Ok(params) if params.parent.is_some() && params.parents.is_some() => Err(
-                crate::RpcError::new(-32602, "select parent or parents, not both".to_owned()),
-            ),
-            Ok(params) => {
-                let result = match (params.parent, params.parents) {
-                    (_, Some(parents)) => {
-                        storage
-                            .create_node_from_parents(params.workflow_id, &params.prompt, &parents)
-                            .await
-                    }
-                    (Some(parent), None) => {
-                        storage
-                            .create_node_from(params.workflow_id, &params.prompt, &parent)
-                            .await
-                    }
-                    (None, None) => {
-                        storage
-                            .create_node(params.workflow_id, &params.prompt)
-                            .await
-                    }
-                };
-                result
-                    .map(|node| json!(node))
-                    .map_err(crate::RpcError::from_cause)
-            }
-            Err(error) => Err(error),
-        },
-        "node.get" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .node(params.workflow_id, params.node_id)
-                .await
-                .map(|node| json!(node))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.associate" => match parameters::<AssociateParams>(params) {
-            Ok(params) => storage
-                .associate_node(params.workflow_id, params.node_id, &params.change_id)
-                .await
-                .map(|state| json!(state))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.operation_recovery" | "node.reparent_recovery" => {
-            match parameters::<DependencyOperationParams>(params) {
-                Ok(params) => storage
-                    .inspect_dependency_recovery(params.operation_id)
-                    .await
-                    .map(|value| json!(value))
-                    .map_err(crate::RpcError::from_cause),
-                Err(error) => Err(error),
-            }
+                .map_err(crate::RpcError::from_cause)
         }
-        "node.recover_operation" | "node.recover_reparent" => {
-            match parameters::<RecoverDependencyParams>(params) {
-                Ok(params) => storage
-                    .recover_dependency_operation(params.operation_id, params.confirmation)
-                    .await
-                    .map(|value| json!(value))
-                    .map_err(crate::RpcError::from_cause),
-                Err(error) => Err(error),
-            }
+        StorageParams::WorkflowCreate(params) => {
+            let result = match params.base {
+                Some(source) => {
+                    storage
+                        .create_workflow_from(&params.project_path, &params.name, &source)
+                        .await
+                }
+                None => {
+                    storage
+                        .create_workflow(&params.project_path, &params.name)
+                        .await
+                }
+            };
+            result
+                .map(|workflow| json!(workflow))
+                .map_err(crate::RpcError::from_cause)
         }
-        "node.operations" => match parameters::<WorkflowParams>(params) {
-            Ok(params) => storage
-                .dependency_operations(params.workflow_id)
-                .await
-                .map(|value| json!(value))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.delete" => match parameters::<DeleteNodeParams>(params) {
-            Ok(params) => storage
-                .delete_node(params.workflow_id, params.node_id, params.acknowledgement)
-                .await
-                .map(|value| json!(value))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.reparent" => match parameters::<ReparentParams>(params) {
-            Ok(params) => storage
-                .reparent_node(
-                    params.workflow_id,
-                    params.node_id,
-                    &params.parent,
-                    params.acknowledgement,
-                )
-                .await
-                .map(|value| json!(value))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.create_change" => match parameters::<CreateChangeParams>(params) {
-            Ok(params) => {
-                let result = match params.base {
-                    Some(base) => {
-                        storage
-                            .create_node_change(params.workflow_id, params.node_id, &base)
-                            .await
-                    }
-                    None => {
-                        storage
-                            .create_node_change_from_dependency(params.workflow_id, params.node_id)
-                            .await
-                    }
-                };
-                result
-                    .map(|state| json!(state))
-                    .map_err(crate::RpcError::from_cause)
-            }
-            Err(error) => Err(error),
-        },
-        "node.workspace.create" => match parameters::<CreateWorkspaceParams>(params) {
-            Ok(params) => storage
-                .create_node_workspace(params.workflow_id, params.node_id, &params.directory)
-                .await
-                .map(|state| json!(state))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.workspace.update_stale" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .update_stale_node_workspace(params.workflow_id, params.node_id)
-                .await
-                .map(|state| json!(state))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.workspace.verify" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .verify_node_workspace(params.workflow_id, params.node_id)
-                .await
-                .map(|state| json!(state))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.workspace.status" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .node_workspace(params.workflow_id, params.node_id)
-                .await
-                .map(|state| json!(state))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.revisions" => match parameters::<NodeRevisionsParams>(params) {
-            Ok(params) => storage
-                .node_revisions(
-                    params.workflow_id,
-                    params.node_id,
-                    params.page_size,
-                    params.cursor.as_deref(),
-                )
-                .await
-                .map(|page| json!(page))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.restore_with_descendants" => match parameters::<RestoreDescendantsParams>(params) {
-            Ok(params) => storage
-                .restore_node_with_descendants(&params.preview, params.confirmation)
-                .await
-                .map(|operation| json!(operation))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.restore_impact" => match parameters::<NodeRevisionParams>(params) {
-            Ok(params) => storage
-                .node_restore_impact(params.workflow_id, params.node_id, &params.commit_id)
-                .await
-                .map(|impact| json!(impact))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.restore_revision" => match parameters::<NodeRevisionParams>(params) {
-            Ok(params) => storage
-                .restore_node_revision(params.workflow_id, params.node_id, &params.commit_id)
-                .await
-                .map(|operation| json!(operation))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.restores" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .node_restores(params.workflow_id, params.node_id)
-                .await
-                .map(|operations| json!(operations))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.revision_review" => match parameters::<NodeRevisionParams>(params) {
-            Ok(params) => storage
-                .review_node_revision(params.workflow_id, params.node_id, &params.commit_id)
-                .await
-                .map(|review| json!(review))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.review" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .review_node(params.workflow_id, params.node_id)
-                .await
-                .map(|review| json!(review))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.restore" => match parameters::<RunParams>(params) {
-            Ok(params) => storage
-                .restore_run(params.run_id)
-                .await
-                .map(|operation| json!(operation))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.restore_status" => match parameters::<RunParams>(params) {
-            Ok(params) => storage
-                .run_restores(params.run_id)
-                .await
-                .map(|operations| json!(operations))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.recover_restore" => match parameters::<RecoverDependencyParams>(params) {
-            Ok(params) => storage
-                .recover_restore(params.operation_id, params.confirmation)
-                .await
-                .map(|operation| json!(operation))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "run.review" => match parameters::<RunParams>(params) {
-            Ok(params) => storage
-                .review_run(params.run_id)
-                .await
-                .map(|review| json!(review))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.refresh" => match parameters::<NodeParams>(params) {
-            Ok(params) => storage
-                .refresh_node(params.workflow_id, params.node_id)
-                .await
-                .map(|state| json!(state))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "node.update" => match parameters::<UpdateNodeParams>(params) {
-            Ok(params) => storage
-                .update_node(params.workflow_id, params.node_id, &params.prompt)
-                .await
+        StorageParams::WorkflowAdoptRoots(params) => storage
+            .adopt_workflow_roots(params.workflow_id, &params.base_nodes)
+            .await
+            .map(|graph| json!(graph))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::WorkflowRename(params) => storage
+            .rename_workflow(params.workflow_id, &params.name)
+            .await
+            .map(|workflow| json!(workflow))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::WorkflowArchive(params) => {
+            let result = if method == "workflow.archive" {
+                storage.archive_workflow(params.workflow_id).await
+            } else {
+                storage.unarchive_workflow(params.workflow_id).await
+            };
+            result
+                .map(|workflow| json!(workflow))
+                .map_err(crate::RpcError::from_cause)
+        }
+        StorageParams::WorkflowGet(params) => storage
+            .workflow(params.workflow_id)
+            .await
+            .map(|workflow| json!(workflow))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::WorkflowSetBase(params) => storage
+            .set_workflow_base(params.workflow_id, &params.source)
+            .await
+            .map(|workflow| json!(workflow))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::WorkflowList(params) => storage
+            .list_workflows_filtered(&params.project_path, params.filter)
+            .await
+            .map(|workflows| json!(workflows))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::WorkflowGraph(params) => storage
+            .workflow_graph(params.workflow_id)
+            .await
+            .map(|graph| json!(graph))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeResumeDeletion(params) => storage
+            .resume_node_deletion(params.operation_id, params.confirmation)
+            .await
+            .map(|operation| json!(operation))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeMovePrompt(params) => storage
+            .move_prompt_node(params.workflow_id, params.node_id, &params.parent)
+            .await
+            .map(|graph| json!(graph))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeDeletePrompt(params) => storage
+            .delete_prompt_node(params.workflow_id, params.node_id)
+            .await
+            .map(|graph| json!(graph))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeCreate(params) => {
+            let result = match (params.parent, params.parents) {
+                (_, Some(parents)) => {
+                    storage
+                        .create_node_from_parents(params.workflow_id, &params.prompt, &parents)
+                        .await
+                }
+                (Some(parent), None) => {
+                    storage
+                        .create_node_from(params.workflow_id, &params.prompt, &parent)
+                        .await
+                }
+                (None, None) => {
+                    storage
+                        .create_node(params.workflow_id, &params.prompt)
+                        .await
+                }
+            };
+            result
                 .map(|node| json!(node))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        "connection.create" => match parameters::<ConnectParams>(params) {
-            Ok(params) => storage
-                .connect_nodes(params.workflow_id, params.source_id, params.target_id)
-                .await
-                .map(|connection| json!(connection))
-                .map_err(crate::RpcError::from_cause),
-            Err(error) => Err(error),
-        },
-        _ => Err(crate::RpcError::new(-32601, "method not found".to_owned())),
+                .map_err(crate::RpcError::from_cause)
+        }
+        StorageParams::NodeGet(params) => storage
+            .node(params.workflow_id, params.node_id)
+            .await
+            .map(|node| json!(node))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeAssociate(params) => storage
+            .associate_node(params.workflow_id, params.node_id, &params.change_id)
+            .await
+            .map(|state| json!(state))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeOperationRecovery(params) => storage
+            .inspect_dependency_recovery(params.operation_id)
+            .await
+            .map(|value| json!(value))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRecoverOperation(params) => storage
+            .recover_dependency_operation(params.operation_id, params.confirmation)
+            .await
+            .map(|value| json!(value))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeOperations(params) => storage
+            .dependency_operations(params.workflow_id)
+            .await
+            .map(|value| json!(value))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeDelete(params) => storage
+            .delete_node(params.workflow_id, params.node_id, params.acknowledgement)
+            .await
+            .map(|value| json!(value))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeReparent(params) => storage
+            .reparent_node(
+                params.workflow_id,
+                params.node_id,
+                &params.parent,
+                params.acknowledgement,
+            )
+            .await
+            .map(|value| json!(value))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeCreateChange(params) => {
+            let result = match params.base {
+                Some(base) => {
+                    storage
+                        .create_node_change(params.workflow_id, params.node_id, &base)
+                        .await
+                }
+                None => {
+                    storage
+                        .create_node_change_from_dependency(params.workflow_id, params.node_id)
+                        .await
+                }
+            };
+            result
+                .map(|state| json!(state))
+                .map_err(crate::RpcError::from_cause)
+        }
+        StorageParams::NodeWorkspaceCreate(params) => storage
+            .create_node_workspace(params.workflow_id, params.node_id, &params.directory)
+            .await
+            .map(|state| json!(state))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeWorkspaceUpdateStale(params) => storage
+            .update_stale_node_workspace(params.workflow_id, params.node_id)
+            .await
+            .map(|state| json!(state))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeWorkspaceVerify(params) => storage
+            .verify_node_workspace(params.workflow_id, params.node_id)
+            .await
+            .map(|state| json!(state))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeWorkspaceStatus(params) => storage
+            .node_workspace(params.workflow_id, params.node_id)
+            .await
+            .map(|state| json!(state))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRevisions(params) => storage
+            .node_revisions(
+                params.workflow_id,
+                params.node_id,
+                params.page_size,
+                params.cursor.as_deref(),
+            )
+            .await
+            .map(|page| json!(page))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRestoreWithDescendants(params) => storage
+            .restore_node_with_descendants(&params.preview, params.confirmation)
+            .await
+            .map(|operation| json!(operation))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRestoreImpact(params) => storage
+            .node_restore_impact(params.workflow_id, params.node_id, &params.commit_id)
+            .await
+            .map(|impact| json!(impact))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRestoreRevision(params) => storage
+            .restore_node_revision(params.workflow_id, params.node_id, &params.commit_id)
+            .await
+            .map(|operation| json!(operation))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRestores(params) => storage
+            .node_restores(params.workflow_id, params.node_id)
+            .await
+            .map(|operations| json!(operations))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRevisionReview(params) => storage
+            .review_node_revision(params.workflow_id, params.node_id, &params.commit_id)
+            .await
+            .map(|review| json!(review))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeReview(params) => storage
+            .review_node(params.workflow_id, params.node_id)
+            .await
+            .map(|review| json!(review))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunRestore(params) => storage
+            .restore_run(params.run_id)
+            .await
+            .map(|operation| json!(operation))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunRestoreStatus(params) => storage
+            .run_restores(params.run_id)
+            .await
+            .map(|operations| json!(operations))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunRecoverRestore(params) => storage
+            .recover_restore(params.operation_id, params.confirmation)
+            .await
+            .map(|operation| json!(operation))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::RunReview(params) => storage
+            .review_run(params.run_id)
+            .await
+            .map(|review| json!(review))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeRefresh(params) => storage
+            .refresh_node(params.workflow_id, params.node_id)
+            .await
+            .map(|state| json!(state))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeUpdate(params) => storage
+            .update_node(params.workflow_id, params.node_id, &params.prompt)
+            .await
+            .map(|node| json!(node))
+            .map_err(crate::RpcError::from_cause),
+        StorageParams::ConnectionCreate(params) => storage
+            .connect_nodes(params.workflow_id, params.source_id, params.target_id)
+            .await
+            .map(|connection| json!(connection))
+            .map_err(crate::RpcError::from_cause),
     }
 }
 
 fn parameters<T: DeserializeOwned>(params: Value) -> Result<T, crate::RpcError> {
+    if !params.is_object() {
+        return Err(crate::RpcError::new(
+            -32602,
+            "parameters must be a named object".to_owned(),
+        ));
+    }
     serde_json::from_value(params)
         .map_err(|error| crate::RpcError::new(-32602, format!("invalid parameters: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_storage_method_rejects_non_object_parameters_before_execution() {
+        for method in STORAGE_METHODS {
+            for params in [
+                json!([]),
+                json!([1, 1]),
+                json!(null),
+                json!(1),
+                json!("bad"),
+            ] {
+                let request = json!({"method":method, "params":params});
+                let error = StorageParams::decode(&request)
+                    .err()
+                    .expect("invalid parameter shape");
+                assert_eq!(error.code(), -32602, "{request}");
+            }
+        }
+        let error = StorageParams::decode(&json!({"method":"does.not.exist","params":{}}))
+            .err()
+            .expect("unknown method");
+        assert_eq!(error.code(), -32601);
+    }
 }

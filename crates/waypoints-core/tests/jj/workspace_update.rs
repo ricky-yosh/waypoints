@@ -2,6 +2,81 @@ use super::*;
 use waypoints_core::workspace::WorkspaceUpdateOutcome;
 
 #[test]
+fn immutable_fresh_checkout_is_a_readonly_noop_but_stale_update_is_refused() -> anyhow::Result<()> {
+    run(async {
+        let repo = Repository::new()?;
+        let mut storage = Storage::open(&repo.directory.path().join("immutable.db")).await?;
+        let workflow = storage.create_workflow(&repo.project, "Immutable").await?;
+        let node = storage.create_node(workflow.id, "Keep").await?;
+        storage
+            .create_node_change(workflow.id, node.id, "root()")
+            .await?;
+        let path = repo.directory.path().join("dedicated");
+        let workspace = storage
+            .create_node_workspace(workflow.id, node.id, &path)
+            .await?
+            .workspace
+            .expect("allocation");
+        fs::write(path.join("dirty.txt"), "must not be snapshotted\n")?;
+        repo.jj(&[
+            "bookmark",
+            "create",
+            "protected",
+            "-r",
+            &workspace.change_id,
+        ])?;
+        repo.jj(&[
+            "config",
+            "set",
+            "--repo",
+            "revset-aliases.\"immutable_heads()\"",
+            "protected",
+        ])?;
+        let head = repo.operation()?;
+        let before = storage.node_workspace(workflow.id, node.id).await?;
+        assert_eq!(
+            storage
+                .update_stale_node_workspace(workflow.id, node.id)
+                .await?
+                .outcome,
+            WorkspaceUpdateOutcome::AlreadyFresh
+        );
+        assert_eq!(repo.operation()?, head);
+        assert_eq!(storage.node_workspace(workflow.id, node.id).await?, before);
+        assert_eq!(
+            fs::read_to_string(path.join("dirty.txt"))?,
+            "must not be snapshotted\n"
+        );
+        repo.jj(&[
+            "--ignore-working-copy",
+            "--ignore-immutable",
+            "describe",
+            "-r",
+            &workspace.change_id,
+            "-m",
+            "External rewrite",
+        ])?;
+        let head = repo.operation()?;
+        assert!(
+            storage
+                .update_stale_node_workspace(workflow.id, node.id)
+                .await
+                .is_err()
+        );
+        assert_eq!(repo.operation()?, head);
+        assert!(matches!(
+            storage.node_workspace(workflow.id, node.id).await?.state,
+            WorkspaceState::Ready { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(path.join("dirty.txt"))?,
+            "must not be snapshotted\n"
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn clean_stale_update_is_verified_and_failed_metadata_acknowledgement_never_replays()
 -> anyhow::Result<()> {
     run(async {

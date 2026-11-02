@@ -38,12 +38,14 @@ waypoints node workspace update-stale --workflow 1 --node 2 --json
 RPC `node.workspace.update_stale {workflow_id, node_id}` and client/core
 `update_stale_node_workspace` return `{outcome, workspace}`. Outcome is `updated`
 or `already_fresh`; the workspace uses the existing `NodeWorkspace` shape.
-A fresh checkout is a readonly no-op, including when files are dirty.
+A fresh checkout is a readonly no-op, including when files are dirty or the
+revision has become immutable.
 
 This operation requires a ready saved dedicated allocation, matching native
-repository/change/workspace identity, exclusive ownership, and mutable unique
-native state. Active/interrupted runs, unfinished change creation, incomplete
-allocations, and unresolved dependency/restore operations are refused. It does
+repository/change/workspace identity, exclusive ownership, and unique native
+state. A stale update additionally requires mutability. Active/interrupted runs,
+unfinished change creation, incomplete allocations, and unresolved
+dependency/restore operations are refused. It does
 not recreate directories, switch changes, forget workspaces, resolve conflicts,
 clear session barriers, or rerun agents.
 
@@ -87,8 +89,10 @@ These are explicit causes at the core lookup/reservation/readiness checks, not
 English-message classification. This is a bounded initial set, not exhaustive
 classification of every safety refusal. Other errors remain diagnostic failures;
 clients must keep a generic error path. Unknown future data and legacy errors
-without data remain readable. Standard invalid request/method/parameter errors
-keep their JSON-RPC codes.
+without data remain readable. All method parameters use named JSON objects;
+positional arrays and other shapes are rejected with `-32602`. Standard invalid
+request/method/parameter errors keep their JSON-RPC codes even while storage is
+busy: method lookup and parameter validation precede scheduling.
 
 Scheduler refusal is distinct: `-32001` with `data: {"kind":"backend_busy"}` means
 the request was **not started**. `RpcError::is_busy()` recognizes that exact

@@ -53,7 +53,7 @@ impl fmt::Display for BackendError {
 
 impl Error for BackendError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.inner.as_ref())
+        self.inner.source()
     }
 }
 

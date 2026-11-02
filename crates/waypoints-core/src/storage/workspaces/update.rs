@@ -57,12 +57,15 @@ impl Storage {
                 "physical checkout belongs to another change; no update attempted"
             );
             let current = jj::current_revision(&association.directory).await?;
-            jj::ensure_mutable(&association.directory, &current).await?;
+            let stale = checked_out.commit_id != current.commit_id;
+            if stale {
+                jj::ensure_mutable(&association.directory, &current).await?;
+            }
             anyhow::ensure!(
                 jj::operation_id(&association.repository_path).await? == operation,
                 "native repository changed during update preflight; no update attempted"
             );
-            Ok::<_, anyhow::Error>((operation, checked_out.commit_id != current.commit_id))
+            Ok::<_, anyhow::Error>((operation, stale))
         })
         .await
         .context("workspace update preflight timed out; no update attempted")??;

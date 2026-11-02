@@ -3,6 +3,57 @@ use waypoints_backend::{Client, Config};
 use waypoints_core::storage::StorageFailure;
 
 #[test]
+fn named_rpc_parameters_and_error_diagnostics_are_stable_while_idle() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.start()?;
+    for (method, params, code, message) in [
+        (
+            "workflow.get",
+            json!({"workflow_id":123}),
+            -32000,
+            Some("workflow 123 not found"),
+        ),
+        (
+            "repository.inspect",
+            json!({"project_path":"."}),
+            -32000,
+            Some("project path must be absolute"),
+        ),
+        ("workflow.archive", json!([1]), -32602, None),
+        ("node.workspace.update_stale", json!([1, 1]), -32602, None),
+        ("run.cancel", json!([1]), -32602, None),
+        ("run.status", json!([1]), -32602, None),
+        ("does.not.exist", json!({}), -32601, None),
+    ] {
+        let response = fixture.rpc(
+            format!(
+                "{}\n",
+                json!({
+                    "jsonrpc":"2.0","id":7,"method":method,"params":params
+                })
+            )
+            .as_bytes(),
+        )?;
+        assert_eq!(response["error"]["code"], code, "{response}");
+        if let Some(message) = message {
+            assert_eq!(response["error"]["message"], message);
+        }
+    }
+    let output = fixture
+        .command()
+        .args(["workflow", "get", "--workflow", "123"])
+        .output()?;
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8(output.stderr)?;
+    assert_eq!(
+        diagnostic.matches("workflow 123 not found").count(),
+        1,
+        "{diagnostic}"
+    );
+    Ok(())
+}
+
+#[test]
 fn workspace_update_cli_is_explicit_verified_and_uncertainty_survives_restart() -> anyhow::Result<()>
 {
     let (fixture, _, workspace) = run_fixture("No run")?;
@@ -291,6 +342,29 @@ fn live_controls_bypass_blocked_native_work_and_conflicting_mutations_do_not_sta
         let busy = fixture.rpc(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"workflow.rename\",\"params\":{\"workflow_id\":1,\"name\":\"Must not start\"}}\n")?;
         assert_eq!(busy["error"]["code"], -32001);
         assert_eq!(busy["error"]["data"]["kind"], "backend_busy");
+        for (method, params, code) in [
+            ("does.not.exist", json!({}), -32601),
+            ("workflow.get", json!({"workflow_id":"bad"}), -32602),
+            ("node.workspace.update_stale", json!([1, 1]), -32602),
+            (
+                "node.create",
+                json!({"workflow_id":1,"prompt":"Bad","parent":{"kind":"workflow_base"},"parents":[]}),
+                -32602,
+            ),
+        ] {
+            let response = fixture.rpc(
+                format!(
+                    "{}\n",
+                    json!({
+                        "jsonrpc":"2.0","id":"invalid","method":method,"params":params
+                    })
+                )
+                .as_bytes(),
+            )?;
+            assert_eq!(response["id"], "invalid");
+            assert_eq!(response["error"]["code"], code, "{response}");
+            assert!(response["error"].get("data").is_none());
+        }
         if permit {
             let response = fixture.rpc(format!("{}\n", json!({
                 "jsonrpc":"2.0","id":1,"method":"run.permission",

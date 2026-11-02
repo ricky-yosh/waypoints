@@ -73,9 +73,15 @@ impl RpcError {
 
     pub(crate) fn from_cause(cause: impl Into<anyhow::Error>) -> Self {
         let cause = cause.into();
-        let failure = cause
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<waypoints_core::storage::StorageFailure>());
+        let failure = cause.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<waypoints_core::storage::StorageFailure>()
+                .or_else(|| {
+                    cause
+                        .downcast_ref::<waypoints_core::storage::StorageError>()
+                        .and_then(waypoints_core::storage::StorageError::failure)
+                })
+        });
         Self {
             code: -32000,
             message: format!("{cause:#}"),
@@ -102,6 +108,26 @@ impl std::error::Error for RpcError {}
 mod error_tests {
     use super::*;
     use waypoints_core::storage::StorageFailure;
+
+    #[test]
+    fn transparent_storage_errors_render_each_cause_once_and_keep_the_failure() {
+        let cause: waypoints_core::storage::StorageError =
+            anyhow::Error::new(StorageFailure::MissingRun { run_id: 7 })
+                .context("lookup")
+                .into();
+        let nested: waypoints_core::storage::StorageError =
+            anyhow::Error::new(cause).context("request").into();
+        assert_eq!(
+            nested.failure(),
+            Some(&StorageFailure::MissingRun { run_id: 7 })
+        );
+        let error = RpcError::from_cause(nested);
+        assert_eq!(error.message(), "request: lookup: run not found");
+        assert_eq!(
+            error.failure(),
+            Some(StorageFailure::MissingRun { run_id: 7 })
+        );
+    }
 
     #[test]
     fn remote_errors_preserve_legacy_and_unknown_data_without_guessing_categories()
