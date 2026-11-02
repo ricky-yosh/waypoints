@@ -1,0 +1,16 @@
+#!/bin/sh
+# Run native UI hot patching from the workspace root.
+set -eu
+
+cd "$(CDPATH= cd "$(dirname "$0")" && pwd)"
+
+dx="${DIOXUS_DX:-${CARGO_HOME:-"$HOME/.cargo"}/bin/dx}"
+if [ ! -x "$dx" ]; then
+    printf '%s\n' \
+        "Dioxus CLI was not found at $dx." \
+        "Install it with: cargo install dioxus-cli --version 0.7.10 --locked" \
+        "For another installation, set DIOXUS_DX to its executable path." >&2
+    exit 1
+fi
+
+exec "$dx" serve --package waypoints-app --hot-patch --features hot-reload "$@"

@@ -57,6 +57,38 @@ CLI's default database and socket paths (including `XDG_STATE_HOME`); custom CLI
 `--database` and `--socket` options are not yet exposed in the GUI. An interrupted
 dependency operation is shown because saved edges may not reflect native state.
 
+### Develop with native hot reload
+
+The desktop UI uses experimental native Rust hot patching for development.
+From the repository root, run:
+
+```sh
+./dev
+```
+
+This launches Dioxus CLI with the `hot-reload` feature and patches code in the
+running app rather than restarting it. Edit a label, spacing, or layout in a
+`render` method and save to see the change in the existing window. Restart the
+development session after changing struct fields, constructors, startup logic,
+or persisted-state formats, or if a patch fails.
+
+Install the matching CLI once:
+
+```sh
+cargo install dioxus-cli --version 0.7.10 --locked
+```
+
+The script uses `${CARGO_HOME:-$HOME/.cargo}/bin/dx` explicitly because another
+program named `dx` may be on `PATH`. Set `DIOXUS_DX` to use a different Dioxus
+installation. Extra arguments are forwarded; `./dev --help` shows the CLI options.
+It always runs from the workspace root and selects `waypoints-app`, avoiding a
+Dioxus 0.7.10 default-member path bug when launched from a nested directory.
+
+The opt-in feature is forwarded through the local `vendor/gpui-kit` patch to
+GPUI's Subsecond integration. Normal `cargo run -p waypoints-app` builds do not
+enable hot reload. The backend still needs to be started separately as described
+above; UI code hot reload does not refresh workflow data.
+
 ## One line
 
 Plan branching coding-agent work around evolving jj changes, inspect exact

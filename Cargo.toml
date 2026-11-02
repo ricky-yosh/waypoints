@@ -6,4 +6,8 @@ members = [
     "crates/waypoints-core",
 ]
 default-members = ["crates/waypoints-app"]
+exclude = ["vendor/gpui-kit"]
 resolver = "3"
+
+[patch.crates-io]
+gpui-kit = { path = "vendor/gpui-kit" }
