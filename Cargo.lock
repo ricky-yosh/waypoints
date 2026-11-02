@@ -8199,6 +8199,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "tempfile",
+ "tokio",
+ "waypoints-backend",
  "waypoints-core",
 ]
 

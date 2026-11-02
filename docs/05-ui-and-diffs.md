@@ -1,7 +1,7 @@
 # UI and diff viewing
 
 This is a future UI sketch, not an implemented screen inventory or an ordered
-roadmap. The app crate is a placeholder. The GUI must use the shared backend;
+roadmap. The app has an initial readonly workflow browser. The GUI must use the shared backend;
 see [current scope](20-core-backend-status.md) and the
 [native-feedback decision](02-architecture.md#decision-reflect-native-jj-changes-not-inferred-context-staleness).
 

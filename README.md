@@ -9,8 +9,7 @@ native deletion with retained workspace folders,
 read-only native code review, paginated revision history and restore-impact inspection,
 an informational upstream-revision hint, and undoable prompt-only move/delete.
 Explicit recovery handles clear interrupted outcomes; ambiguous states remain
-blocked. The desktop app crate is still a placeholder; GUI/backend integration
-is not implemented.
+blocked. The desktop app provides an initial readonly workflow browser.
 
 **V1 reflects native jj revisions and conflicts.** Users decide what changed
 assumptions require review or rerunning; a separate downstream-context-staleness
@@ -45,6 +44,18 @@ cargo run -p waypoints-cli -- backend stop
 Stopping the backend preserves saved workflows. The next workflow command starts
 it again. See [backend and CLI usage](docs/11-backend-cli.md) for paths, isolated
 test data, the local protocol, and current limitations.
+
+## Try the desktop browser
+
+Start the backend with a workflow command, for example
+`cargo run -p waypoints-cli -- workflow list --project .`, then run
+`cargo run -p waypoints-app`. Enter a project directory and choose Open; select
+an active workflow to inspect its saved nodes and dependencies. Refresh reloads
+the active list and the selected graph, including changes made through the CLI.
+The browser is readonly, does not automatically start the backend, and uses the
+CLI's default database and socket paths (including `XDG_STATE_HOME`); custom CLI
+`--database` and `--socket` options are not yet exposed in the GUI. An interrupted
+dependency operation is shown because saved edges may not reflect native state.
 
 ## One line
 
@@ -100,7 +111,7 @@ manually validated adapter, not a guarantee that every ACP agent is supported.
 | Code history | One evolving jj change per node, many exact revisions; workspaces allocated on demand |
 | Native feedback | Reflect jj changes/conflicts; no inferred downstream-context-staleness state for v1 |
 | Diff viewing | Headless exact-revision review implemented; inline GUI review and editor handoff pending; no custom multibuffer |
-| UI | GPUI Kit (`gpui-kit`); desktop integration pending; see [current stack](docs/06-stack-and-storage.md#gpui) |
+| UI | GPUI Kit (`gpui-kit`); initial readonly desktop browser; see [current stack](docs/06-stack-and-storage.md#gpui) |
 | Storage | Backend-owned Turso with plain SQL; SQLite migration and backup procedures are not implemented |
 | Prototype | React/TypeScript/React Flow is an optional design experiment, not a required build stage |
 | Web / mobile | Optional, undecided; Proa is a candidate for a web side |

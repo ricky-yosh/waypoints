@@ -78,8 +78,9 @@ every step is available today. Individual feature tests do not replace it.
   Real-agent three-parent/conflicted integration and editing existing merge-parent
   sets remain separate work.
 
-GUI integration remains pending. Its acceptance must include CLI edits appearing
-in the GUI through backend refresh, not a second local store or workflow engine.
+The initial readonly GUI uses the backend and supports explicit refresh. End-to-end
+acceptance must still verify CLI edits appearing in the GUI through that refresh,
+not a second local store or workflow engine.
 
 No MCP adapter, transcript archive, or durable notification replay is required. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli).
 

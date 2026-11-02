@@ -6,4 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 gpui-kit = { version = "=0.8.1", features = ["inspector"] }
+tokio = { version = "1", features = ["rt", "net", "time"] }
+waypoints-backend = { path = "../waypoints-backend" }
 waypoints-core = { version = "0.1.0", path = "../waypoints-core" }
+
+[dev-dependencies]
+tempfile = "3"
