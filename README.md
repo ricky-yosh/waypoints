@@ -103,6 +103,24 @@ GPUI's Subsecond integration. Normal `cargo run -p waypoints-app` builds do not
 enable hot reload. The backend still needs to be started separately as described
 above; UI code hot reload does not refresh workflow data.
 
+### Dependency update PRs
+
+[`renovate.json`](renovate.json) configures a GPUI-only Renovate trial: grouped
+Cargo updates on Mondays before 06:00 UTC, with manual merging. Other dependencies,
+vendored manifests, and general lockfile maintenance are excluded from this trial.
+
+To activate it, install the [Renovate GitHub app](https://github.com/apps/renovate)
+for `ricky-yosh/waypoints`, then merge this configuration into the default branch.
+Review any onboarding PR or Dependency Dashboard setup errors. Adding the
+configuration locally does not activate the hosted bot.
+
+GPUI Kit currently uses a local hot-reload patch. Renovate can propose a new
+upstream version, but it cannot refresh `vendor/gpui-kit` automatically. Before
+merging an update PR, refresh the vendored crate and retain the feature forwarding
+unless upstream now supplies it. Resolve any lockfile errors, run tests and lint
+checks, and verify native Settings close/reopen and `./dev` on macOS. A dependency
+PR alone is not evidence that the window-close crash is fixed.
+
 ## One line
 
 Plan branching coding-agent work around evolving jj changes, inspect exact
