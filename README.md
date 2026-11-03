@@ -114,10 +114,10 @@ for `ricky-yosh/waypoints`, then merge this configuration into the default branc
 Review any onboarding PR or Dependency Dashboard setup errors. Adding the
 configuration locally does not activate the hosted bot.
 
-GPUI Kit currently uses a local hot-reload patch. Renovate can propose a new
-upstream version, but it cannot refresh `vendor/gpui-kit` automatically. Before
-merging an update PR, refresh the vendored crate and retain the feature forwarding
-unless upstream now supplies it. Resolve any lockfile errors, run tests and lint
+The GPUI family currently uses local hot-reload and AccessKit compatibility
+patches. Renovate can propose new upstream versions, but it cannot refresh the
+vendored sources automatically. Follow [`vendor/README.md`](vendor/README.md)
+before merging an update PR. Resolve any lockfile errors, run tests and lint
 checks, and verify native Settings close/reopen and `./dev` on macOS. A dependency
 PR alone is not evidence that the window-close crash is fixed.
 

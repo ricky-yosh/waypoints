@@ -24,7 +24,7 @@
       "groupSlug": "gpui-kit-family",
       "rangeStrategy": "bump",
       "prBodyNotes": [
-        "GPUI Kit is patched locally at `vendor/gpui-kit` for hot reload. Refresh that copy from the proposed upstream release and preserve the `hot-reload` feature forwarding (unless upstream now provides it). A manifest bump alone is not a complete upgrade; check for Cargo patch or lockfile errors.",
+        "The GPUI family has local patches for hot reload and the AccessKit window-close fix. See `vendor/README.md` and `scripts/refresh-ui-vendor.py`. Update the pinned source versions and checksums, regenerate the vendored sources, and preserve patches still missing upstream. A manifest bump alone is not a complete upgrade; check for Cargo patch or lockfile errors.",
         "Before merging, run the workspace tests and lint checks, verify native Settings window close/reopen on macOS, and smoke-test `./dev`. Automerging is disabled."
       ]
     }
