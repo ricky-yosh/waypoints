@@ -1,118 +1,190 @@
 use std::path::PathBuf;
 
-use gpui_kit::base::StyledExt as _;
+use gpui_kit::base::{StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, TitleBar,
+    alert::Alert,
     button::{Button, ButtonVariants as _},
-    input::{Input, InputEvent, InputState},
+    menu::{DropdownMenu as _, PopupMenuItem},
+    resizable::{h_resizable, resizable_panel},
+    spinner::Spinner,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    App, AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
+    ParentElement as _, PathPromptOptions, Render, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, actions, div, px,
 };
 use waypoints_backend::{Client, Config};
 use waypoints_core::storage::{Workflow, WorkflowGraph};
 
-enum Load<T> {
+use crate::preferences::{
+    Appearance, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, ProjectPreferences, SelectedWorkflow,
+    WindowGeometry, WorkspacePreferences,
+};
+
+// Reserve a readable detail column when the navigator is expanded.
+const MIN_DETAIL_WIDTH: f32 = 320.0;
+// The divider hit area extends beyond the panel edge.
+const DIVIDER_HIT_MARGIN: f32 = 5.0;
+
+actions!(waypoints, [ToggleSidebar, AddProject, RefreshProject]);
+
+pub(crate) fn init(cx: &mut App) {
+    let (toggle, add, refresh) = if cfg!(target_os = "macos") {
+        ("cmd-b", "cmd-o", "cmd-r")
+    } else {
+        ("ctrl-b", "ctrl-o", "ctrl-r")
+    };
+    cx.bind_keys([
+        KeyBinding::new(toggle, ToggleSidebar, None),
+        KeyBinding::new(add, AddProject, None),
+        KeyBinding::new(refresh, RefreshProject, None),
+    ]);
+}
+
+enum Load<T, E = String> {
     Idle,
     Loading,
     Ready(T),
-    Error(String),
+    Error(E),
 }
 
 pub(crate) struct Workspace {
-    path: Entity<InputState>,
-    project: Option<PathBuf>,
-    workflows: Load<Vec<Workflow>>,
-    selected: Option<i64>,
+    pub(crate) appearance: Appearance,
+    state: WorkspaceState,
     graph: Load<WorkflowGraph>,
+    graph_revision: u64,
+    sidebar_visible: bool,
+    sidebar_width: f32,
+    focus: FocusHandle,
+    path_error: Option<String>,
+    preferences_error: Option<String>,
+}
+
+struct Project {
+    id: u64,
+    path: PathBuf,
+    expanded: bool,
     revision: u64,
-    _subscription: Subscription,
+    workflows: Load<Vec<Workflow>, ProjectLoadError>,
+}
+
+enum ProjectLoadError {
+    DirectoryUnavailable(PathBuf),
+    Backend(String),
+}
+
+#[derive(Default)]
+struct WorkspaceState {
+    projects: Vec<Project>,
+    next_id: u64,
+    selected: Option<(u64, i64)>,
+}
+
+impl WorkspaceState {
+    fn add(&mut self, path: PathBuf) -> Option<u64> {
+        if self.projects.iter().any(|project| project.path == path) {
+            return None;
+        }
+        self.next_id += 1;
+        let id = self.next_id;
+        self.projects.push(Project {
+            id,
+            path,
+            expanded: true,
+            revision: 0,
+            workflows: Load::Idle,
+        });
+        Some(id)
+    }
+
+    fn begin_load(&mut self, id: u64) -> Option<(PathBuf, u64)> {
+        let project = self.projects.iter_mut().find(|project| project.id == id)?;
+        if matches!(project.workflows, Load::Loading) {
+            return None;
+        }
+        project.revision += 1;
+        project.workflows = Load::Loading;
+        Some((project.path.clone(), project.revision))
+    }
+
+    fn finish_load(
+        &mut self,
+        id: u64,
+        revision: u64,
+        result: Result<Vec<Workflow>, ProjectLoadError>,
+    ) -> bool {
+        let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.id == id && project.revision == revision)
+        else {
+            return false;
+        };
+        if let (Some((selected_project, selected_workflow)), Ok(workflows)) =
+            (self.selected, &result)
+            && selected_project == id
+            && !workflows
+                .iter()
+                .any(|workflow| workflow.id == selected_workflow)
+        {
+            self.selected = None;
+        }
+        project.workflows = match result {
+            Ok(workflows) => Load::Ready(workflows),
+            Err(error) => Load::Error(error),
+        };
+        true
+    }
+
+    fn remove(&mut self, id: u64) {
+        self.projects.retain(|project| project.id != id);
+        if self.selected.is_some_and(|(project, _)| project == id) {
+            self.selected = None;
+        }
+    }
 }
 
 impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let path = cx.new(|cx| InputState::new(window, cx).placeholder("Project directory"));
-        let subscription = cx.subscribe_in(&path, window, |this, _, event, _, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                this.open_project(cx);
-            }
-        });
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
         Self {
-            path,
-            project: None,
-            workflows: Load::Idle,
-            selected: None,
+            appearance: Appearance::System,
+            state: WorkspaceState::default(),
             graph: Load::Idle,
-            revision: 0,
-            _subscription: subscription,
+            graph_revision: 0,
+            sidebar_visible: true,
+            sidebar_width: 240.0,
+            focus,
+            path_error: None,
+            preferences_error: None,
         }
     }
 
     fn open_project(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.workflows, Load::Loading) {
-            return;
-        }
-        let path = self.path.read(cx).value().to_string();
-        if path.trim().is_empty() {
-            self.revision += 1;
-            self.project = None;
-            self.selected = None;
-            self.graph = Load::Idle;
-            self.workflows = Load::Error("Enter a project directory.".into());
-            cx.notify();
-            return;
-        }
-        self.project = Some(PathBuf::from(path));
-        self.selected = None;
-        self.graph = Load::Idle;
-        self.refresh(cx);
-    }
-
-    fn refresh(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.workflows, Load::Loading) {
-            return;
-        }
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        self.revision += 1;
-        let revision = self.revision;
-        let selected = self.selected;
-        self.workflows = Load::Loading;
-        self.graph = if selected.is_some() {
-            Load::Loading
-        } else {
-            Load::Idle
-        };
-        cx.notify();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add project".into()),
+        });
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    run_backend(|client: Client| async move {
-                        load_project(&client, &project, selected).await
-                    })
-                })
-                .await;
+            let result = receiver.await;
             this.update(cx, |this, cx| {
-                if this.revision != revision {
-                    return;
-                }
                 match result {
-                    Ok((workflows, graph)) => {
-                        if graph.is_none() {
-                            this.selected = None;
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.into_iter().next() {
+                            this.add_project(path, cx);
                         }
-                        this.graph = match graph {
-                            Some(Ok(graph)) => Load::Ready(graph),
-                            Some(Err(error)) => Load::Error(error),
-                            None => Load::Idle,
-                        };
-                        this.workflows = Load::Ready(workflows);
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        this.path_error = Some(format!("Couldn’t open folder picker: {error}"))
                     }
                     Err(error) => {
-                        this.workflows = Load::Error(error);
-                        this.graph = Load::Idle;
+                        this.path_error = Some(format!("Couldn’t open folder picker: {error}"))
                     }
                 }
                 cx.notify();
@@ -122,13 +194,88 @@ impl Workspace {
         .detach();
     }
 
-    fn select(&mut self, id: i64, cx: &mut Context<Self>) {
-        if !can_select(&self.workflows, self.selected, &self.graph, id) {
+    fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let path = cx
+                .background_spawn(async move { normalize_project_path(path) })
+                .await;
+            this.update(cx, |this, cx| {
+                match this.state.add(path) {
+                    Some(id) => {
+                        this.path_error = None;
+                        this.refresh(id, cx);
+                    }
+                    None => this.path_error = Some("This project is already open.".into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        if !self.sidebar_visible {
+            self.focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn refresh(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some((project, revision)) = self.state.begin_load(id) else {
+            return;
+        };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if !project.is_dir() {
+                        return Err(ProjectLoadError::DirectoryUnavailable(project));
+                    }
+                    run_backend(|client: Client| async move {
+                        client
+                            .list_workflows(&project)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .map_err(ProjectLoadError::Backend)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let selected = this.state.selected;
+                if !this.state.finish_load(id, revision, result) {
+                    return;
+                }
+                if selected != this.state.selected {
+                    this.graph_revision += 1;
+                    this.graph = Load::Idle;
+                } else if let Some((project, workflow)) =
+                    selected.filter(|(project, _)| *project == id)
+                {
+                    this.load_graph(project, workflow, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn select(&mut self, project: u64, id: i64, cx: &mut Context<Self>) {
+        if !self.state.projects.iter().any(|entry| entry.id == project && matches!(&entry.workflows, Load::Ready(workflows) if workflows.iter().any(|workflow| workflow.id == id))) {
             return;
         }
-        self.selected = Some(id);
-        self.revision += 1;
-        let revision = self.revision;
+        if self.state.selected == Some((project, id)) && matches!(self.graph, Load::Loading) {
+            return;
+        }
+        self.load_graph(project, id, cx);
+    }
+
+    fn load_graph(&mut self, project: u64, id: i64, cx: &mut Context<Self>) {
+        self.state.selected = Some((project, id));
+        self.graph_revision += 1;
+        let revision = self.graph_revision;
         self.graph = Load::Loading;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -140,7 +287,7 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.revision != revision {
+                if this.graph_revision != revision || this.state.selected != Some((project, id)) {
                     return;
                 }
                 this.graph = match result {
@@ -155,16 +302,97 @@ impl Workspace {
     }
 }
 
-fn can_select(
-    workflows: &Load<Vec<Workflow>>,
-    selected: Option<i64>,
-    graph: &Load<WorkflowGraph>,
-    id: i64,
-) -> bool {
-    matches!(workflows, Load::Ready(workflows) if workflows.iter().any(|workflow| workflow.id == id))
-        && !(selected == Some(id) && matches!(graph, Load::Loading))
+impl Workspace {
+    pub(crate) fn restore_preferences(
+        &mut self,
+        preferences: WorkspacePreferences,
+        cx: &mut Context<Self>,
+    ) {
+        self.appearance = preferences.appearance;
+        self.sidebar_visible = preferences.sidebar_visible;
+        self.sidebar_width = preferences.sidebar_width;
+        for saved in preferences.projects {
+            if let Some(id) = self.state.add(saved.path.clone())
+                && let Some(project) = self.state.projects.iter_mut().find(|entry| entry.id == id)
+            {
+                project.expanded = saved.expanded;
+                if let Some(selected) = &preferences.selected
+                    && selected.project == saved.path
+                {
+                    self.state.selected = Some((id, selected.workflow_id));
+                }
+            }
+        }
+        let ids: Vec<_> = self
+            .state
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect();
+        for id in ids {
+            self.refresh(id, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn snapshot_preferences(&self, window: &Window) -> WorkspacePreferences {
+        let bounds = window.window_bounds().get_bounds();
+        WorkspacePreferences {
+            appearance: self.appearance,
+            projects: self
+                .state
+                .projects
+                .iter()
+                .map(|project| ProjectPreferences {
+                    path: project.path.clone(),
+                    expanded: project.expanded,
+                })
+                .collect(),
+            selected: self.state.selected.and_then(|(project, workflow_id)| {
+                self.state
+                    .projects
+                    .iter()
+                    .find(|entry| entry.id == project)
+                    .map(|entry| SelectedWorkflow {
+                        project: entry.path.clone(),
+                        workflow_id,
+                    })
+            }),
+            sidebar_width: self.sidebar_width,
+            sidebar_visible: self.sidebar_visible,
+            window_bounds: Some(WindowGeometry {
+                x: bounds.origin.x.into(),
+                y: bounds.origin.y.into(),
+                width: bounds.size.width.into(),
+                height: bounds.size.height.into(),
+            }),
+        }
+    }
+
+    pub(crate) fn show_preferences_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.preferences_error = Some(error);
+        cx.notify();
+    }
 }
 
+// Folder identity requires filesystem access; callers run this off the UI thread.
+fn normalize_project_path(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path)
+        .or_else(|_| std::path::absolute(&path))
+        .unwrap_or(path)
+}
+
+pub(crate) fn normalize_preferences(mut preferences: WorkspacePreferences) -> WorkspacePreferences {
+    for project in &mut preferences.projects {
+        project.path = normalize_project_path(std::mem::take(&mut project.path));
+    }
+    if let Some(selected) = &mut preferences.selected {
+        selected.project = normalize_project_path(std::mem::take(&mut selected.project));
+    }
+    preferences
+}
+
+#[cfg(test)]
 async fn load_project(
     client: &Client,
     project: &std::path::Path,
@@ -219,42 +447,260 @@ fn message(text: impl Into<SharedString>) -> gpui_kit::Div {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col().gap_2();
-        match &self.workflows {
-            Load::Idle => list = list.child(message("Open a project to see its workflows.")),
-            Load::Loading => list = list.child(message("Loading workflows…")),
-            Load::Error(error) => {
-                list = list.child(message(format!("Couldn’t load workflows: {error}")))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div().flex().flex_col().gap_1();
+        if self.state.projects.is_empty() {
+            list = list.child(
+                message("No projects open")
+                    .px_2()
+                    .text_color(cx.theme().muted_foreground),
+            );
+        }
+        for project in &self.state.projects {
+            let project_id = project.id;
+            let path = project.path.to_string_lossy();
+            let name = project.path.file_name().map_or_else(
+                || path.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let duplicate_name = self.state.projects.iter().any(|other| {
+                other.id != project_id && other.path.file_name() == project.path.file_name()
+            });
+            let name = if duplicate_name {
+                project.path.parent().map_or(name.clone(), |parent| {
+                    let parent_name = parent.file_name();
+                    let duplicate_parent = self.state.projects.iter().any(|other| {
+                        other.id != project_id
+                            && other.path.file_name() == project.path.file_name()
+                            && other.path.parent().and_then(std::path::Path::file_name)
+                                == parent_name
+                    });
+                    let qualifier = parent_name
+                        .filter(|_| !duplicate_parent)
+                        .map_or_else(|| parent.to_string_lossy(), |name| name.to_string_lossy());
+                    format!("{name} · {qualifier}")
+                })
+            } else {
+                name
+            };
+            let weak = cx.entity().downgrade();
+            let loading = matches!(project.workflows, Load::Loading);
+            let refresh_label = if matches!(project.workflows, Load::Error(_)) {
+                "Retry"
+            } else {
+                "Refresh"
+            };
+            let header = div()
+                .flex()
+                .items_center()
+                .child(
+                    Button::new(("project", project_id))
+                        .small()
+                        .ghost()
+                        .flex_1()
+                        .min_w_0()
+                        .accessibility_label(format!(
+                            "{} {name}",
+                            if project.expanded {
+                                "Collapse"
+                            } else {
+                                "Expand"
+                            }
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .w_full()
+                                .min_w_0()
+                                .child(
+                                    Icon::new(if project.expanded {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .size_3()
+                                    .flex_shrink_0(),
+                                )
+                                .child(div().min_w_0().text_ellipsis().child(name)),
+                        )
+                        .tooltip(path.to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(project) =
+                                this.state.projects.iter_mut().find(|p| p.id == project_id)
+                            {
+                                project.expanded = !project.expanded;
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new(("project-menu", project_id))
+                        .small()
+                        .ghost()
+                        .icon(IconName::Ellipsis)
+                        .accessibility_label(format!("Project actions for {path}"))
+                        .tooltip("Project actions")
+                        .dropdown_menu(move |menu, _, _| {
+                            let refresh = weak.clone();
+                            let remove = weak.clone();
+                            menu.item(
+                                PopupMenuItem::new(refresh_label)
+                                    .disabled(loading)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = refresh.update(cx, |this, cx| {
+                                            this.refresh(project_id, cx);
+                                        });
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Remove from Sidebar").on_click(
+                                    move |_, window, cx| {
+                                        let _ = remove.update(cx, |this, cx| {
+                                            this.focus.focus(window, cx);
+                                            let selected = this.state.selected;
+                                            this.state.remove(project_id);
+                                            if selected != this.state.selected {
+                                                this.graph_revision += 1;
+                                                this.graph = Load::Idle;
+                                            }
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            )
+                        }),
+                );
+            let mut entry = div().flex().flex_col().gap_1().child(header);
+            if project.expanded {
+                let mut contents = div().flex().flex_col().gap_1().pl_4();
+                contents = match &project.workflows {
+                    Load::Idle | Load::Loading => contents.child(
+                        div()
+                            .id(("project-loading", project_id))
+                            .role(Role::Status)
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(Spinner::new().xsmall())
+                            .child(message("Loading workflows…")),
+                    ),
+                    Load::Error(error) => {
+                        let (status, diagnostic) = match error {
+                            ProjectLoadError::DirectoryUnavailable(path) => (
+                                "Folder unavailable",
+                                format!("The project folder is unavailable at {}", path.display()),
+                            ),
+                            ProjectLoadError::Backend(error) => {
+                                ("Couldn’t load workflows", error.clone())
+                            }
+                        };
+                        contents.child(
+                            div()
+                                .id(("project-error", project_id))
+                                .role(Role::Status)
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_x_1()
+                                .pl_2()
+                                .child(message(status).text_color(cx.theme().muted_foreground))
+                                .child(
+                                    Button::new(("retry-project", project_id))
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Retry")
+                                        .tooltip(diagnostic)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.refresh(project_id, cx);
+                                        })),
+                                ),
+                        )
+                    }
+                    Load::Ready(workflows) if workflows.is_empty() => contents.child(
+                        message("No active workflows")
+                            .px_2()
+                            .py_1()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+                    Load::Ready(workflows) => {
+                        for workflow in workflows {
+                            let id = workflow.id;
+                            contents = contents.child(
+                                Button::new(SharedString::from(format!(
+                                    "workflow-{project_id}-{id}"
+                                )))
+                                .small()
+                                .accessibility_label(workflow.name.clone())
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .child(workflow.name.clone()),
+                                )
+                                .tooltip(workflow.name.clone())
+                                .ghost()
+                                .selected(self.state.selected == Some((project_id, id)))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.select(project_id, id, cx),
+                                )),
+                            );
+                        }
+                        contents
+                    }
+                };
+                entry = entry.child(contents);
             }
-            Load::Ready(workflows) if workflows.is_empty() => {
-                list = list.child(message("No active workflows in this project."))
-            }
-            Load::Ready(workflows) => {
-                for workflow in workflows {
-                    let id = workflow.id;
-                    list = list.child(
-                        Button::new(("workflow", id as u64))
-                            .label(format!("{}  (#{id})", workflow.name))
-                            .ghost()
-                            .selected(self.selected == Some(id))
-                            .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx))),
-                    );
-                }
-            }
+            list = list.child(entry);
         }
         let mut detail = div().flex().flex_col().gap_3();
+        let selected_project = self
+            .state
+            .selected
+            .and_then(|(id, _)| self.state.projects.iter().find(|project| project.id == id));
+        if let Some(project) = selected_project {
+            detail = detail.child(
+                message(project.path.display().to_string()).text_color(cx.theme().muted_foreground),
+            );
+        }
         match &self.graph {
             Load::Idle => {
-                detail = detail.child(message(
-                    "Select a workflow to see its nodes and dependencies.",
-                ))
+                let prompt = match selected_project.map(|project| &project.workflows) {
+                    Some(Load::Error(_)) => "Retry the project to reopen the selected workflow.",
+                    Some(_) => "Opening the selected workflow…",
+                    None if self.state.projects.is_empty() => "Add a project to see its workflows.",
+                    None => "Select a workflow to see its nodes and dependencies.",
+                };
+                detail = detail.child(
+                    message(prompt)
+                        .id("detail-status")
+                        .role(Role::Status)
+                        .text_color(cx.theme().muted_foreground),
+                );
             }
-            Load::Loading => detail = detail.child(message("Loading workflow…")),
+            Load::Loading => {
+                detail = detail.child(
+                    message("Loading workflow…")
+                        .id("graph-loading")
+                        .role(Role::Status),
+                )
+            }
             Load::Error(error) => {
-                detail = detail.child(message(format!(
-                    "Couldn’t load workflow: {error}. Refresh to try again."
-                )))
+                detail = detail.child(
+                    Alert::error("graph-error", format!("Couldn’t load workflow: {error}."))
+                        .small(),
+                );
+                if let Some((project, id)) = self.state.selected {
+                    detail =
+                        detail.child(Button::new("retry-graph").label("Retry workflow").on_click(
+                            cx.listener(move |this, _, _, cx| this.load_graph(project, id, cx)),
+                        ));
+                }
             }
             Load::Ready(graph) => {
                 detail = detail.child(div().text_lg().child(graph.workflow.name.clone()));
@@ -292,63 +738,155 @@ impl Render for Workspace {
                 }
             }
         }
+        let sidebar = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .gap_2()
+            .p_2()
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
+            .child(div().px_2().text_sm().child("Projects"))
+            .child(
+                div()
+                    .id("workflows")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list),
+            );
+        let detail = div()
+            .id("detail")
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_4()
+            .child(detail);
+        let weak = cx.entity().downgrade();
+        let max_sidebar_width =
+            (f32::from(window.viewport_size().width) - MIN_DETAIL_WIDTH - DIVIDER_HIT_MARGIN)
+                .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let content = if self.sidebar_visible {
+            h_resizable("workspace-split")
+                .on_resize(move |state, _, cx| {
+                    if let Some(width) = state.read(cx).sizes().first() {
+                        let width: f32 = (*width).into();
+                        weak.update(cx, |this, cx| {
+                            this.sidebar_width = width;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+                .child(
+                    resizable_panel()
+                        .size(px(self
+                            .sidebar_width
+                            .clamp(MIN_SIDEBAR_WIDTH, max_sidebar_width)))
+                        .size_range(px(MIN_SIDEBAR_WIDTH)..px(max_sidebar_width))
+                        .fixed()
+                        .child(sidebar),
+                )
+                .child(resizable_panel().child(detail))
+                .into_any_element()
+        } else {
+            detail.into_any_element()
+        };
+        let toggle_label = if self.sidebar_visible {
+            "Hide projects"
+        } else {
+            "Show projects"
+        };
+        let toolbar = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .child(
+                Button::new("toggle-sidebar")
+                    .small()
+                    .ghost()
+                    .icon(IconName::PanelLeft)
+                    .accessibility_label(toggle_label)
+                    .tooltip(toggle_label)
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+            )
+            .child(
+                Button::new("open")
+                    .small()
+                    .ghost()
+                    .icon(IconName::Plus)
+                    .accessibility_label("Add Project…")
+                    .tooltip("Add Project…")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_project(cx))),
+            )
+            .child(div().ml_auto().px_2().text_sm().child("Waypoints"));
+        let toolbar = if cfg!(target_os = "macos") {
+            TitleBar::new().child(toolbar).into_any_element()
+        } else {
+            toolbar
+                .py_1()
+                .flex_grow_0()
+                .border_b_1()
+                .border_color(cx.theme().sidebar_border)
+                .bg(cx.theme().sidebar)
+                .into_any_element()
+        };
         div()
             .flex()
             .flex_col()
             .size_full()
-            .p_4()
-            .gap_3()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                this.toggle_sidebar(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AddProject, _, cx| {
+                this.open_project(cx);
+            }))
+            .on_action(cx.listener(|this, _: &RefreshProject, window, cx| {
+                if let Some((project, _)) = this.state.selected {
+                    this.focus.focus(window, cx);
+                    this.refresh(project, cx);
+                }
+            }))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(div().text_lg().font_semibold().child("Waypoints"))
-            .child(div().child("Project directory"))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.path)))
-                    .child(
-                        Button::new("open")
-                            .label("Open")
-                            .disabled(matches!(self.workflows, Load::Loading))
-                            .on_click(cx.listener(|this, _, _, cx| this.open_project(cx))),
+            .child(toolbar)
+            .when_some(self.path_error.clone(), |this, error| {
+                let workspace = cx.entity().downgrade();
+                this.child(
+                    Alert::error("project-picker-error", error)
+                        .small()
+                        .on_close(move |_, window, cx| {
+                            let _ = workspace.update(cx, |workspace, cx| {
+                                workspace.path_error = None;
+                                workspace.focus.focus(window, cx);
+                                cx.notify();
+                            });
+                        }),
+                )
+            })
+            .when_some(self.preferences_error.clone(), |this, error| {
+                this.child(
+                    Alert::warning(
+                        "preferences-error",
+                        format!("Workspace preferences: {error}"),
                     )
-                    .child(
-                        Button::new("refresh")
-                            .label("Refresh")
-                            .disabled(
-                                self.project.is_none() || matches!(self.workflows, Load::Loading),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .gap_4()
-                    .items_stretch()
-                    .child(
-                        div()
-                            .w_64()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(div().font_semibold().child("Workflows"))
-                            .child(div().id("workflows").overflow_y_scroll().child(list)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .id("detail")
-                            .overflow_y_scroll()
-                            .child(detail),
-                    ),
-            )
+                    .small(),
+                )
+            })
+            .child(div().flex_1().min_h_0().min_w_0().child(content))
     }
 }
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;
 
 #[cfg(test)]
 mod tests {
@@ -402,13 +940,6 @@ mod tests {
                 graph.expect("selected graph").expect("graph").workflow.id,
                 workflow.id
             );
-            assert!(!can_select(&Load::Loading, None, &Load::Idle, workflow.id));
-            assert!(!can_select(
-                &Load::Ready(workflows),
-                Some(workflow.id),
-                &Load::Loading,
-                workflow.id
-            ));
             client.archive_workflow(workflow.id).await.expect("archive");
             let (workflows, graph) = load_project(&client, directory.path(), Some(workflow.id))
                 .await
@@ -421,5 +952,36 @@ mod tests {
             .join()
             .expect("server thread")
             .expect("server shutdown");
+    }
+
+    #[test]
+    fn project_requests_are_independent_and_removed_instances_reject_results() {
+        let mut state = WorkspaceState::default();
+        let a = state.add("missing-a".into()).expect("first project");
+        let b = state.add("missing-b".into()).expect("second project");
+        let (_, a_revision) = state.begin_load(a).expect("load a");
+        let (_, b_revision) = state.begin_load(b).expect("load b");
+        assert!(state.finish_load(a, a_revision, Ok(vec![])));
+        assert!(matches!(state.projects[1].workflows, Load::Loading));
+        state.selected = Some((b, 42));
+        state.remove(b);
+        assert_eq!(state.selected, None);
+        let replacement = state.add("missing-b".into()).expect("re-add project");
+        assert_ne!(replacement, b);
+        assert!(!state.finish_load(
+            b,
+            b_revision,
+            Err(ProjectLoadError::Backend("stale".into()))
+        ));
+        assert!(matches!(state.projects[1].workflows, Load::Idle));
+        let (_, old) = state.begin_load(replacement).expect("old request");
+        assert!(
+            state.begin_load(replacement).is_none(),
+            "duplicate refresh ignored"
+        );
+        assert!(state.finish_load(replacement, old, Ok(vec![])));
+        let (_, current) = state.begin_load(replacement).expect("new request");
+        assert!(!state.finish_load(replacement, old, Ok(vec![])));
+        assert!(state.finish_load(replacement, current, Ok(vec![])));
     }
 }

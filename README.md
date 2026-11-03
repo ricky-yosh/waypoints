@@ -49,9 +49,23 @@ test data, the local protocol, and current limitations.
 
 Start the backend with a workflow command, for example
 `cargo run -p waypoints-cli -- workflow list --project .`, then run
-`cargo run -p waypoints-app`. Enter a project directory and choose Open; select
-an active workflow to inspect its saved nodes and dependencies. Refresh reloads
-the active list and the selected graph, including changes made through the CLI.
+`cargo run -p waypoints-app`. Choose **Add project…** to open a folder in the
+Projects sidebar. Multiple projects can stay open; expand a project and select
+an active workflow to inspect its saved nodes and dependencies. Each project has
+its own Refresh/Retry action; toolbar Refresh targets the selected workflow's project,
+including changes made through the CLI. **Remove from sidebar** only removes the
+UI entry: it never deletes project files or saved workflows.
+
+Drag the divider to resize the sidebar, or use **Show/Hide Projects** in the View
+menu. On macOS, Command-O adds a project, Command-B toggles the sidebar, and
+Command-R refreshes the selected project (Control equivalents on Linux).
+Open folders, expanded sections, selection, sidebar layout, and window bounds are
+remembered in `waypoints/workspace.json` under the platform configuration directory
+(`~/Library/Application Support` on macOS; `$XDG_CONFIG_HOME` or `~/.config` on Linux).
+Unavailable saved folders remain visible for retry or removal. Invalid or newer
+preferences files produce a warning and are not overwritten; repair or move the
+file to allow preferences to save again.
+
 The browser is readonly, does not automatically start the backend, and uses the
 CLI's default database and socket paths (including `XDG_STATE_HOME`); custom CLI
 `--database` and `--socket` options are not yet exposed in the GUI. An interrupted
