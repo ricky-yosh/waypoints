@@ -13,25 +13,29 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 CRATES = [
     ("gpui-kit", "0.9.0", "2c464934b5cdb85dd3fc511e60d09fb446fba422de159a80038368f52893c14b"),
-    ("gpui-pre", "0.3.11", "9303c771abf2acff2a96d706f69d9a82088c4770173a07cce88f0002431d887d"),
-    ("gpui-pre-macos", "0.3.11", "d7410cfdaa1fa55a414346cc492d18ce340e3a8b6d0ac3213b984ed690c82b92"),
-    ("gpui-pre-linux", "0.3.11", "79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624"),
-    ("gpui-pre-windows", "0.3.11", "5141a3db59bab761a16ab19529fe4117a86e91922e8fc00af6dfc4829cb1744d"),
+    ("gpui-fast", "0.1.13", "7ee67914f779fdcfce4c7f59f6ba8fa68f680bd137648b25a801cd5d9cb1b8ab"),
+    ("gpui-fast-macos", "0.1.13", "d809f618f836aff7fc654c00c3f6e64d41abd83713140998dd83e8ad6906b1e9"),
+    ("gpui-fast-linux", "0.1.13", "59c465cccb420a54d2abc14af42ce82ecb1ea473b531ddbd299eb4e15ae2dd83"),
+    ("gpui-fast-windows", "0.1.13", "088654835f1408e1aaa79afcc316530461a14fa1c4e543d47b1881b6ced63f19"),
 ]
 
 
 def keep_source(name, relative):
-    if name == "gpui-pre" and relative.parts[0] == "examples":
+    if name == "gpui-fast" and relative.parts[0] == "examples":
         # platform.rs includes this image in a unit test.
         return relative == Path("examples/image/exif-orientation-rotate-180.jpg")
     return True
 
 
 def patch_manifest(name, text):
-    if name == "gpui-pre":
+    if name == "gpui-fast":
         text = re.sub(r"(?ms)^\[\[example\]\]\n.*?(?=^\[|\Z)", "", text)
     if name == "gpui-kit":
-        return text.replace("[features]\n", '[features]\nhot-reload = ["gpui/hot-reload"]\n', 1)
+        return text.replace(
+            "[features]\n",
+            '[features]\nhot-reload = ["gpui-fast?/hot-reload"]\n',
+            1,
+        )
     versions = {
         "accesskit": "0.25.2",
         "accesskit_macos": "0.27.2",

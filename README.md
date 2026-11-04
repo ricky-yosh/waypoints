@@ -73,6 +73,11 @@ dependency operation is shown because saved edges may not reflect native state.
 
 ### Develop with native hot reload
 
+The desktop app uses GPUI Kit's **GPUI Fast** backend for retained rendering and
+layout, including in tests. Application code continues to use `gpui_kit`.
+The local patches preserve the AccessKit window-close fix for GPUI Fast;
+see [`vendor/README.md`](vendor/README.md).
+
 The desktop UI uses experimental native Rust hot patching for development.
 From the repository root, run:
 
@@ -99,7 +104,8 @@ It always runs from the workspace root and selects `waypoints-app`, avoiding a
 Dioxus 0.7.10 default-member path bug when launched from a nested directory.
 
 The opt-in feature is forwarded through the local `vendor/gpui-kit` patch to
-GPUI's Subsecond integration. Normal `cargo run -p waypoints-app` builds do not
+GPUI Fast's Subsecond integration only.
+Normal `cargo run -p waypoints-app` builds do not
 enable hot reload. The backend still needs to be started separately as described
 above; UI code hot reload does not refresh workflow data.
 

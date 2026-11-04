@@ -2807,17 +2807,18 @@ dependencies = [
 [[package]]
 name = "gpui-fast"
 version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ee67914f779fdcfce4c7f59f6ba8fa68f680bd137648b25a801cd5d9cb1b8ab"
 dependencies = [
- "accesskit 0.24.1",
+ "accesskit 0.25.2",
  "anyhow",
  "async-channel",
  "async-task",
+ "async-tungstenite",
  "backtrace",
  "bitflags 2.13.2",
  "chrono",
  "derive_more",
+ "dioxus-cli-config",
+ "dioxus-devtools-types",
  "embed-resource",
  "etagere",
  "futures",
@@ -2860,8 +2861,10 @@ dependencies = [
  "serde_json",
  "slotmap",
  "smallvec",
+ "smol",
  "spin 0.10.1",
  "strum 0.28.0",
+ "subsecond",
  "taffy",
  "thiserror 2.0.21",
  "ttf-parser",
@@ -2918,11 +2921,9 @@ dependencies = [
 [[package]]
 name = "gpui-fast-linux"
 version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59c465cccb420a54d2abc14af42ce82ecb1ea473b531ddbd299eb4e15ae2dd83"
 dependencies = [
- "accesskit 0.24.1",
- "accesskit_unix 0.22.1",
+ "accesskit 0.25.2",
+ "accesskit_unix 0.24.1",
  "anyhow",
  "as-raw-xcb-connection",
  "ashpd",
@@ -2963,11 +2964,9 @@ dependencies = [
 [[package]]
 name = "gpui-fast-macos"
 version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d809f618f836aff7fc654c00c3f6e64d41abd83713140998dd83e8ad6906b1e9"
 dependencies = [
- "accesskit 0.24.1",
- "accesskit_macos 0.26.3",
+ "accesskit 0.25.2",
+ "accesskit_macos 0.27.2",
  "anyhow",
  "block2 0.6.2",
  "core-foundation 0.10.1",
@@ -3091,11 +3090,9 @@ dependencies = [
 [[package]]
 name = "gpui-fast-windows"
 version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "088654835f1408e1aaa79afcc316530461a14fa1c4e543d47b1881b6ced63f19"
 dependencies = [
- "accesskit 0.24.1",
- "accesskit_windows 0.34.0",
+ "accesskit 0.25.2",
+ "accesskit_windows 0.35.2",
  "anyhow",
  "dunce",
  "etagere",
@@ -3126,6 +3123,7 @@ dependencies = [
  "gpui-component",
  "gpui-fast",
  "gpui-fast-platform",
+ "gpui-fast-web",
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-macros",
@@ -3140,6 +3138,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "956a9864880e1f230e274a74cea8006e5018b8af383ad7bbd30b6b18254a97a9"
 dependencies = [
  "anyhow",
+ "gpui-fast",
  "gpui-pre",
  "gpui-pre-reqwest",
  "log",
@@ -3151,18 +3150,17 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9303c771abf2acff2a96d706f69d9a82088c4770173a07cce88f0002431d887d"
 dependencies = [
- "accesskit 0.25.2",
+ "accesskit 0.24.1",
  "anyhow",
  "async-channel",
  "async-task",
- "async-tungstenite",
  "backtrace",
  "bitflags 2.13.2",
  "chrono",
  "derive_more",
- "dioxus-cli-config",
- "dioxus-devtools-types",
  "embed-resource",
  "etagere",
  "futures",
@@ -3205,10 +3203,8 @@ dependencies = [
  "serde_json",
  "slotmap",
  "smallvec",
- "smol",
  "spin 0.10.1",
  "strum 0.28.0",
- "subsecond",
  "taffy",
  "thiserror 2.0.21",
  "ttf-parser",
@@ -3340,9 +3336,11 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624"
 dependencies = [
- "accesskit 0.25.2",
- "accesskit_unix 0.24.1",
+ "accesskit 0.24.1",
+ "accesskit_unix 0.22.1",
  "anyhow",
  "as-raw-xcb-connection",
  "ashpd",
@@ -3383,9 +3381,11 @@ dependencies = [
 [[package]]
 name = "gpui-pre-macos"
 version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7410cfdaa1fa55a414346cc492d18ce340e3a8b6d0ac3213b984ed690c82b92"
 dependencies = [
- "accesskit 0.25.2",
- "accesskit_macos 0.27.2",
+ "accesskit 0.24.1",
+ "accesskit_macos 0.26.3",
  "anyhow",
  "block2 0.6.2",
  "core-foundation 0.10.1",
@@ -3620,9 +3620,11 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5141a3db59bab761a16ab19529fe4117a86e91922e8fc00af6dfc4829cb1744d"
 dependencies = [
- "accesskit 0.25.2",
- "accesskit_windows 0.35.2",
+ "accesskit 0.24.1",
+ "accesskit_windows 0.34.0",
  "anyhow",
  "dunce",
  "etagere",

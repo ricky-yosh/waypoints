@@ -11,7 +11,7 @@ resolver = "3"
 
 [patch.crates-io]
 gpui-kit = { path = "vendor/gpui-kit" }
-gpui-pre = { path = "vendor/gpui-pre" }
-gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
-gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
-gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-fast = { path = "vendor/gpui-fast" }
+gpui-fast-macos = { path = "vendor/gpui-fast-macos" }
+gpui-fast-linux = { path = "vendor/gpui-fast-linux" }
+gpui-fast-windows = { path = "vendor/gpui-fast-windows" }

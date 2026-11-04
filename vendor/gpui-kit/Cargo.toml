@@ -37,7 +37,7 @@ repository = "https://github.com/longbridge/gpui-kit"
 resolver = "2"
 
 [features]
-hot-reload = ["gpui/hot-reload"]
+hot-reload = ["gpui-fast?/hot-reload"]
 assets = ["dep:gpui-kit-assets"]
 component = ["dep:gpui-component"]
 decimal = [
