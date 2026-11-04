@@ -33,6 +33,10 @@ pub(crate) enum Appearance {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WorkspacePreferences {
     #[serde(default)]
+    pub(crate) graph_height: Option<f32>,
+    #[serde(default)]
+    pub(crate) graph_collapsed: bool,
+    #[serde(default)]
     pub(crate) appearance: Appearance,
     pub(crate) projects: Vec<ProjectPreferences>,
     pub(crate) selected: Option<SelectedWorkflow>,
@@ -71,6 +75,8 @@ impl Default for WorkspacePreferences {
             selected: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_visible: true,
+            graph_height: None,
+            graph_collapsed: false,
             window_bounds: None,
         }
     }
@@ -324,6 +330,8 @@ mod tests {
             appearance: Appearance::Dark,
             sidebar_width: 350.0,
             sidebar_visible: false,
+            graph_height: Some(210.0),
+            graph_collapsed: true,
             window_bounds: Some(WindowGeometry {
                 x: -400.0,
                 y: 100.0,

@@ -104,7 +104,7 @@ upstream hint remain unchanged.
 | Review and execution policy | Human review gates distinct from tool permissions; context handoff between phases; additional agent configuration/capability support |
 | Operational durability and portability | A documented backup/restore workflow, broader schema/history upgrade and downgrade policy beyond the targeted restore-journal migration, repository relocation/replacement, and whether portable workflow import/export is wanted |
 | Control scalability | Live controls now bypass storage; broader read concurrency, admission under heavy load, and durable state write latency remain bounded-design tradeoffs |
-| GUI | Readonly multi-project browser uses the backend, with a resizable/hideable project navigator and app-local workspace preferences; broader product UI and CLI-to-GUI acceptance remain pending. GUI work must not introduce a separate workflow engine |
+| GUI | Native node workspace with a resizable graph, assignment editing, exact patch review, history, live run controls, and permission dialogs. The CLI still provisions workflows, native changes, and workspaces. See [desktop workflow](05-ui-and-diffs.md) |
 
 No MCP adapter, custom agent loop, transcript archive, or durable notification
 replay is required by the current architecture. Polling is intentional, not a

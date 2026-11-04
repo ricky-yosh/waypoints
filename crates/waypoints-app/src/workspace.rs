@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gpui_kit::base::{StyledExt as _, TestSupportExt as _};
@@ -6,7 +7,7 @@ use gpui_kit::component::{
     alert::Alert,
     button::{Button, ButtonVariants as _},
     menu::{DropdownMenu as _, PopupMenuItem},
-    resizable::{h_resizable, resizable_panel},
+    resizable::{h_resizable, resizable_panel, v_resizable},
     spinner::Spinner,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,12 +24,30 @@ use crate::preferences::{
     WindowGeometry, WorkspacePreferences,
 };
 
+#[path = "node_workspace.rs"]
+mod node_workspace;
+#[path = "workflow_graph.rs"]
+mod workflow_graph;
+
+const DEFAULT_GRAPH_HEIGHT: f32 = 192.0;
+const MIN_GRAPH_HEIGHT: f32 = 80.0;
+const MIN_NODE_HEIGHT: f32 = 230.0;
+
 // Reserve a readable detail column when the navigator is expanded.
 const MIN_DETAIL_WIDTH: f32 = 320.0;
 // The divider hit area extends beyond the panel edge.
 const DIVIDER_HIT_MARGIN: f32 = 5.0;
 
-actions!(waypoints, [ToggleSidebar, AddProject, RefreshProject]);
+actions!(
+    waypoints,
+    [
+        ToggleSidebar,
+        AddProject,
+        RefreshProject,
+        FocusNext,
+        FocusPrevious
+    ]
+);
 
 pub(crate) fn init(cx: &mut App) {
     let (toggle, add, refresh) = if cfg!(target_os = "macos") {
@@ -40,6 +59,8 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new(toggle, ToggleSidebar, None),
         KeyBinding::new(add, AddProject, None),
         KeyBinding::new(refresh, RefreshProject, None),
+        KeyBinding::new("tab", FocusNext, Some("WaypointsWorkspace")),
+        KeyBinding::new("shift-tab", FocusPrevious, Some("WaypointsWorkspace")),
     ]);
 }
 
@@ -55,6 +76,10 @@ pub(crate) struct Workspace {
     state: WorkspaceState,
     graph: Load<WorkflowGraph>,
     graph_revision: u64,
+    graph_height: f32,
+    graph_collapsed: bool,
+    selected_nodes: BTreeMap<(u64, i64), i64>,
+    node_workspaces: BTreeMap<(u64, i64, i64), node_workspace::NodeWorkspace>,
     sidebar_visible: bool,
     sidebar_width: f32,
     focus: FocusHandle,
@@ -155,6 +180,10 @@ impl Workspace {
             state: WorkspaceState::default(),
             graph: Load::Idle,
             graph_revision: 0,
+            graph_height: DEFAULT_GRAPH_HEIGHT,
+            graph_collapsed: false,
+            selected_nodes: BTreeMap::new(),
+            node_workspaces: BTreeMap::new(),
             sidebar_visible: true,
             sidebar_width: 240.0,
             focus,
@@ -311,6 +340,11 @@ impl Workspace {
         self.appearance = preferences.appearance;
         self.sidebar_visible = preferences.sidebar_visible;
         self.sidebar_width = preferences.sidebar_width;
+        self.graph_collapsed = preferences.graph_collapsed;
+        self.graph_height = preferences
+            .graph_height
+            .filter(|height| height.is_finite() && *height >= MIN_GRAPH_HEIGHT)
+            .unwrap_or(DEFAULT_GRAPH_HEIGHT);
         for saved in preferences.projects {
             if let Some(id) = self.state.add(saved.path.clone())
                 && let Some(project) = self.state.projects.iter_mut().find(|entry| entry.id == id)
@@ -360,6 +394,8 @@ impl Workspace {
             }),
             sidebar_width: self.sidebar_width,
             sidebar_visible: self.sidebar_visible,
+            graph_height: Some(self.graph_height),
+            graph_collapsed: self.graph_collapsed,
             window_bounds: Some(WindowGeometry {
                 x: bounds.origin.x.into(),
                 y: bounds.origin.y.into(),
@@ -702,41 +738,7 @@ impl Render for Workspace {
                         ));
                 }
             }
-            Load::Ready(graph) => {
-                detail = detail.child(div().text_lg().child(graph.workflow.name.clone()));
-                detail = detail.child(message(if graph.workflow.base.is_some() {
-                    "Saved graph · arrows point from upstream to downstream"
-                } else {
-                    "Unbased workflow · saved graph · arrows point from upstream to downstream"
-                }));
-                if graph.unresolved_dependency_operation.is_some() {
-                    detail = detail.child(message(
-                        "An unresolved dependency operation may mean saved edges differ from jj.",
-                    ));
-                }
-                detail = detail.child(div().font_semibold().child("Nodes"));
-                if graph.nodes.is_empty() {
-                    detail = detail.child(message("No nodes in this workflow."));
-                }
-                for node in &graph.nodes {
-                    let base = if graph.base_nodes.contains(&node.id) {
-                        " · attached to base"
-                    } else {
-                        ""
-                    };
-                    detail = detail.child(message(format!("#{}{base}: {}", node.id, node.prompt)));
-                }
-                detail = detail.child(div().font_semibold().child("Dependencies"));
-                if graph.connections.is_empty() {
-                    detail = detail.child(message("No node dependencies."));
-                }
-                for edge in &graph.connections {
-                    detail = detail.child(message(format!(
-                        "#{} → #{}",
-                        edge.source_id, edge.target_id
-                    )));
-                }
-            }
+            Load::Ready(_) => {}
         }
         let sidebar = div()
             .flex()
@@ -757,14 +759,69 @@ impl Render for Workspace {
                     .overflow_y_scroll()
                     .child(list),
             );
-        let detail = div()
-            .id("detail")
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p_4()
-            .child(detail);
+        let detail = if let Load::Ready(graph) = &self.graph {
+            let selected = self
+                .state
+                .selected
+                .and_then(|key| self.selected_nodes.get(&key).copied());
+            let node_workspace = self.render_node_workspace(cx);
+            let body = if self.graph_collapsed || graph.nodes.is_empty() {
+                node_workspace.into_any_element()
+            } else {
+                let weak = cx.entity().downgrade();
+                let max_height = (f32::from(window.viewport_size().height) - MIN_NODE_HEIGHT)
+                    .max(MIN_GRAPH_HEIGHT);
+                v_resizable("graph-split")
+                    .on_resize(move |state, _, cx| {
+                        if let Some(height) = state.read(cx).sizes().first().copied() {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.graph_height = height.into();
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(
+                        resizable_panel()
+                            .fixed()
+                            .size(px(self.graph_height.clamp(MIN_GRAPH_HEIGHT, max_height)))
+                            .size_range(px(MIN_GRAPH_HEIGHT)..px(max_height))
+                            .child(workflow_graph::render_graph(
+                                graph,
+                                selected,
+                                |id| self.graph_run_status(id),
+                                cx,
+                            )),
+                    )
+                    .child(resizable_panel().child(node_workspace))
+                    .into_any_element()
+            };
+            div().id("detail").size_full().min_w_0().min_h_0().flex().flex_col()
+                .child(div().flex().items_center().justify_between().gap_2().px_3().py_2()
+                    .border_b_1().border_color(cx.theme().border)
+                    .child(div().min_w_0().font_semibold().overflow_hidden().text_ellipsis()
+                        .child(graph.workflow.name.clone()))
+                    .child(self.permission_actions(cx))
+                    .child(Button::new("toggle-graph").ghost().small()
+                        .label(if self.graph_collapsed { "Show graph" } else { "Hide graph" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.graph_collapsed = !this.graph_collapsed;
+                            cx.notify();
+                        }))))
+                .when(graph.nodes.is_empty(), |detail| detail.child(message("No nodes in this workflow.").px_3()))
+                .when(graph.unresolved_dependency_operation.is_some(), |detail| {
+                    detail.child(Alert::warning("graph-unresolved", "Saved edges may differ from jj while a dependency operation is unresolved.").small())
+                })
+                .child(div().flex_1().min_w_0().min_h_0().child(body))
+        } else {
+            div()
+                .id("detail")
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p_4()
+                .child(detail)
+        };
         let weak = cx.entity().downgrade();
         let max_sidebar_width =
             (f32::from(window.viewport_size().width) - MIN_DETAIL_WIDTH - DIVIDER_HIT_MARGIN)
@@ -772,8 +829,8 @@ impl Render for Workspace {
         let content = if self.sidebar_visible {
             h_resizable("workspace-split")
                 .on_resize(move |state, _, cx| {
-                    if let Some(width) = state.read(cx).sizes().first() {
-                        let width: f32 = (*width).into();
+                    if let Some(width) = state.read(cx).sizes().first().copied() {
+                        let width: f32 = width.into();
                         weak.update(cx, |this, cx| {
                             this.sidebar_width = width;
                             cx.notify();
@@ -842,6 +899,10 @@ impl Render for Workspace {
             .flex_col()
             .size_full()
             .track_focus(&self.focus)
+            .key_context("WaypointsWorkspace")
+            .tab_group()
+            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
+            .on_action(|_: &FocusPrevious, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.toggle_sidebar(window, cx);
             }))
