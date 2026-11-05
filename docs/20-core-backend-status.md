@@ -96,7 +96,7 @@ upstream hint remain unchanged.
 
 | Area | What is still missing or undecided |
 |---|---|
-| History UI and broader restoration | Visual revision picker; cross-workflow/unmanaged affected work and cross-change/changed-parent restoration beyond implemented leaf and checked same-workflow downstream restoration |
+| Broader restoration | Cross-workflow/unmanaged affected work and cross-change/changed-parent restoration beyond implemented leaf and checked same-workflow downstream restoration |
 | Workspace folder cleanup | Optional filesystem cleanup beyond implemented deregistration; retained folders, ignored/untracked files, and interrupted removal policies |
 | Editing combined branches | Changing an existing merge's parent set; richer per-input review and conflict-resolution policy beyond native conflict flags, materialized markers, and current node/run review |
 | Broader reconciliation | External jj changes, native-associated legacy adoption, cross-workflow affected work, and ambiguous operation outcomes |
@@ -104,7 +104,7 @@ upstream hint remain unchanged.
 | Review and execution policy | Human review gates distinct from tool permissions; context handoff between phases; additional agent configuration/capability support |
 | Operational durability and portability | A documented backup/restore workflow, broader schema/history upgrade and downgrade policy beyond the targeted restore-journal migration, repository relocation/replacement, and whether portable workflow import/export is wanted |
 | Control scalability | Live controls now bypass storage; broader read concurrency, admission under heavy load, and durable state write latency remain bounded-design tradeoffs |
-| GUI | Native node workspace with a resizable graph, assignment editing, exact patch review, history, live run controls, and permission dialogs. The CLI still provisions workflows, native changes, and workspaces. See [desktop workflow](05-ui-and-diffs.md) |
+| GUI | Native node workspace with a resizable graph, Markdown assignment preview, structured live output, syntect-highlighted exact patch review, paginated native history, live run controls, and permission dialogs. The CLI still provisions workflows, native changes, and workspaces. See [desktop workflow](05-ui-and-diffs.md) |
 
 No MCP adapter, custom agent loop, transcript archive, or durable notification
 replay is required by the current architecture. Polling is intentional, not a

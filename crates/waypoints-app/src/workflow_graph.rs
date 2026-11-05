@@ -3,17 +3,18 @@ use std::collections::{BTreeMap, VecDeque};
 use gpui_kit::component::{ActiveTheme as _, Selectable as _, button::Button};
 use gpui_kit::{
     App, Context, InteractiveElement as _, ParentElement as _, PathBuilder, SharedString,
-    StatefulInteractiveElement as _, Styled as _, canvas, div, point, px,
+    StatefulInteractiveElement as _, Styled as _, canvas, div, point, px, rems,
 };
 use waypoints_core::storage::WorkflowGraph;
 
 use super::Workspace;
 
-const CARD_WIDTH: f32 = 176.0;
-const CARD_HEIGHT: f32 = 50.0;
-const COLUMN_STEP: f32 = 232.0;
-const ROW_STEP: f32 = 66.0;
-const PADDING: f32 = 16.0;
+// Graph coordinates use the same rem scale as the labels inside the cards.
+const CARD_WIDTH: f32 = 11.0;
+const CARD_HEIGHT: f32 = 3.125;
+const COLUMN_STEP: f32 = 14.5;
+const ROW_STEP: f32 = 4.125;
+const PADDING: f32 = 1.0;
 
 fn positions(graph: &WorkflowGraph) -> BTreeMap<i64, (f32, f32)> {
     let mut incoming: BTreeMap<_, _> = graph.nodes.iter().map(|node| (node.id, 0)).collect();
@@ -103,25 +104,31 @@ pub(super) fn render_graph(
         .child(
             div()
                 .relative()
-                .w(px(width))
-                .h(px(height))
+                .w(rems(width))
+                .h(rems(height))
                 .child(
                     canvas(
                         |_, _, _: &mut App| (),
                         move |bounds, (), window, _| {
+                            let unit = window.rem_size();
+                            let resolve = |value| rems(value) * unit;
                             for ((sx, sy), (tx, ty)) in &edges {
                                 let start = bounds.origin
-                                    + point(px(sx + CARD_WIDTH), px(sy + CARD_HEIGHT / 2.));
-                                let end = bounds.origin + point(px(*tx), px(ty + CARD_HEIGHT / 2.));
-                                let turn = end.x - px((COLUMN_STEP - CARD_WIDTH) / 2.);
+                                    + point(
+                                        resolve(sx + CARD_WIDTH),
+                                        resolve(sy + CARD_HEIGHT / 2.),
+                                    );
+                                let end = bounds.origin
+                                    + point(resolve(*tx), resolve(ty + CARD_HEIGHT / 2.));
+                                let turn = end.x - resolve((COLUMN_STEP - CARD_WIDTH) / 2.);
                                 let mut path = PathBuilder::stroke(px(1.25));
                                 path.move_to(start);
                                 path.line_to(point(turn, start.y));
                                 path.line_to(point(turn, end.y));
                                 path.line_to(end);
-                                path.move_to(end + point(px(-6.), px(-4.)));
+                                path.move_to(end + point(resolve(-0.375), resolve(-0.25)));
                                 path.line_to(end);
-                                path.line_to(end + point(px(-6.), px(4.)));
+                                path.line_to(end + point(resolve(-0.375), resolve(0.25)));
                                 if let Ok(path) = path.build() {
                                     window.paint_path(path, color);
                                 }
@@ -161,10 +168,10 @@ pub(super) fn render_graph(
                     };
                     div()
                         .absolute()
-                        .left(px(x))
-                        .top(px(y))
-                        .w(px(CARD_WIDTH))
-                        .h(px(CARD_HEIGHT))
+                        .left(rems(x))
+                        .top(rems(y))
+                        .w(rems(CARD_WIDTH))
+                        .h(rems(CARD_HEIGHT))
                         .rounded_md()
                         .border_1()
                         .border_color(if selected == Some(id) {

@@ -29,6 +29,9 @@ mod node_workspace;
 #[path = "workflow_graph.rs"]
 mod workflow_graph;
 
+#[cfg(feature = "screenshot-fixtures")]
+pub(crate) use node_workspace::ScreenshotSurface;
+
 const DEFAULT_GRAPH_HEIGHT: f32 = 192.0;
 const MIN_GRAPH_HEIGHT: f32 = 80.0;
 const MIN_NODE_HEIGHT: f32 = 230.0;
@@ -948,6 +951,10 @@ impl Render for Workspace {
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
 mod workspace_tests;
+
+#[cfg(feature = "screenshot-fixtures")]
+#[path = "workspace_fixtures.rs"]
+pub(crate) mod fixtures;
 
 #[cfg(test)]
 mod tests {

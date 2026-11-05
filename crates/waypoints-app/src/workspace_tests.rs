@@ -3,7 +3,7 @@ use super::*;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{Bounds, TestAppContext, WindowBounds, WindowOptions, size};
 
-fn workflow(project: &str, id: i64) -> Workflow {
+pub(super) fn workflow(project: &str, id: i64) -> Workflow {
     serde_json::from_value(serde_json::json!({
         "id": id,
         "project_path": project,
@@ -12,7 +12,7 @@ fn workflow(project: &str, id: i64) -> Workflow {
     .expect("workflow fixture matches the storage schema")
 }
 
-fn open_workspace(
+pub(super) fn open_workspace(
     cx: &mut TestAppContext,
 ) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<Workspace>) {
     cx.update(|cx| {
@@ -256,6 +256,204 @@ fn minimum_window_scrolls_to_later_projects_without_moving_detail(cx: &mut TestA
         assert!(window.find("workflow-2-8").visible());
         assert_eq!(window.find(("resizable-handle", 0_usize)).bounds(), divider);
         assert_eq!(workspace.read(cx).state.selected, Some((1, 7)));
+    })
+    .expect("workspace window remains open");
+}
+
+#[gpui_kit::test]
+fn project_right_click_keeps_disclosure_and_menu_closed(cx: &mut TestAppContext) {
+    use gpui_kit::{MouseButton, test::TestEventExt as _};
+
+    let (handle, _) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        for id in [("project", 1_u64), ("project-menu", 1_u64)] {
+            let position = window.find(id).bounds().center();
+            window.pointer_down(position, MouseButton::Right, cx);
+            assert!(window.find("workflow-1-7").visible());
+            assert!(window.try_find("popup-menu").is_none());
+            window.pointer_up(position, MouseButton::Right, cx);
+            assert!(window.find("workflow-1-7").visible());
+            assert!(window.try_find("popup-menu").is_none());
+        }
+        window.click(("project-menu", 1_u64), cx);
+        assert!(window.find("popup-menu").visible());
+        assert!(window.find("workflow-1-7").visible());
+    })
+    .expect("workspace window remains open");
+}
+
+#[gpui_kit::test]
+async fn project_menu_dismisses_with_escape_or_outside_press_and_restores_focus(
+    cx: &mut TestAppContext,
+) {
+    use std::time::Duration;
+
+    use gpui_kit::MouseButton;
+    use gpui_kit::test::{TestAppContextExt as _, TestEventExt as _};
+
+    let (handle, _) = open_workspace(cx);
+    let focus_before = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let focus = window.focused(cx);
+            window.click(("project-menu", 1_u64), cx);
+            assert_eq!(window.find("popup-menu").focused(), Some(true));
+            window.within("popup-menu").press("escape", cx);
+            focus
+        })
+        .expect("workspace window remains open");
+    cx.wait_for(handle, Duration::from_secs(1), |window, _| {
+        window.try_find("popup-menu").is_none()
+    })
+    .await;
+    cx.update_window(handle, |_, window, cx| {
+        assert_eq!(
+            window.focused(cx),
+            focus_before,
+            "dismissing the project menu returns focus"
+        );
+        assert!(window.find("workflow-1-7").visible());
+
+        window.click(("project-menu", 1_u64), cx);
+        assert!(window.find("popup-menu").visible());
+        let outside = window.find("workflow-1-7").bounds().center();
+        window.pointer_down(outside, MouseButton::Left, cx);
+        window.pointer_up(outside, MouseButton::Left, cx);
+    })
+    .expect("workspace window remains open");
+    cx.wait_for(handle, Duration::from_secs(1), |window, _| {
+        window.try_find("popup-menu").is_none()
+    })
+    .await;
+    cx.update_window(handle, |_, window, cx| {
+        assert!(window.find("workflow-1-7").visible());
+        assert_eq!(window.focused(cx), focus_before);
+    })
+    .expect("workspace window remains open");
+}
+
+#[gpui_kit::test]
+fn assignment_preview_preserves_unsaved_source_when_switching_nodes(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.graph = Load::Ready(
+                serde_json::from_value(serde_json::json!({
+                    "workflow": workflow("project-a", 7),
+                    "nodes": [
+                        {"id": 1, "workflow_id": 7, "prompt": "# First assignment"},
+                        {"id": 2, "workflow_id": 7, "prompt": "# Second assignment"}
+                    ],
+                    "connections": []
+                }))
+                .expect("workflow graph fixture matches the storage schema"),
+            );
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click("graph-node-1", cx);
+        window.click("input-state", cx);
+        window.input("Unsaved text", cx);
+        assert!(
+            workspace
+                .read(cx)
+                .assignment_draft((1, 7, 1), cx)
+                .contains("Unsaved text")
+        );
+        window.click("Preview", cx);
+        assert!(window.try_find("input-state").is_none());
+        window.click("graph-node-2", cx);
+        assert_eq!(
+            workspace.read(cx).assignment_draft((1, 7, 2), cx).as_ref(),
+            "# Second assignment"
+        );
+        assert!(window.find("input-state").visible());
+        window.click("graph-node-1", cx);
+        assert!(window.try_find("input-state").is_none());
+        window.click("Edit", cx);
+        assert!(
+            workspace
+                .read(cx)
+                .assignment_draft((1, 7, 1), cx)
+                .contains("Unsaved text")
+        );
+    })
+    .expect("workspace window remains open");
+}
+
+#[gpui_kit::test]
+fn graph_cards_and_dependency_spacing_scale_with_theme_font(cx: &mut TestAppContext) {
+    use gpui_kit::component::Theme;
+
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        install_graph_fixture(&workspace, cx);
+        window.render_frame(cx);
+        let first = window.find("graph-node-1").bounds();
+        let second = window.find("graph-node-2").bounds();
+
+        Theme::global_mut(cx).font_size *= 1.5;
+        workspace.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+        let zoomed_first = window.find("graph-node-1").bounds();
+        let zoomed_second = window.find("graph-node-2").bounds();
+        assert!(zoomed_first.size.height > first.size.height);
+        assert!(zoomed_first.size.width > first.size.width);
+        assert!(zoomed_second.left() - zoomed_first.right() > second.left() - first.right());
+    })
+    .expect("workspace window remains open");
+}
+
+fn install_graph_fixture(workspace: &gpui_kit::Entity<Workspace>, cx: &mut App) {
+    workspace.update(cx, |workspace, cx| {
+        workspace.graph = Load::Ready(
+            serde_json::from_value(serde_json::json!({
+                "workflow": workflow("project-a", 7),
+                "nodes": [
+                    {"id": 1, "workflow_id": 7, "prompt": "Review the parser"},
+                    {"id": 2, "workflow_id": 7, "prompt": "Review the tests"}
+                ],
+                "connections": [{"workflow_id": 7, "source_id": 1, "target_id": 2}]
+            }))
+            .expect("workflow graph fixture matches the storage schema"),
+        );
+        cx.notify();
+    });
+}
+
+#[gpui_kit::test]
+fn graph_resize_and_collapse_keep_the_node_workspace_reachable_at_minimum_width(
+    cx: &mut TestAppContext,
+) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.simulate_window_resize(handle, size(px(720.), px(520.)));
+    cx.update_window(handle, |_, window, cx| {
+        install_graph_fixture(&workspace, cx);
+        window.render_frame(cx);
+        window.click("graph-node-1", cx);
+        let assignment = window.find("Assignment").bounds();
+        let divider = window
+            .within("graph-split")
+            .find(("resizable-handle", 0_usize))
+            .bounds()
+            .center();
+        window.drag(divider, divider - gpui_kit::point(px(0.), px(48.)), cx);
+        window.render_frame(cx);
+        let resized = window.find("Assignment").bounds();
+        assert!(
+            resized.top() < assignment.top(),
+            "graph divider drag gives space to the node workspace"
+        );
+        assert!(window.find("input-state").visible());
+
+        window.click("toggle-graph", cx);
+        assert!(window.try_find("graph-node-1").is_none());
+        assert!(window.find("input-state").visible());
+        window.click("toggle-graph", cx);
+        assert!(window.find("graph-node-1").visible());
+        assert_eq!(window.find("Assignment").bounds(), resized);
+        assert_eq!(workspace.read(cx).selected_nodes.get(&(1, 7)), Some(&1));
     })
     .expect("workspace window remains open");
 }
