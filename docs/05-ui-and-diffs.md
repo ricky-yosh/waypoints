@@ -63,6 +63,14 @@ unknown file languages are shown honestly; the app does not invent a patch or
 guess a language. See the [headless capture harness](#validation) used to
 inspect the four node surfaces without a window server.
 
+## Icons
+
+Controls use the embedded Lucide SVG catalog through GPUI Kit. Tabs combine an
+icon with a label; secondary utilities such as reload, wrap, split, and refresh
+are icon-only with tooltips and accessible labels; primary actions keep their
+labels. The app currently embeds the complete catalog for iteration speed; see
+[technical debt](26-tech-debt.md#icon-assets) for the planned selective bundle.
+
 ## Validation
 
 The four node surfaces can be rendered without a window server using the

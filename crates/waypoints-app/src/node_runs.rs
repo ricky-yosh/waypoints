@@ -1,7 +1,8 @@
 use std::{cell::Cell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     input::{Input, InputState},
     message_scroller::{MessageScroller, MessageScrollerState},
     text::TextView,
@@ -776,6 +777,7 @@ impl Workspace {
                     Button::new(SharedString::from(format!("permission-{id}")))
                         .outline()
                         .small()
+                        .icon(IconName::ShieldAlert)
                         .label(format!("Permission · #{}", key.2))
                         .accessibility_label(format!("Review permission for node #{}", key.2))
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -806,6 +808,7 @@ impl Workspace {
             .child(
                 Button::new("start-run")
                     .primary()
+                    .icon(IconName::Play)
                     .label("Start run")
                     .disabled(panel.busy || running || unsaved || node.saving)
                     .on_click(
@@ -818,6 +821,7 @@ impl Workspace {
                 toolbar = toolbar.child(
                     Button::new("cancel-run")
                         .outline()
+                        .icon(IconName::Square)
                         .label("Cancel run")
                         .disabled(
                             panel.busy
@@ -835,7 +839,9 @@ impl Workspace {
                 toolbar = toolbar.child(
                     Button::new("refresh-run")
                         .ghost()
-                        .label("Refresh run")
+                        .icon(IconName::RefreshCw)
+                        .tooltip("Refresh run status and output")
+                        .accessibility_label("Refresh run")
                         .on_click(cx.listener(move |this, _, _, cx| this.poll_node_run(key, cx))),
                 );
             }
@@ -855,16 +861,37 @@ impl Workspace {
         }
         if let Some(status) = status {
             let id = status.run.id;
-            summary = summary.child(message(format!(
-                "Run #{id} · {}",
-                state_label(&status.run.state)
-            )));
+            let (state_icon, state_color) = match &status.run.state {
+                RunState::Completed => (IconName::CircleCheck, cx.theme().success),
+                RunState::Failed { .. } | RunState::Interrupted { .. } => {
+                    (IconName::CircleX, cx.theme().danger)
+                }
+                RunState::AwaitingPermission => (IconName::ShieldAlert, cx.theme().warning),
+                RunState::Starting
+                | RunState::Running
+                | RunState::Finalizing
+                | RunState::Cancelling => (IconName::Clock, cx.theme().warning),
+                RunState::Cancelled => (IconName::Square, cx.theme().muted_foreground),
+                _ => (IconName::CircleAlert, cx.theme().muted_foreground),
+            };
+            summary = summary.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(Icon::new(state_icon).size_3().text_color(state_color))
+                    .child(message(format!(
+                        "Run #{id} · {}",
+                        state_label(&status.run.state)
+                    ))),
+            );
             match &status.run.snapshot {
                 SnapshotState::Saved { .. } => {
                     summary = summary.child(
                         Button::new("review-run-snapshot")
                             .ghost()
                             .small()
+                            .icon(IconName::GitCommitHorizontal)
                             .label("Review saved snapshot")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_review(key, Target::Run(id), cx)
@@ -897,6 +924,7 @@ impl Workspace {
                             Button::new("continue-run")
                                 .outline()
                                 .small()
+                                .icon(IconName::Play)
                                 .label("Continue session")
                                 .disabled(panel.busy)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -907,7 +935,18 @@ impl Workspace {
             }
         }
         if let Some(notice) = panel.output_notice {
-            summary = summary.child(message(notice).text_color(cx.theme().muted_foreground));
+            summary = summary.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::CircleAlert)
+                            .size_3()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(message(notice).text_color(cx.theme().muted_foreground)),
+            );
         }
         let workspace = cx.weak_entity();
         root.child(toolbar)
@@ -966,9 +1005,13 @@ fn render_activity(
         .when(begins_replay, |row| {
             row.child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .pb_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Clock).size_3())
                     .child("Replayed earlier output"),
             )
         });
@@ -986,8 +1029,12 @@ fn render_activity(
             .gap_1()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Sparkles).size_3())
                     .child("Reasoning"),
             )
             .child(
@@ -1017,6 +1064,11 @@ fn render_activity(
     let toggle = Button::new(SharedString::from(format!("activity-{sequence}")))
         .ghost()
         .small()
+        .icon(if block.expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        })
         .label(title)
         .selected(block.expanded)
         .on_click(move |_, _, cx| {

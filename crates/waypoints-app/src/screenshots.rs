@@ -42,7 +42,7 @@ fn capture_all() -> anyhow::Result<()> {
 fn capture(mode: ThemeMode, surface: ScreenshotSurface, path: &Path) -> anyhow::Result<()> {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
-        Arc::new(gpui_kit::assets::Assets),
+        Arc::new(gpui_kit::assets::AllAssets),
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(|cx| {

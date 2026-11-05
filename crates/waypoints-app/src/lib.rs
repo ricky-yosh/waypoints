@@ -20,8 +20,11 @@ const MIN_WINDOW_WIDTH: f32 = 720.0;
 const MIN_WINDOW_HEIGHT: f32 = 480.0;
 
 pub fn run() {
+    // Embed the complete Lucide catalog while the icon set is still settling.
+    // Trim to an `icon_assets!` bundle once the final icons are known; see
+    // docs/26-tech-debt.md.
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {
             gpui_kit::init(cx);
             workspace::init(cx);

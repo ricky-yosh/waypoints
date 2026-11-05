@@ -1,170 +1,173 @@
-# Goal: Polish the Waypoints node workspace into a coherent native work environment
+# Goal: Iteratively audit and polish the Waypoints native experience
 
-Improve the existing Waypoints node workspace so that reading assignments, following agent work, reviewing code, and understanding history feel deliberate and polished—closer in usability to Zed or Delta, without copying their entire interface or introducing a heavyweight editor framework.
-Implement the improvements, inspect them in the running native application using computer use, and iterate until the workflows below work well. Do not stop at a plausible screenshot or a passing build.
-Preserve the current structure:
+Improve Waypoints through repeated, evidence-based UI/UX loops. Each loop should select a small set of related user-facing problems, reproduce them, implement the narrowest appropriate fixes, and verify the result in the running native application. Do not attempt to inventory every possible improvement or redesign the product in one pass.
+
+This supersedes the earlier one-pass node-workspace polish brief. Capabilities described in that brief and the current docs are baseline behavior to preserve and re-evaluate, not a list to implement again.
+
+The goal is a quiet, readable, trustworthy native workspace. A plausible screenshot, a passing build, or a completed checklist alone is not evidence of a good workflow.
+
+## Preserve the product and architecture
+
+Start with the current source, tests, and desktop documentation. Older placeholder and readonly-browser descriptions are historical where they disagree with the current app.
+
+Preserve the existing structure unless a concrete defect requires a narrowly scoped change:
+
 - Project/workflow navigation in the sidebar.
 - Compact horizontal dependency graph above the node workspace.
-- Resizable and collapsible graph region.
+- Resizable and collapsible graph and sidebar regions.
 - Full-width node workspace with Assignment / Output / Changes / History.
 - Per-node draft, tab, selected review target/file, and scroll retention.
 - Permission requests that never steal navigation.
-This is a focused polish and correctness pass, not a new layout redesign.
-Read the repository instructions and load the GPUI Kit Design Guides and Coding Guides before making UI or architecture decisions. Use the actual locked component source to verify APIs. Public docs may describe newer APIs.
-Use GPUI Kit components before inventing primitives. Preserve the existing GPUI Fast engine, AccessKit fix, and hot-reload setup. Do not undertake another dependency migration.
-A source audit and an independent component-research pass found:
-1. Changes already uses GPUI Kit’s Diff component and retained DiffState per file. Do not replace it with a homemade diff renderer.
-2. The app enables gpui-fast and inspector, but no syntax-highlighting provider. Diff’s syntax_highlight setting alone is insufficient.
-3. Changes forces soft wrapping and uses a horizontally scrolling strip of full-path buttons for file navigation.
-4. Output flattens structured ACP updates into a single String before rendering plain text. Message boundaries, tool identity, and richer content are lost.
-5. Assignment uses a retained TextareaState and Textarea, with no Markdown reading/preview surface.
-6. History uses simple text/button rows, hides useful metadata, and requests only the first 30 native revisions without exposing pagination.
-7. Current review is not invalidated when a run finishes and records a new revision.
-8. Project-row right-click shading may come from generic button active-state handling. Persistent dropdown-trigger shading while a menu is open is intentional; do not remove all pressed/open styling.
-9. Custom graph geometry uses fixed pixels while typography scales. Verify zoom behavior and correct demonstrated clipping/alignment issues without expanding this into a graph rewrite.
-Reconfirm these against the current checkout before changing them.
-Relevant starting points:
-- crates/waypoints-app/Cargo.toml
-- crates/waypoints-app/src/node_workspace.rs
-- crates/waypoints-app/src/node_runs.rs
-- crates/waypoints-app/src/workspace.rs
-- crates/waypoints-app/src/workflow_graph.rs
-- crates/waypoints-app/src/workspace_tests.rs
-- docs/20-core-backend-status.md
-- docs/05-ui-and-diffs.md
-Keep the existing Kit Diff component and its native selection/copy/scroll behavior.
-Improve:
-- Enable a supported syntax-highlighting provider. Evaluate syntect first for broad readonly display; use narrowly selected Tree-sitter features if there is a concrete reason. Verify actual language coverage and cost rather than assuming.
-- Replace the horizontal file-button strip with compact, scannable changed-file navigation suitable for many files and long paths.
-- Show useful change status/counts where the model supplies them.
-- Provide wrap and unified/split display choices using supported component APIs.
-- Choose a readable default; do not force all code to wrap.
-- Make the exact comparison target obvious: current recorded revision, saved run snapshot, or native revision.
-- Treat commit identity as secondary metadata, with a way to access/copy the full value.
-- Preserve selected file and per-file scroll where the target remains the same.
-- Give the diff viewport ownership of its own scrolling. Avoid nested scrolling around it.
-- Handle empty patches, errors, renames, binary files, conflicts, and unknown languages honestly.
-Correct freshness:
-- When a run records a new revision, mark or refresh the Current target appropriately.
-- Do not silently replace a deliberately pinned run snapshot or historical revision.
-- Do not refresh repeatedly during live output or reset the user’s position without cause.
-- Preserve existing stale-response generation guards.
-Verify with Rust, JavaScript/TypeScript, JSON, unknown extensions, long lines, long paths, many files, and a large patch. Confirm syntax highlighting actually appears in both themes.
-Do not merely wrap the existing flattened output String in a Markdown renderer.
-Retain a small structured presentation model:
-- Keep assistant prose, thought/reasoning events when supplied, tool activity, and system/status notices semantically distinct.
-- Assemble streaming chunks into the appropriate block.
-- Update an existing tool item when its status/content changes instead of creating disconnected duplicate lines.
-- Preserve supported content and retain an inspectable fallback for unknown/non-text events.
-- Keep replay labels and output-loss notices outside Markdown content.
-- Preserve bounded memory and explicit gap/truncation notices. Trim at coherent block boundaries where practical.
-- Do not invent a permanent transcript archive or imply that expired backend events are recoverable.
-Presentation:
-- Use selectable Markdown for assistant prose, with readable code blocks and copy behavior.
-- Use compact tool rows with a clear name, status, and summary; disclose detailed input/output on demand.
-- Distinguish thought content from final answers without making the whole view noisy.
-- Use subdued structure, not nested cards and multicolored badges everywhere.
-- Keep tool details and code blocks usable with long content.
-- Maintain a clear current run state, cancellation path, and separate snapshot outcome.
-Evaluate Kit TextView and MessageScroller against the locked APIs. Retained TextView streaming APIs exist in 0.9.0, but do not assume live-doc shorthand methods exist unchanged.
-Scrolling:
-- Follow new output when the user is at the tail.
-- Do not pull the user away when they scroll upward to read.
-- Offer a clear way to return to latest output.
-- Preserve reading position when a tool row updates or expands.
-- Keep node switching and background updates isolated.
-Use Zed/Delta as reading-quality references, not as justification for importing their architecture. Public Zed references can inform patterns; do not claim knowledge of Delta internals.
-Keep the existing textarea, draft retention, dirty detection, save guards, and inline errors.
-Add an explicit Edit / Preview affordance:
-- Edit shows Markdown source.
-- Preview renders the current draft as selectable Markdown.
-- Unsaved status remains clear in both modes.
-- Switching modes does not discard edits or unnecessarily reset editing position.
-- Saving does not change the instructions of an already-active run.
-- Saved assignment and follow-up messages remain distinct concepts.
-Verify headings, lists, links, inline code, fenced code, long content, empty assignments, save errors, edits made while a save is pending, and switching between nodes.
-Do not attempt a complex WYSIWYG editor.
-History needs structured information hierarchy, not Markdown decoration.
-Use available model data to show:
-- Meaningful native operation descriptions.
-- Timestamps in a readable, consistent form.
-- Run state and snapshot state as distinct facts.
-- Current-head and conflict indicators where applicable.
-- Associated run references.
-- Short revision IDs as secondary monospace metadata, with full identity accessible.
-Keep runs and native revisions conceptually distinct. Do not invent commit titles, summaries, or relationships absent from the data.
-Fix native revision pagination:
-- Expose Load older revisions using the backend’s opaque continuation/pinned-operation contract.
-- Distinguish partial history from exhausted history.
-- Preserve already-loaded entries if loading another page fails.
-- Handle retry, refresh, node switching, and late responses safely.
-- Use virtualization where the accumulated collection warrants it.
-Keep exact snapshot/revision review readonly. Restore, rebase, deletion, and broader history mutation are outside this task.
-Reproduce the project-button right-click issue before changing it.
-Test the project disclosure button and ellipsis menu separately:
-- Right-button down and release.
-- Left-button activation.
-- Whether expansion changes.
-- Whether a menu appears.
-- Whether shading clears after release.
-- Menu Escape and outside dismissal.
-- Focus restoration.
-Distinguish transient pressed feedback, intentional menu-open feedback, and a genuinely stuck state. Fix the demonstrated problem at the narrowest correct layer. Do not globally remove active styling or patch the engine merely to hide a local symptom.
-If adding a project context menu, reuse the same commands, enabled states, and owner methods as the visible ellipsis menu. Keep the visible command path.
-Also review:
-- Keyboard reachability and visible focus.
-- Selected versus hovered versus focused states.
-- Overlay dismissal and return focus.
-- Disabled controls and explanatory errors.
-- Shared alignment, insets, density, and scrollbar ownership.
-- Light/dark contrast.
-- Graph scaling at larger UI font sizes.
-Address concrete adjacent defects, but do not turn this into an unrelated application rewrite.
-Use an isolated disposable project/repository and isolated backend data/socket/workspaces. Do not run agents or mutate history in the developer’s real project just to demonstrate the UI.
-Exercise:
-1. Read a substantial assignment in Preview.
-2. Edit it, switch nodes and return, then save without losing the draft.
-3. Start a real configured agent run.
-4. Watch formatted assistant output and tool updates.
-5. Scroll upward while output continues; verify no forced jump.
-6. Open another node’s saved snapshot, choose a file, and scroll the diff.
-7. Receive a permission request without losing navigation.
-8. Open and answer the actual request.
-9. Return to the same review target/file/position.
-10. Finish a run, then verify Current review freshness while historical targets remain pinned.
-11. Browse and load older history beyond 30 revisions.
-12. Resize/collapse the graph and narrow the window.
-13. Complete essential navigation and overlay interactions by keyboard.
-If a real harness, trusted executable, credentials, or backend capability is missing, report the exact blocker. Fixture-driven rendering is useful, but do not label it real end-to-end agent validation. Never grant broad permissions or execute destructive commands solely for a demo.
-Add focused tests for:
-- Structured event assembly and tool updates.
-- Replay/live separation, unknown content, partial code fences, Unicode, and bounded trimming.
-- Current-review invalidation versus pinned historical targets.
-- Pagination, retry, refresh, and stale responses.
-- Assignment mode/draft/save behavior.
-- Project right-click and menu dismissal where reproducible.
-- Meaningful component interactions, not only direct calls to internal methods.
-Run:
-- cargo fmt --all -- --check
-- cargo build -p waypoints-app --locked
-- cargo test --workspace --locked
-- cargo clippy -p waypoints-app --all-targets --all-features --locked -- -D warnings
-If dependency features require a lockfile update, perform that deliberately, review the diff, then run the locked checks.
-Never run:
-cargo check -p waypoints-app --features hot-reload
-Use ./dev for the native development workflow. Restart after dependency, retained-state structure, or startup changes; hot patching alone is not sufficient for those changes.
-Start with a brief milestone plan, then implement one surface at a time. Inspect the running native application throughout, not only at the end.
-Preserve the good existing behavior:
-- Draft and per-node state retention.
-- Retained per-file DiffState.
-- Async generation guards.
-- Honest output-loss notices and bounded memory.
-- Semantic components, theme tokens, resizable regions, and permission isolation.
-At completion, provide:
-- A concise summary of changes.
-- Representative actual screenshots of Changes, Output, Assignment preview, and History.
-- Which acceptance steps were completed, with any blockers.
-- Exact automated checks and their results.
-- Remaining limitations or deferred issues.
+- Structured, bounded output with honest replay, gap, and truncation notices.
+- Kit's Diff component and retained per-file DiffState.
+- Current versus pinned historical review behavior and async generation guards.
+- Existing backend ownership, GPUI Fast engine, AccessKit fix, and hot-reload setup.
+
+Keep run state, snapshot outcome, native revision, workflow metadata history, agent session, and physical checkout state conceptually distinct. Tool permission is not code-review approval. Do not add inferred agent-context-staleness states, automatic reruns, a transcript archive, or silent recovery behavior as UI polish.
+
+Use GPUI Kit components before inventing primitives. Read the GPUI Kit Design Guides and Coding Guides before UI or architecture decisions, and verify APIs against the locked component source. Do not undertake a dependency migration.
+
+## Use a goal loop, not a one-time exhaustive audit
+
+Repeat the following loop with one coherent task or surface at a time:
+
+1. **Choose a task.** Select a real user task or a small related surface, based on observed friction or risk. Examples include opening and navigating a workflow, editing an assignment, following a run, reviewing a patch, browsing history, answering a permission request, or resizing the workspace.
+2. **Establish the baseline.** Name the primary task, object, expected next action, relevant states, and keyboard path. Read the nearest implementation and tests. Distinguish current behavior from assumptions in older docs.
+3. **Audit with evidence.** Inspect the current native app and source using the checklists below. Reproduce suspected problems where practical. Record what happened, the expected behavior, and why it matters. Do not manufacture a finding for every heuristic.
+4. **Prioritize a small batch.** Group one to a few findings with a shared user problem or root cause. Prefer task blockage, misleading state, data-loss risk, inaccessible interaction, and lost context over cosmetic preferences.
+5. **Implement narrowly.** Fix the structural owner rather than adding local patches around symptoms. Preserve working behavior and avoid unrelated refactors, new controls, or new decoration.
+6. **Verify the workflow.** Exercise the real interaction with pointer and keyboard where applicable. Test representative dynamic content and failure states, not only an ideal fixture. Add focused regression coverage at the lowest layer that proves the behavior.
+7. **Review and choose the next loop.** Mark findings verified, unresolved, rejected, or deferred with a reason. Record newly discovered issues without expanding the current batch. Stop the loop when its selected task is demonstrably improved; do not keep polishing merely because more checklist rows exist.
+
+A loop may be audit-only when implementation is not yet justified. A loop may also reject a suspected issue after reproduction shows that the behavior is correct.
+
+## Maintain lightweight audit evidence
+
+Keep a living audit record when useful, without turning it into a comprehensive product wishlist. Each actionable finding should capture:
+
+- Task and surface.
+- Observed behavior and reproduction conditions.
+- Expected behavior and user impact.
+- Relevant heuristic or product contract.
+- Severity and confidence.
+- Evidence: native interaction, screenshot, accessibility observation, source reference, or test.
+- Proposed direction, without prematurely prescribing a redesign.
+- Status and verification evidence after a fix.
+
+Use these severity meanings:
+
+- **High:** blocks or misleads a core task; risks work; conceals freshness or scope; prevents keyboard access; causes destructive or irreversible surprise.
+- **Medium:** repeated friction, lost context, weak recovery, unclear hierarchy, inconsistent interaction, or significant accessibility/theme/resize problems.
+- **Low:** localized consistency, alignment, density, copy, or refinement issues with a clear user benefit.
+
+Separate confirmed defects, hypotheses still needing reproduction, intentional constraints, and optional enhancements. Do not present a backend limitation or safety refusal as a defect merely because it adds friction.
+
+## Reusable heuristic checklist
+
+Use these prompts as lenses during each loop, not as a requirement to answer every question every time.
+
+### Visibility of system status
+
+- Can the user tell what is loaded, selected, running, stale, saved, unavailable, or waiting?
+- Are progress and completion attached to the correct object and operation?
+- Does feedback appear promptly without pretending that acknowledgement is completion?
+- Are run outcome, snapshot outcome, and review freshness independently understandable?
+
+### Match with the user's mental model
+
+- Does the UI emphasize projects, workflows, assignments, output, code, and history rather than backend mechanics?
+- Are the exact object, comparison target, scope, and consequence visible before an action?
+- Are native jj terms used only where they add precision, with honest distinctions between change, revision, run, and session?
+
+### User control and freedom
+
+- Can users navigate away, dismiss overlays, cancel appropriate work, and return without losing drafts or position?
+- Do streaming output and background updates avoid pulling the user away from their current reading or review?
+- Are reversible actions easy to reverse, and consequential actions explicit about their scope and undo boundary?
+- Does the app avoid blind retry, duplicate submission, automatic repair, and unexpected focus theft?
+
+### Consistency and standards
+
+- Do equivalent commands share labels, icons, enabled states, shortcuts, and results across buttons and menus?
+- Are rest, hover, pressed, open, focused, selected, disabled, loading, readonly, validation, and destructive states distinct and consistent?
+- Do desktop conventions, platform shortcuts, window chrome, and menu behavior remain intact?
+- Are standard GPUI Kit components used for their semantic behavior rather than approximated with clickable containers?
+
+### Error prevention and recovery
+
+- Are unavailable actions hidden or disabled with a useful explanation where needed?
+- Do errors say what happened, preserve user input and existing data, and offer a realistic next action?
+- Are empty, loading, partial, offline, permission-denied, failed, expired, and interrupted states handled honestly?
+- Are stale responses, late async completions, refresh, retry, and node switching prevented from corrupting current state?
+
+### Recognition rather than recall
+
+- Are current selection, primary action, next step, and recovery path visible without memorizing prior screens?
+- Do truncated paths, identifiers, and labels have a way to reveal or copy the full value?
+- Do icon-only controls have accessible names and tooltips when their meaning or scope is unclear?
+
+### Flexibility and efficiency
+
+- Are frequent actions visible, secondary actions appropriately grouped, and important commands keyboard reachable?
+- Are user-controlled layout, per-node context, and reading positions retained where they help the task?
+- Are dense collections scannable and progressively disclosed without hiding essential actions only on hover?
+
+### Minimalist and precise presentation
+
+- Does content receive more emphasis than chrome, decoration, badges, alerts, and containers?
+- Is there one clear reading order and decision path, with emphasis reserved for information that changes action?
+- Are alignment spines, spacing relationships, control sizes, separators, and scrollbar placement consistent?
+- Are theme tokens and rem-based sizing used instead of isolated colors or geometry, except for documented physical boundaries?
+
+### Accessibility and resilience
+
+- Is every essential action operable by keyboard, with logical focus order, visible focus, and focus restoration after overlays?
+- Is status communicated by more than color alone, with adequate contrast in both themes?
+- Does the interface remain usable at minimum and narrow window sizes, larger UI font sizes, and with long labels, paths, output, and history?
+- Are scrolling, text selection, copy, virtualization, reduced motion, and pointer targets appropriate to the task?
+
+### Waypoints-specific trust
+
+- Is the exact Current, saved-run, or native-revision review target obvious, and are pinned targets kept pinned?
+- Are replay, expired events, bounded output, and unavailable native objects described without implying a complete permanent transcript?
+- Do permission requests remain inspectable and answerable without losing the underlying workspace context?
+- Are readonly inspection, restoration, reparenting, deletion, recovery, and checkout updates represented as distinct operations?
+- Does the UI avoid claiming that saved IDs pin native objects forever or that a clean rebase proves behavioral correctness?
+
+## Validation expectations for each implementation loop
+
+Use an isolated disposable project/repository and isolated backend data, socket, preferences, and workspaces. Do not mutate the developer's real project or history for a UI demonstration. Use fixture-driven rendering for layout and state coverage, but do not label it real end-to-end agent validation.
+
+Exercise the states and constraints relevant to the selected findings:
+
+- Pointer and keyboard interaction, including focus and overlay dismissal.
+- Existing content during refresh, slow operations, failure, cancellation, and retry where applicable.
+- Light and dark themes for visual changes.
+- Minimum/narrow and comfortable window sizes, graph/sidebar resizing, and UI zoom where layout is involved.
+- Long, empty, numerous, unknown, and partial content appropriate to the surface.
+- Before/after native captures when they clarify a visual fix; never screenshots alone as acceptance.
+
+Run focused tests during the loop. Before declaring the overall goal complete, run:
+
+- `cargo fmt --all -- --check`
+- `cargo build -p waypoints-app --locked`
+- `cargo test --workspace --locked`
+- `cargo clippy -p waypoints-app --all-targets --all-features --locked -- -D warnings`
+
+Never run `cargo check -p waypoints-app --features hot-reload`. Use `./dev` for native hot reload, restarting after dependency, retained-state structure, or startup changes.
+
+If a real harness, trusted executable, credentials, or backend capability is required but unavailable, report the exact blocker. Never grant broad permissions or execute destructive commands solely for a demo.
+
+## Loop and overall completion
+
+After each loop, report:
+
+- The task and findings selected.
+- Evidence that the problems were real.
+- Changes made and anything deliberately left unchanged.
+- Automated and native interaction checks completed, with blockers.
+- Findings verified, deferred, rejected, or discovered for a later loop.
+
+The overall goal is complete when representative core workflows meet this quality bar, no known high-severity findings remain unaddressed, and remaining lower-severity opportunities are explicitly deferred. It is not necessary to exhaust every heuristic or eliminate every possible refinement.
+
 Do not commit, push, or merge unless explicitly requested.
-The goal is a quiet, readable, trustworthy native workspace—not more decoration, more controls, or pixel-perfect imitation of another app.

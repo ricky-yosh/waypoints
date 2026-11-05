@@ -5,6 +5,7 @@ mod node_history;
 #[path = "node_runs.rs"]
 mod node_runs;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -608,10 +609,10 @@ impl Workspace {
             return root;
         };
         let tabs = [
-            ("Assignment", Tab::Assignment),
-            ("Output", Tab::Output),
-            ("Changes", Tab::Changes),
-            ("History", Tab::History),
+            (IconName::FileText, "Assignment", Tab::Assignment),
+            (IconName::SquareTerminal, "Output", Tab::Output),
+            (IconName::GitCompareArrows, "Changes", Tab::Changes),
+            (IconName::FileClock, "History", Tab::History),
         ];
         let root = root
             .child(
@@ -626,9 +627,13 @@ impl Workspace {
                     .flex()
                     .flex_wrap()
                     .gap_1()
-                    .children(tabs.into_iter().map(|(label, tab)| {
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .pb_2()
+                    .children(tabs.into_iter().map(|(icon, label, tab)| {
                         Button::new(label)
                             .ghost()
+                            .icon(icon)
                             .label(label)
                             .selected(node.tab == tab)
                             .on_click(
@@ -646,9 +651,14 @@ impl Workspace {
                     .items_center()
                     .flex_wrap()
                     .children(
-                        [("Edit", false), ("Preview", true)].map(|(label, preview)| {
+                        [
+                            (IconName::PenLine, "Edit", false),
+                            (IconName::Eye, "Preview", true),
+                        ]
+                        .map(|(icon, label, preview)| {
                             Button::new(label)
                                 .ghost()
+                                .icon(icon)
                                 .label(label)
                                 .selected(node.assignment_preview == preview)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -662,6 +672,7 @@ impl Workspace {
                     .child(
                         Button::new("save-assignment")
                             .primary()
+                            .icon(IconName::Save)
                             .label("Save assignment")
                             .disabled(!dirty || node.saving)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -731,6 +742,7 @@ impl Workspace {
                         .child(
                             Button::new("current-review")
                                 .ghost()
+                                .icon(IconName::GitCommitHorizontal)
                                 .label("Review current")
                                 .disabled(node.target == Target::Current)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -740,7 +752,9 @@ impl Workspace {
                         .child(
                             Button::new("reload-review")
                                 .ghost()
-                                .label("Reload review")
+                                .icon(IconName::RefreshCw)
+                                .tooltip("Reload this comparison target")
+                                .accessibility_label("Reload review")
                                 .disabled(matches!(node.review, Load::Loading))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(node) = this.node_workspaces.get(&key) {
@@ -760,6 +774,7 @@ impl Workspace {
                             Button::new("retry-review")
                                 .ghost()
                                 .small()
+                                .icon(IconName::RefreshCw)
                                 .label("Try again")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(node) = this.node_workspaces.get(&key) {
@@ -780,6 +795,7 @@ impl Workspace {
                                 Button::new("copy-review-id")
                                     .ghost()
                                     .small()
+                                    .icon(IconName::Copy)
                                     .label(short_commit)
                                     .accessibility_label("Copy revision ID")
                                     .tooltip(format!("Copy revision {commit}"))
@@ -804,58 +820,74 @@ impl Workspace {
                                 },
                             )
                             .child(
-                                Button::new("wrap-review")
-                                    .ghost()
-                                    .small()
-                                    .label(if node.review_wrap {
-                                        "Wrapping lines"
-                                    } else {
-                                        "Unwrapped lines"
-                                    })
-                                    .selected(node.review_wrap)
-                                    .tooltip(if node.review_wrap {
-                                        "Show long lines without wrapping"
-                                    } else {
-                                        "Wrap long lines"
-                                    })
-                                    .accessibility_label("Wrap long lines")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(node) = this.node_workspaces.get_mut(&key) {
-                                            node.review_wrap = !node.review_wrap;
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("split-review")
-                                    .ghost()
-                                    .small()
-                                    .label(match node.review_mode {
-                                        DiffMode::Split => "Split view",
-                                        _ => "Unified view",
-                                    })
-                                    .selected(node.review_mode == DiffMode::Split)
-                                    .tooltip(match node.review_mode {
-                                        DiffMode::Split => "Switch to unified view",
-                                        _ => "Switch to split view",
-                                    })
-                                    .accessibility_label("Toggle split view")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(node) = this.node_workspaces.get_mut(&key) {
-                                            node.review_mode = match node.review_mode {
-                                                DiffMode::Split => DiffMode::Unified,
-                                                _ => DiffMode::Split,
-                                            };
-                                            if let Load::Ready(review) = &node.review {
-                                                for (_, diff) in &review.files {
-                                                    diff.update(cx, |diff, cx| {
-                                                        diff.set_mode(node.review_mode, cx)
-                                                    });
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .ml_auto()
+                                    .child(
+                                        Button::new("wrap-review")
+                                            .ghost()
+                                            .small()
+                                            .icon(IconName::TextWrap)
+                                            .label(if node.review_wrap {
+                                                "Wrapping lines"
+                                            } else {
+                                                "Unwrapped lines"
+                                            })
+                                            .selected(node.review_wrap)
+                                            .tooltip(if node.review_wrap {
+                                                "Show long lines without wrapping"
+                                            } else {
+                                                "Wrap long lines"
+                                            })
+                                            .accessibility_label("Wrap long lines")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if let Some(node) =
+                                                    this.node_workspaces.get_mut(&key)
+                                                {
+                                                    node.review_wrap = !node.review_wrap;
+                                                    cx.notify();
                                                 }
-                                            }
-                                            cx.notify();
-                                        }
-                                    })),
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("split-review")
+                                            .ghost()
+                                            .small()
+                                            .icon(match node.review_mode {
+                                                DiffMode::Split => IconName::Columns2,
+                                                _ => IconName::Rows3,
+                                            })
+                                            .label(match node.review_mode {
+                                                DiffMode::Split => "Split view",
+                                                _ => "Unified view",
+                                            })
+                                            .selected(node.review_mode == DiffMode::Split)
+                                            .tooltip(match node.review_mode {
+                                                DiffMode::Split => "Switch to unified view",
+                                                _ => "Switch to split view",
+                                            })
+                                            .accessibility_label("Toggle split view")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if let Some(node) =
+                                                    this.node_workspaces.get_mut(&key)
+                                                {
+                                                    node.review_mode = match node.review_mode {
+                                                        DiffMode::Split => DiffMode::Unified,
+                                                        _ => DiffMode::Split,
+                                                    };
+                                                    if let Load::Ready(review) = &node.review {
+                                                        for (_, diff) in &review.files {
+                                                            diff.update(cx, |diff, cx| {
+                                                                diff.set_mode(node.review_mode, cx)
+                                                            });
+                                                        }
+                                                    }
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
                             );
                         if review.files.is_empty() {
                             header = header.child(

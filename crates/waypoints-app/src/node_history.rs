@@ -1,6 +1,7 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::base::{Disableable as _, StyledExt as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _,
+    ActiveTheme as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     scroll::ScrollableElement as _,
 };
@@ -11,7 +12,7 @@ use gpui_kit::{
 };
 use waypoints_backend::{Client, RunStatus};
 use waypoints_core::{
-    run::SnapshotState,
+    run::{RunState, SnapshotState},
     storage::{NodeRevisionEntry, NodeRevisionPage},
 };
 
@@ -318,7 +319,9 @@ impl Workspace {
                 .child(
                     Button::new("reload-history")
                         .ghost()
-                        .label("Refresh history")
+                        .icon(IconName::RefreshCw)
+                        .tooltip("Refresh run and revision history")
+                        .accessibility_label("Refresh history")
                         .disabled(matches!(node.history, Load::Loading))
                         .on_click(cx.listener(move |this, _, _, cx| this.load_history(key, cx))),
                 )
@@ -328,6 +331,7 @@ impl Workspace {
                             toolbar.child(
                                 Button::new("older-revisions")
                                     .ghost()
+                                    .icon(IconName::ChevronsDown)
                                     .label(if node.loading_older {
                                         "Loading older revisions…"
                                     } else {
@@ -413,12 +417,34 @@ fn history_row(
 
 fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, cx: &App) -> Div {
     let id = status.run.id;
-    let snapshot = match &status.run.snapshot {
-        SnapshotState::Saved { revision } => {
-            format!("Snapshot saved · {}", short_id(&revision.commit_id))
+    let (state_icon, state_color) = match &status.run.state {
+        RunState::Completed => (IconName::CircleCheck, cx.theme().success),
+        RunState::Failed { .. } | RunState::Interrupted { .. } => {
+            (IconName::CircleX, cx.theme().danger)
         }
-        SnapshotState::Failed { detail } => format!("Snapshot failed. {detail}"),
-        _ => "No snapshot recorded".to_owned(),
+        RunState::AwaitingPermission => (IconName::ShieldAlert, cx.theme().warning),
+        RunState::Starting | RunState::Running | RunState::Finalizing | RunState::Cancelling => {
+            (IconName::Clock, cx.theme().warning)
+        }
+        RunState::Cancelled => (IconName::Square, cx.theme().muted_foreground),
+        _ => (IconName::CircleAlert, cx.theme().muted_foreground),
+    };
+    let (snapshot, snapshot_icon, snapshot_color) = match &status.run.snapshot {
+        SnapshotState::Saved { revision } => (
+            format!("Snapshot saved · {}", short_id(&revision.commit_id)),
+            IconName::CircleCheck,
+            cx.theme().success,
+        ),
+        SnapshotState::Failed { detail } => (
+            format!("Snapshot failed. {detail}"),
+            IconName::CircleAlert,
+            cx.theme().danger,
+        ),
+        _ => (
+            "No snapshot recorded".to_owned(),
+            IconName::CircleDashed,
+            cx.theme().muted_foreground,
+        ),
     };
     div()
         .border_b_1()
@@ -432,8 +458,15 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                 .flex_wrap()
                 .child(message(format!("Run #{id}")).font_semibold())
                 .child(
-                    message(node_runs::state_label(&status.run.state))
-                        .text_color(cx.theme().muted_foreground),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Icon::new(state_icon).size_3().text_color(state_color))
+                        .child(
+                            message(node_runs::state_label(&status.run.state))
+                                .text_color(cx.theme().muted_foreground),
+                        ),
                 )
                 .when_some(status.run.continued_from, |row, previous| {
                     row.child(
@@ -448,7 +481,14 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                 .items_center()
                 .gap_2()
                 .flex_wrap()
-                .child(message(snapshot).text_color(cx.theme().muted_foreground))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Icon::new(snapshot_icon).size_3().text_color(snapshot_color))
+                        .child(message(snapshot).text_color(cx.theme().muted_foreground)),
+                )
                 .when(
                     matches!(status.run.snapshot, SnapshotState::Saved { .. }),
                     |row| {
@@ -456,6 +496,7 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                             Button::new(SharedString::from(format!("run-{id}")))
                                 .ghost()
                                 .small()
+                                .icon(IconName::GitCommitHorizontal)
                                 .label("Review snapshot")
                                 .on_click(move |_, _, cx| {
                                     let _ = workspace.update(cx, |this, cx| {
@@ -547,6 +588,7 @@ fn revision_row(
                     Button::new(SharedString::from(format!("copy-{commit}")))
                         .ghost()
                         .small()
+                        .icon(IconName::Copy)
                         .child(
                             div()
                                 .font_family(cx.theme().mono_font_family.clone())
@@ -562,6 +604,7 @@ fn revision_row(
                     Button::new(SharedString::from(commit.clone()))
                         .ghost()
                         .small()
+                        .icon(IconName::FileDiff)
                         .label("Review revision")
                         .on_click(move |_, _, cx| {
                             let _ = workspace.update(cx, |this, cx| {
