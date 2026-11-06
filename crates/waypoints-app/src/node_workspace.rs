@@ -11,16 +11,22 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffFile, DiffFileStatus, DiffMode, DiffState},
     input::{Textarea, TextareaState},
+    scroll::ScrollableElement as _,
     text::TextView,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+#[cfg(feature = "native-qa")]
+use gpui_kit::{App, Focusable as _};
 use gpui_kit::{
     AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, relative,
 };
 use waypoints_backend::{Client, RunStatus};
-use waypoints_core::storage::{Node, NodeRevisionPage};
+use waypoints_core::{
+    run::SnapshotState,
+    storage::{Node, NodeRevisionPage},
+};
 
 use super::{Load, Workspace, message, run_backend, workflow_graph::node_title};
 
@@ -59,6 +65,8 @@ pub(super) struct NodeWorkspace {
     assignment_preview_scroll: ScrollHandle,
     saving: bool,
     save_error: Option<String>,
+    external_saved: Option<String>,
+    assignment_edit_scroll: ScrollHandle,
     tab: Tab,
     target: Target,
     review: Load<Review>,
@@ -355,6 +363,68 @@ impl NodeWorkspace {
     }
 }
 
+#[cfg(feature = "native-qa")]
+impl NodeWorkspace {
+    pub(super) fn install_qa_permission(&mut self, node_id: i64, run_id: i64, title: &str) {
+        self.run.install_qa_permission(node_id, run_id, title);
+    }
+
+    pub(super) fn set_qa_run_idle(&mut self) {
+        self.run.set_qa_idle();
+    }
+
+    pub(super) fn clear_qa_permission(&mut self) {
+        self.run.clear_qa_permission();
+    }
+
+    pub(super) fn set_qa_review_stale(&mut self, stale: bool) {
+        self.current_review_stale = stale;
+    }
+
+    pub(super) fn set_qa_history_stale(&mut self, stale: bool) {
+        self.history_stale = stale;
+    }
+
+    pub(super) fn focus_qa_assignment(&self, window: &mut Window, cx: &mut App) {
+        self.draft.read(cx).focus_handle(cx).focus(window, cx);
+    }
+}
+
+impl NodeWorkspace {
+    fn mark_review_stale_if_snapshot_changed(&mut self, status: &RunStatus) {
+        let SnapshotState::Saved { revision } = &status.run.snapshot else {
+            return;
+        };
+        if matches!(self.review, Load::Ready(_))
+            && current_review_changed(&self.target, &self.review, &revision.commit_id)
+        {
+            self.current_review_stale = true;
+        }
+    }
+
+    fn sync_saved_prompt(&mut self, saved: String, window: &mut Window, cx: &mut gpui_kit::App) {
+        if self.saved == saved {
+            return;
+        }
+        let draft = self.draft.read(cx).value().to_string();
+        if draft == self.saved {
+            self.saved = saved.clone();
+            self.draft
+                .update(cx, |draft, cx| draft.replace_all(saved, window, cx));
+            self.external_saved = None;
+        } else if draft == saved {
+            // The user already has the newly saved text in the editor.
+            self.saved = saved;
+            self.external_saved = None;
+        } else {
+            // Keep the user's unsaved text and make the newer saved assignment
+            // explicit instead of silently replacing either side.
+            self.saved = saved.clone();
+            self.external_saved = Some(saved);
+        }
+    }
+}
+
 fn current_review_changed(target: &Target, review: &Load<Review>, saved_commit: &str) -> bool {
     matches!(target, Target::Current)
         && match review {
@@ -369,7 +439,7 @@ fn review_needs_load(target: &Target, review: &Load<Review>, current_stale: bool
 }
 
 impl Workspace {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "native-qa"))]
     pub(super) fn assignment_draft(&self, key: NodeKey, cx: &gpui_kit::App) -> SharedString {
         self.node_workspaces[&key].draft.read(cx).value()
     }
@@ -397,6 +467,8 @@ impl Workspace {
                 assignment_preview_scroll: ScrollHandle::new(),
                 saving: false,
                 save_error: None,
+                external_saved: None,
+                assignment_edit_scroll: ScrollHandle::new(),
                 tab: Tab::default(),
                 target: Target::Current,
                 review: Load::Idle,
@@ -417,6 +489,11 @@ impl Workspace {
                 older_error: None,
             }
         });
+        #[cfg(feature = "native-qa")]
+        if self.qa_fixture_mode {
+            cx.notify();
+            return;
+        }
         self.discover_run(key, cx);
         cx.notify();
     }
@@ -461,6 +538,7 @@ impl Workspace {
         match result {
             Ok(saved) => {
                 node.saved.clone_from(&saved.prompt);
+                node.external_saved = None;
                 if self.state.selected == Some((key.0, key.1))
                     && let Load::Ready(graph) = &mut self.graph
                     && let Some(entry) = graph.nodes.iter_mut().find(|entry| entry.id == key.2)
@@ -589,7 +667,33 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn render_node_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
+    pub(super) fn sync_selected_assignment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((project, workflow)) = self.state.selected else {
+            return;
+        };
+        let Some(&id) = self.selected_nodes.get(&(project, workflow)) else {
+            return;
+        };
+        let saved = match &self.graph {
+            Load::Ready(graph) => graph
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.prompt.clone()),
+            _ => None,
+        };
+        if let Some(saved) = saved
+            && let Some(node) = self.node_workspaces.get_mut(&(project, workflow, id))
+        {
+            node.sync_saved_prompt(saved, window, cx);
+        }
+    }
+
+    pub(super) fn render_node_workspace(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let root = div()
             .size_full()
             .min_h_0()
@@ -614,13 +718,37 @@ impl Workspace {
             (IconName::GitCompareArrows, "Changes", Tab::Changes),
             (IconName::FileClock, "History", Tab::History),
         ];
+        let compact = node_runs::compact_follow_up(window);
+        let compact_continue = node.run.continue_target().filter(|_| compact);
         let root = root
             .child(
                 div()
-                    .font_semibold()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(node_title(id, &node.saved)),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_semibold()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(node_title(id, &node.saved)),
+                    )
+                    .when_some(compact_continue, |row, run_id| {
+                        row.child(
+                            Button::new("continue-session")
+                                .outline()
+                                .small()
+                                .icon(IconName::Play)
+                                .label("Continue session…")
+                                .disabled(node.run.is_busy())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_follow_up(key, run_id, window, cx)
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -633,6 +761,7 @@ impl Workspace {
                     .children(tabs.into_iter().map(|(icon, label, tab)| {
                         Button::new(label)
                             .ghost()
+                            .when(compact, |button| button.small())
                             .icon(icon)
                             .label(label)
                             .selected(node.tab == tab)
@@ -658,6 +787,7 @@ impl Workspace {
                         .map(|(icon, label, preview)| {
                             Button::new(label)
                                 .ghost()
+                                .when(compact, |button| button.small())
                                 .icon(icon)
                                 .label(label)
                                 .selected(node.assignment_preview == preview)
@@ -672,6 +802,7 @@ impl Workspace {
                     .child(
                         Button::new("save-assignment")
                             .primary()
+                            .when(compact, |button| button.small())
                             .icon(IconName::Save)
                             .label("Save assignment")
                             .disabled(!dirty || node.saving)
@@ -688,6 +819,43 @@ impl Workspace {
                     }));
                 let root = root
                     .child(toolbar)
+                    .when_some(node.external_saved.clone(), |root, saved| {
+                        root.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    message(
+                                        "The saved assignment changed outside Waypoints. Your draft is preserved.",
+                                    )
+                                    .text_color(cx.theme().warning),
+                                )
+                                .child(
+                                    Button::new("load-external-assignment")
+                                        .small()
+                                        .outline()
+                                        .label("Load saved assignment")
+                                        .disabled(node.saving)
+                                        .tooltip(
+                                            "Replace the draft with the newer saved assignment (undoable)",
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if let Some(node) =
+                                                this.node_workspaces.get_mut(&key)
+                                            {
+                                                let saved = saved.clone();
+                                                node.draft.update(cx, |draft, cx| {
+                                                    draft.replace_all(saved, window, cx);
+                                                });
+                                                node.external_saved = None;
+                                                cx.notify();
+                                            }
+                                        })),
+                                ),
+                        )
+                    })
                     .when_some(node.save_error.clone(), |root, error| {
                         root.child(message(error).text_color(cx.theme().danger))
                     });
@@ -719,19 +887,32 @@ impl Workspace {
                     )
                 } else {
                     root.child(
-                        message("Saved assignments apply to future runs.")
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        div().flex_1().min_h_0().child(
-                            Textarea::new(&node.draft)
-                                .h(relative(1.))
-                                .aria_label("Assignment"),
-                        ),
+                        div()
+                            .id("assignment-content")
+                            .test_support()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&node.assignment_edit_scroll)
+                            .vertical_scrollbar(&node.assignment_edit_scroll)
+                            .child(
+                                message("Saved assignments apply to future runs.")
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                div().flex_1().min_h(gpui_kit::rems(12.)).child(
+                                    Textarea::new(&node.draft)
+                                        .h(relative(1.))
+                                        .aria_label("Assignment"),
+                                ),
+                            ),
                     )
                 }
             }
-            Tab::Output => self.render_run_panel(key, root, cx),
+            Tab::Output => self.render_run_panel(key, root, window, cx),
             Tab::Changes => {
                 let target = target_label(&node.target);
                 let root = root.child(
@@ -796,7 +977,11 @@ impl Workspace {
                                     .ghost()
                                     .small()
                                     .icon(IconName::Copy)
-                                    .label(short_commit)
+                                    .child(
+                                        div()
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .child(short_commit),
+                                    )
                                     .accessibility_label("Copy revision ID")
                                     .tooltip(format!("Copy revision {commit}"))
                                     .on_click(move |_, _, cx| {
@@ -1216,6 +1401,150 @@ mod tests {
         })
         .expect("workspace window remains open");
     }
+    #[gpui_kit::test]
+    fn graph_reload_syncs_a_clean_draft_and_warns_before_replacing_a_dirty_one(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::workspace::workspace_tests::{open_workspace, workflow};
+        use gpui_kit::test::TestWindowExt as _;
+        use serde_json::json;
+
+        let (handle, workspace) = open_workspace(cx);
+        let key = (1, 7, 1);
+        cx.update_window(handle, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.graph = Load::Ready(
+                    serde_json::from_value(json!({
+                        "workflow": workflow("project-a", 7),
+                        "nodes": [{"id": 1, "workflow_id": 7, "prompt": "Saved assignment"}],
+                        "connections": []
+                    }))
+                    .expect("graph fixture matches the storage schema"),
+                );
+                workspace.open_node(1, window, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                workspace.read(cx).node_workspaces[&key]
+                    .draft
+                    .read(cx)
+                    .value(),
+                "Saved assignment"
+            );
+
+            workspace.update(cx, |workspace, cx| {
+                workspace.graph = Load::Ready(
+                    serde_json::from_value(json!({
+                        "workflow": workflow("project-a", 7),
+                        "nodes": [{"id": 1, "workflow_id": 7, "prompt": "Externally saved"}],
+                        "connections": []
+                    }))
+                    .expect("refresh fixture matches the storage schema"),
+                );
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let clean = &workspace.read(cx).node_workspaces[&key];
+            assert_eq!(clean.saved, "Externally saved");
+            assert_eq!(clean.draft.read(cx).value(), "Externally saved");
+            assert!(clean.external_saved.is_none());
+
+            window.click("input-state", cx);
+            window.input("Local unsaved", cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.graph = Load::Ready(
+                    serde_json::from_value(json!({
+                        "workflow": workflow("project-a", 7),
+                        "nodes": [{"id": 1, "workflow_id": 7, "prompt": "Second external"}],
+                        "connections": []
+                    }))
+                    .expect("second refresh fixture matches the storage schema"),
+                );
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let dirty = &workspace.read(cx).node_workspaces[&key];
+            assert_eq!(dirty.saved, "Second external");
+            assert!(dirty.draft.read(cx).value().contains("Local unsaved"));
+            assert_eq!(dirty.external_saved.as_deref(), Some("Second external"));
+            assert!(window.find("load-external-assignment").visible());
+
+            window.click("load-external-assignment", cx);
+            let reloaded = &workspace.read(cx).node_workspaces[&key];
+            assert_eq!(reloaded.saved, "Second external");
+            assert_eq!(reloaded.draft.read(cx).value(), "Second external");
+            assert!(reloaded.external_saved.is_none());
+            assert!(window.try_find("load-external-assignment").is_none());
+        })
+        .expect("workspace window remains open");
+    }
+
+    #[gpui_kit::test]
+    fn discovered_snapshot_marks_a_loaded_current_review_stale(cx: &mut gpui_kit::TestAppContext) {
+        use crate::workspace::workspace_tests::{open_workspace, workflow};
+        use serde_json::json;
+
+        let (handle, workspace) = open_workspace(cx);
+        let key = (1, 7, 1);
+        cx.update_window(handle, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.graph = Load::Ready(
+                    serde_json::from_value(json!({
+                        "workflow": workflow("project-a", 7),
+                        "nodes": [{"id": 1, "workflow_id": 7, "prompt": "Review"}],
+                        "connections": []
+                    }))
+                    .expect("graph fixture matches the storage schema"),
+                );
+                workspace.open_node(1, window, cx);
+                let node = workspace.node_workspaces.get_mut(&key).expect("open node");
+                node.target = Target::Current;
+                node.review = Load::Ready(Review {
+                    label: "Current recorded revision".into(),
+                    commit: "before".into(),
+                    conflicted: false,
+                    files: Vec::new(),
+                    selected: 0,
+                });
+                node.current_review_stale = false;
+                let status: RunStatus = serde_json::from_value(json!({
+                    "run": {
+                        "id": 42, "workflow_id": 7, "node_id": 1, "prompt": "Review",
+                        "directory": "/tmp/fixture", "change_id": "fixture",
+                        "executable": "/tmp/fixture/agent", "session_id": "session",
+                        "state": {"status": "completed"},
+                        "snapshot": {
+                            "status": "saved",
+                            "revision": {
+                                "change_id": "fixture", "commit_id": "after",
+                                "description": "Review", "conflicted": false
+                            }
+                        }
+                    },
+                    "permission": null
+                }))
+                .expect("run fixture matches the backend schema");
+                node.mark_review_stale_if_snapshot_changed(&status);
+                assert!(node.current_review_stale);
+
+                node.current_review_stale = false;
+                node.target = Target::Run(42);
+                node.mark_review_stale_if_snapshot_changed(&status);
+                assert!(!node.current_review_stale);
+
+                node.target = Target::Current;
+                node.current_review_stale = false;
+                if let Load::Ready(review) = &mut node.review {
+                    review.commit = "after".into();
+                }
+                node.mark_review_stale_if_snapshot_changed(&status);
+                assert!(!node.current_review_stale);
+            });
+        })
+        .expect("workspace window remains open");
+    }
+
     #[gpui_kit::test]
     fn edits_while_saving_remain_a_draft_on_success_and_error(cx: &mut gpui_kit::TestAppContext) {
         use crate::workspace::workspace_tests::{open_workspace, workflow};

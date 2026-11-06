@@ -231,6 +231,61 @@ pub(super) struct RunPanel {
 }
 
 impl RunPanel {
+    pub(super) fn continue_target(&self) -> Option<i64> {
+        self.status
+            .as_ref()
+            .filter(|status| can_continue(status))
+            .map(|status| status.run.id)
+    }
+
+    pub(super) fn is_busy(&self) -> bool {
+        self.busy
+    }
+
+    #[cfg(feature = "native-qa")]
+    pub(super) fn install_qa_permission(&mut self, node_id: i64, run_id: i64, title: &str) {
+        self.status = Some(
+            serde_json::from_value(serde_json::json!({
+                "run": {
+                    "id": run_id,
+                    "workflow_id": 7,
+                    "node_id": node_id,
+                    "prompt": title,
+                    "directory": "/tmp/waypoints-native-qa/workspace",
+                    "change_id": "qa-change",
+                    "executable": "/tmp/waypoints-native-qa/fake-acp",
+                    "state": {"status": "awaiting_permission"},
+                    "snapshot": {"status": "not_recorded"}
+                },
+                "permission": {
+                    "id": run_id,
+                    "tool_call": {"title": title},
+                    "options": [
+                        {"option_id": "deny", "name": "Deny once", "kind": "reject_once"}
+                    ]
+                }
+            }))
+            .expect("native QA permission fixture matches the backend schema"),
+        );
+        self.busy = false;
+        self.polling = false;
+        self.error = None;
+    }
+
+    #[cfg(feature = "native-qa")]
+    pub(super) fn set_qa_idle(&mut self) {
+        self.busy = false;
+        self.polling = false;
+        self.error = None;
+    }
+
+    #[cfg(feature = "native-qa")]
+    pub(super) fn clear_qa_permission(&mut self) {
+        if let Some(status) = &mut self.status {
+            status.permission = None;
+        }
+    }
+
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
         let executable =
             cx.new(|cx| InputState::new(window, cx).placeholder("/absolute/path/to/agent-acp"));
@@ -363,6 +418,21 @@ fn active(state: &RunState) -> bool {
     )
 }
 
+pub(super) fn can_continue(status: &RunStatus) -> bool {
+    status.run.session_id.is_some()
+        && matches!(
+            status.run.state,
+            RunState::Completed
+                | RunState::Cancelled
+                | RunState::Failed { .. }
+                | RunState::Recovered { .. }
+        )
+}
+
+pub(super) fn compact_follow_up(window: &Window) -> bool {
+    window.viewport_size().height < window.rem_size() * 35.0
+}
+
 pub(super) fn state_label(state: &RunState) -> String {
     match state {
         RunState::Starting => "Starting",
@@ -475,7 +545,11 @@ impl Workspace {
                 node.run.busy = false;
                 match result {
                     Ok(status) => {
+                        let discovered = status.clone();
                         node.run.status = status;
+                        if let Some(status) = &discovered {
+                            node.mark_review_stale_if_snapshot_changed(status);
+                        }
                         this.poll_node_run(key, cx);
                     }
                     Err(error) => node.run.error = Some(error),
@@ -731,6 +805,64 @@ impl Workspace {
         });
     }
 
+    pub(super) fn open_follow_up(
+        &self,
+        key: NodeKey,
+        run_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let dialog = dialog.title(format!("Continue run #{run_id}"));
+            let view = weak.upgrade();
+            let panel = view
+                .as_ref()
+                .and_then(|view| view.read(cx).node_workspaces.get(&key))
+                .map(|node| &node.run);
+            let Some(panel) = panel.filter(|panel| {
+                panel.status.as_ref().is_some_and(|status| {
+                    status.run.id == run_id && status.run.session_id.is_some()
+                })
+            }) else {
+                return dialog.child(message("This run is no longer available for continuation."));
+            };
+            let submit_weak = weak.clone();
+            dialog
+                .child(message("Send follow-up instructions to the saved session."))
+                .child(
+                    Textarea::new(&panel.follow_up)
+                        .h(gpui_kit::rems(6.))
+                        .aria_label("Follow-up instructions"),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Button::new("cancel-follow-up")
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("submit-follow-up")
+                                .primary()
+                                .icon(IconName::Play)
+                                .label("Continue session")
+                                .disabled(panel.busy)
+                                .on_click(move |_, window, cx| {
+                                    let _ = submit_weak.update(cx, |this, cx| {
+                                        this.start_node_run(key, Some(run_id), cx);
+                                    });
+                                    window.close_dialog(cx);
+                                }),
+                        ),
+                )
+        });
+    }
+
     pub(in crate::workspace) fn graph_run_status(&self, node: i64) -> Option<&'static str> {
         let (project, workflow) = self.state.selected?;
         let status = self
@@ -758,12 +890,7 @@ impl Workspace {
         let Some((project, workflow)) = self.state.selected else {
             return div();
         };
-        let mut actions = div()
-            .id("permission-actions")
-            .flex()
-            .gap_1()
-            .overflow_x_scroll()
-            .min_w_0();
+        let mut actions = div().flex().flex_wrap().gap_1().min_w_0();
         for (&key, node) in &self.node_workspaces {
             if (key.0, key.1) != (project, workflow) {
                 continue;
@@ -778,21 +905,32 @@ impl Workspace {
                         .outline()
                         .small()
                         .icon(IconName::ShieldAlert)
-                        .label(format!("Permission · #{}", key.2))
+                        .label(format!("Node #{}", key.2))
                         .accessibility_label(format!("Review permission for node #{}", key.2))
+                        .tooltip(format!("Permission needed for node #{}", key.2))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_permission(key, id, &permission, window, cx)
                         })),
                 );
             }
         }
-        div().min_w_0().child(actions)
+        div().flex_1().min_w_0().child(actions)
     }
 
-    pub(super) fn render_run_panel(&self, key: NodeKey, root: Div, cx: &Context<Self>) -> Div {
+    pub(super) fn render_run_panel(
+        &self,
+        key: NodeKey,
+        root: Div,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Div {
         let node = &self.node_workspaces[&key];
         let panel = &node.run;
         let status = panel.status.as_ref();
+        // The inline composer needs a predictable amount of vertical room.
+        // Below that, the node tab row carries one compact trigger and moves
+        // the composer into a dialog instead of squeezing the transcript.
+        let compact_follow_up = compact_follow_up(window);
         let running = status.is_some_and(|status| active(&status.run.state));
         let unsaved = node.draft.read(cx).value().as_ref() != node.saved;
         let mut toolbar = div()
@@ -903,15 +1041,7 @@ impl Workspace {
                 }
                 _ => summary = summary.child(message("No saved snapshot.")),
             }
-            if status.run.session_id.is_some()
-                && matches!(
-                    status.run.state,
-                    RunState::Completed
-                        | RunState::Cancelled
-                        | RunState::Failed { .. }
-                        | RunState::Recovered { .. }
-                )
-            {
+            if can_continue(status) && !compact_follow_up {
                 follow_up = Some(
                     div()
                         .flex()
@@ -1502,6 +1632,84 @@ mod tests {
         });
     }
     #[gpui_kit::test]
+    fn many_permission_requests_keep_the_workflow_controls_reachable(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::super::{Load, Tab};
+        use crate::workspace::workspace_tests::{open_workspace, workflow};
+        use gpui_kit::test::TestWindowExt as _;
+
+        let (handle, workspace) = open_workspace(cx);
+        cx.simulate_window_resize(
+            handle,
+            gpui_kit::size(gpui_kit::px(720.), gpui_kit::px(480.)),
+        );
+        cx.update_window(handle, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.graph = Load::Ready(
+                    serde_json::from_value(json!({
+                        "workflow": workflow("project-a", 7),
+                        "nodes": (1..=6).map(|id| json!({
+                            "id": id, "workflow_id": 7, "prompt": format!("Permission node {id}")
+                        })).collect::<Vec<_>>(),
+                        "connections": []
+                    }))
+                    .expect("workflow graph fixture matches the storage schema"),
+                );
+                for id in 1..=6 {
+                    workspace.open_node(id, window, cx);
+                    let panel = &mut workspace
+                        .node_workspaces
+                        .get_mut(&(1, 7, id))
+                        .expect("node workspace")
+                        .run;
+                    panel.status = Some(
+                        serde_json::from_value(json!({
+                            "run": {
+                                "id": 100 + id, "workflow_id": 7, "node_id": id,
+                                "prompt": format!("Permission node {id}"),
+                                "directory": "/tmp/fixture", "change_id": "fixture",
+                                "executable": "/tmp/fixture/agent",
+                                "state": {"status": "awaiting_permission"},
+                                "snapshot": {"status": "not_recorded"}
+                            },
+                            "permission": {
+                                "id": id,
+                                "tool_call": {"title": format!("Write file {id}")},
+                                "options": [{"option_id": "deny", "name": "Deny once", "kind": "reject_once"}]
+                            }
+                        }))
+                        .expect("run fixture matches the backend schema"),
+                    );
+                }
+                let node = workspace.node_workspaces.get_mut(&(1, 7, 1)).expect("node");
+                node.tab = Tab::Assignment;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let viewport = window.viewport_size();
+            let toggle = window.find("toggle-graph").bounds();
+            assert!(
+                toggle.right() <= viewport.width,
+                "graph toggle {toggle:?} is outside {viewport:?}"
+            );
+            for id in 1..=6 {
+                let button = window.find(format!("permission-{}", 100 + id));
+                assert!(button.visible(), "permission {id} is hidden");
+                assert!(
+                    button.bounds().bottom() <= viewport.height,
+                    "permission {id} is outside {viewport:?}"
+                );
+            }
+            window.click("permission-102", cx);
+            assert!(window.find("dismiss-permission").visible());
+            window.press("escape", cx);
+            assert!(window.try_find("dismiss-permission").is_none());
+        })
+        .expect("workspace window remains open");
+    }
+
+    #[gpui_kit::test]
     fn permission_dialog_keeps_the_pinned_diff_at_the_same_line(cx: &mut gpui_kit::TestAppContext) {
         use std::fmt::Write as _;
 
@@ -1588,5 +1796,87 @@ mod tests {
             };
             assert_eq!(review.files[review.selected].1, diff);
         }).expect("workspace window remains open");
+    }
+
+    #[gpui_kit::test]
+    fn follow_up_controls_stay_inside_the_window(cx: &mut gpui_kit::TestAppContext) {
+        use super::super::{Load, Tab};
+        use crate::workspace::workspace_tests::{open_workspace, workflow};
+        use gpui_kit::test::TestWindowExt as _;
+
+        let (handle, workspace) = open_workspace(cx);
+        cx.update_window(handle, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.graph = Load::Ready(
+                    serde_json::from_value(json!({
+                        "workflow": workflow("project-a", 7),
+                        "nodes": [{"id": 1, "workflow_id": 7, "prompt": "Review"}],
+                        "connections": []
+                    }))
+                    .expect("workflow graph fixture matches the storage schema"),
+                );
+                workspace.open_node(1, window, cx);
+                workspace.graph_collapsed = false;
+                let node = workspace.node_workspaces.get_mut(&(1, 7, 1)).expect("node");
+                node.tab = Tab::Output;
+                node.run.status = Some(
+                    serde_json::from_value(json!({
+                        "run": {
+                            "id": 42, "workflow_id": 7, "node_id": 1, "prompt": "Review",
+                            "directory": "/tmp/fixture", "change_id": "fixture",
+                            "executable": "/tmp/fixture/agent", "session_id": "session",
+                            "state": {"status": "completed"},
+                            "snapshot": {"status": "not_recorded"}
+                        },
+                        "permission": null
+                    }))
+                    .expect("run fixture matches the backend schema"),
+                );
+                node.run.busy = false;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("continue-run").visible());
+        })
+        .expect("workspace window remains open");
+
+        cx.simulate_window_resize(
+            handle,
+            gpui_kit::size(gpui_kit::px(720.), gpui_kit::px(480.)),
+        );
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let window_bounds = window.viewport_size();
+            let compact = window.find("continue-session").bounds();
+            assert!(
+                compact.bottom() <= window_bounds.height,
+                "compact follow-up trigger {compact:?} exceeds viewport {window_bounds:?}"
+            );
+            assert!(window.try_find("continue-run").is_none());
+            let inputs_before = window.find_all("input-state").len();
+            window.click("continue-session", cx);
+            assert!(window.find("submit-follow-up").visible());
+            assert!(window.find("cancel-follow-up").visible());
+            assert!(
+                window.find_all("input-state").len() > inputs_before,
+                "the follow-up dialog contains an instructions field"
+            );
+            window.press("escape", cx);
+            assert!(window.try_find("submit-follow-up").is_none());
+
+            gpui_kit::component::Theme::global_mut(cx).font_size *= 1.5;
+            window.render_frame(cx);
+            let zoomed = window.find("continue-session").bounds();
+            assert!(
+                zoomed.bottom() <= window_bounds.height,
+                "zoomed follow-up trigger {zoomed:?} exceeds viewport {window_bounds:?}"
+            );
+            window.click("continue-session", cx);
+            assert!(window.find("submit-follow-up").visible());
+            assert!(window.find("cancel-follow-up").visible());
+            window.press("escape", cx);
+            assert!(window.try_find("submit-follow-up").is_none());
+        })
+        .expect("workspace window remains open");
     }
 }

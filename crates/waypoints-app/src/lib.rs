@@ -6,6 +6,11 @@ mod workspace;
 #[cfg(feature = "screenshot-fixtures")]
 pub mod screenshots;
 
+#[cfg(feature = "native-qa")]
+pub fn run_native_qa() {
+    workspace::qa::run();
+}
+
 use gpui_kit::component::{TitleBar, WindowExt as _};
 use gpui_kit::{
     App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, Pixels, WindowBounds, WindowOptions,

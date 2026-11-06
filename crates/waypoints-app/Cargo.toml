@@ -6,11 +6,17 @@ edition = "2024"
 [features]
 hot-reload = ["gpui-kit/hot-reload"]
 screenshot-fixtures = ["gpui-kit/test-support"]
+native-qa = ["screenshot-fixtures"]
 
 [[bin]]
 name = "waypoints-screenshots"
 path = "src/bin/screenshots.rs"
 required-features = ["screenshot-fixtures"]
+
+[[bin]]
+name = "waypoints-native-qa"
+path = "src/bin/native_qa.rs"
+required-features = ["native-qa"]
 
 [dependencies]
 anyhow = "1.0.104"

@@ -50,7 +50,7 @@ pub(crate) fn install(
         serde_json::from_value(serde_json::json!({
             "workflow": workflow("project-a", 7, "Review workspace polish"),
             "nodes": [
-                {"id": 1, "workflow_id": 7, "prompt": "Polish the review workspace and its history."},
+                {"id": 1, "workflow_id": 7, "prompt": "Polish the node workspace."},
                 {"id": 2, "workflow_id": 7, "prompt": "Preserve the retained diff state."},
                 {"id": 3, "workflow_id": 7, "prompt": "Render structured agent output."},
                 {"id": 4, "workflow_id": 7, "prompt": "Verify freshness after a saved snapshot."}

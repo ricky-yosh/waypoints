@@ -35,7 +35,12 @@ pub(crate) use node_workspace::ScreenshotSurface;
 
 const DEFAULT_GRAPH_HEIGHT: f32 = 192.0;
 const MIN_GRAPH_HEIGHT: f32 = 80.0;
-const MIN_NODE_HEIGHT: f32 = 230.0;
+// Keep enough room for the node workspace's own title, tabs, and run
+// controls when the graph is visible at the minimum window height.
+const MIN_NODE_HEIGHT: f32 = 380.0;
+// The workflow title row above the graph split is outside the resizable
+// body, so the graph's maximum must account for it.
+const WORKFLOW_HEADER_HEIGHT: f32 = 40.0;
 
 // Reserve a readable detail column when the navigator is expanded.
 const MIN_DETAIL_WIDTH: f32 = 320.0;
@@ -89,6 +94,8 @@ pub(crate) struct Workspace {
     focus: FocusHandle,
     path_error: Option<String>,
     preferences_error: Option<String>,
+    #[cfg(feature = "native-qa")]
+    qa_fixture_mode: bool,
 }
 
 struct Project {
@@ -193,6 +200,8 @@ impl Workspace {
             focus,
             path_error: None,
             preferences_error: None,
+            #[cfg(feature = "native-qa")]
+            qa_fixture_mode: false,
         }
     }
 
@@ -488,6 +497,10 @@ fn message(text: impl Into<SharedString>) -> gpui_kit::Div {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A project refresh can replace a saved assignment while its draft
+        // workspace is cached. Reconcile the selected node before rendering so
+        // the editor never presents the previous saved text as current.
+        self.sync_selected_assignment(window, cx);
         let mut list = div().flex().flex_col().gap_1();
         if self.state.projects.is_empty() {
             list = list.child(
@@ -768,12 +781,14 @@ impl Render for Workspace {
                 .state
                 .selected
                 .and_then(|key| self.selected_nodes.get(&key).copied());
-            let node_workspace = self.render_node_workspace(cx);
+            let node_workspace = self.render_node_workspace(window, cx);
             let body = if self.graph_collapsed || graph.nodes.is_empty() {
                 node_workspace.into_any_element()
             } else {
                 let weak = cx.entity().downgrade();
-                let max_height = (f32::from(window.viewport_size().height) - MIN_NODE_HEIGHT)
+                let max_height = (f32::from(window.viewport_size().height)
+                    - MIN_NODE_HEIGHT
+                    - WORKFLOW_HEADER_HEIGHT)
                     .max(MIN_GRAPH_HEIGHT);
                 v_resizable("graph-split")
                     .on_resize(move |state, _, cx| {
@@ -956,6 +971,10 @@ mod workspace_tests;
 #[cfg(feature = "screenshot-fixtures")]
 #[path = "workspace_fixtures.rs"]
 pub(crate) mod fixtures;
+
+#[cfg(feature = "native-qa")]
+#[path = "workspace_qa.rs"]
+pub(crate) mod qa;
 
 #[cfg(test)]
 mod tests {

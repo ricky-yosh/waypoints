@@ -423,6 +423,46 @@ fn install_graph_fixture(workspace: &gpui_kit::Entity<Workspace>, cx: &mut App) 
 }
 
 #[gpui_kit::test]
+fn short_window_shrinks_the_graph_without_overwriting_its_saved_height(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        install_graph_fixture(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.open_node(1, window, cx));
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).graph_height, 192.);
+    })
+    .expect("workspace window remains open");
+    let wide_assignment = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("Assignment").bounds()
+        })
+        .expect("workspace window remains open");
+
+    cx.simulate_window_resize(handle, size(px(720.), px(480.)));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.find("Assignment").bounds().top() < wide_assignment.top(),
+            "short windows give the node workspace priority over the graph"
+        );
+    })
+    .expect("workspace window remains open");
+
+    cx.simulate_window_resize(handle, size(px(900.), px(700.)));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("Assignment").bounds(),
+            wide_assignment,
+            "growing the window restores the saved graph height"
+        );
+        assert_eq!(workspace.read(cx).graph_height, 192.);
+    })
+    .expect("workspace window remains open");
+}
+
+#[gpui_kit::test]
 fn graph_resize_and_collapse_keep_the_node_workspace_reachable_at_minimum_width(
     cx: &mut TestAppContext,
 ) {

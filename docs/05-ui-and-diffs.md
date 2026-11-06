@@ -11,7 +11,10 @@ the workspace more room. Waypoints remembers the divider and visibility.
   actions. Saving updates the instructions used for future fresh runs; an
   active run keeps its captured instructions. Drafts, preview mode, and editing
   position remain in the current app session when you switch nodes. Unsaved
-  status stays visible in both modes.
+  status stays visible in both modes. A project refresh also reconciles the
+  selected assignment: a clean draft follows the newly saved text, while an
+  unsaved draft is kept with a warning and an undoable **Load saved assignment**
+  action.
 - **Output** starts a fresh run using the saved assignment and an absolute path
   to an installed ACP executable. The backend requires an associated native
   change and a verified, ready workspace. Use the [CLI](11-backend-cli.md) to
@@ -25,8 +28,10 @@ the workspace more room. Waypoints remembers the divider and visibility.
   outside the Markdown. Expand a tool row to inspect its original input/output
   as JSON with a copy action. Output follows the tail when you are reading the
   latest rows and stops following when you scroll upward; **Latest output**
-  returns to the newest content. The run outcome and snapshot outcome are
-  separate.
+  returns to the newest content. At the minimum window height the graph yields
+  space before the run controls are pushed below the window. When the inline
+  composer does not fit, **Continue session…** moves beside the node title and
+  opens a follow-up dialog. The run outcome and snapshot outcome are separate.
 - **Changes** shows the current recorded revision, a saved run snapshot, or an
   exact native revision. The target label is always explicit, and the commit ID
   is secondary monospace metadata with a copy action. The changed-file sidebar
@@ -45,12 +50,15 @@ the workspace more room. Waypoints remembers the divider and visibility.
   ID with the full value available through copy. **Load older revisions** uses
   the backend's opaque pinned-operation cursor; already-loaded rows stay in
   place if a later page fails. A run can open a review when it has a saved
-  snapshot. Refresh to fetch newer history.
+  snapshot. If a run records new history while the tab is open, the toolbar
+  announces it; Refresh fetches the newer runs and revisions.
 
 A pending permission appears in the workflow header for a monitored run. Open
 its action to inspect the tool request over the current workspace. Choose one
 of the backend's single-use options or dismiss the dialog to leave the request
-pending. The review stays in place. After a reply or expiry, the dialog shows
+pending. When several runs need permission, each request appears as a compact
+**Node #** action that wraps inside the workflow header, so no request is hidden
+offscreen. The review stays in place. After a reply or expiry, the dialog shows
 that the request is no longer pending.
 
 Live ACP tool updates may describe proposed edits. For completed code review,
@@ -73,7 +81,23 @@ labels. The app currently embeds the complete catalog for iteration speed; see
 
 ## Validation
 
-The four node surfaces can be rendered without a window server using the
+The native fixture QA binary opens a real window at the minimum size with 1.5×
+text and drives the assignment refresh, multiple permission requests, history
+freshness, review controls, and compact follow-up dialog. It uses fixture data,
+not a backend or agent session:
+
+```sh
+cargo run -p waypoints-app --features native-qa --bin waypoints-native-qa
+```
+
+It prints each completed step and exits successfully only after printing
+`NATIVE_QA_OK`. This is a native layout and interaction smoke check, not
+end-to-end agent validation. When launching the normal app for manual QA,
+point `WAYPOINTS_WORKSPACE_FILE` at an isolated absolute preferences file and
+`XDG_STATE_HOME` at a disposable state directory; macOS otherwise uses
+`~/Library/Application Support` for preferences.
+
+The four node surfaces can also be rendered without a window server using the
 fixture-backed screenshot binary:
 
 ```sh

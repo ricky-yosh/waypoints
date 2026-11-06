@@ -1,5 +1,5 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{Disableable as _, StyledExt as _};
+use gpui_kit::base::{Disableable as _, StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -7,8 +7,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Div, IntoElement as _, ListState,
-    ParentElement as _, SharedString, Styled as _, WeakEntity, div, list,
+    App, AppContext as _, ClipboardItem, Context, Div, InteractiveElement as _, IntoElement as _,
+    ListState, ParentElement as _, SharedString, Styled as _, WeakEntity, div, list,
 };
 use waypoints_backend::{Client, RunStatus};
 use waypoints_core::{
@@ -351,6 +351,14 @@ impl Workspace {
                             })
                             .text_color(cx.theme().muted_foreground),
                         )
+                        .when(node.history_stale, |toolbar| {
+                            toolbar.child(
+                                message("New history is available. Refresh to update.")
+                                    .id("history-stale")
+                                    .test_support()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                        })
                 }),
         )
         .when_some(node.older_error.clone(), |root, error| {
@@ -757,6 +765,38 @@ mod tests {
                 assert_eq!(result, &current);
                 assert_eq!(node.history_scroll.item_count(), 4);
             });
+        })
+        .expect("workspace window remains open");
+    }
+
+    #[gpui_kit::test]
+    fn stale_history_is_announced_while_its_tab_stays_open(cx: &mut gpui_kit::TestAppContext) {
+        use super::super::Tab;
+        use crate::workspace::workspace_tests::{open_workspace, workflow};
+        use gpui_kit::test::TestWindowExt as _;
+
+        let (handle, workspace) = open_workspace(cx);
+        let key = (1, 7, 1);
+        cx.update_window(handle, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.graph = Load::Ready(
+                    serde_json::from_value(json!({
+                        "workflow": workflow("project-a", 7),
+                        "nodes": [{"id": 1, "workflow_id": 7, "prompt": "History fixture"}],
+                        "connections": []
+                    }))
+                    .expect("graph fixture matches the storage schema"),
+                );
+                workspace.open_node(1, window, cx);
+                let node = workspace.node_workspaces.get_mut(&key).expect("open node");
+                node.tab = Tab::History;
+                node.history = Load::Ready((vec![], Ok(page("operation", &["head"], None))));
+                node.history_stale = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("history-stale").visible());
+            assert!(window.find("reload-history").visible());
         })
         .expect("workspace window remains open");
     }
