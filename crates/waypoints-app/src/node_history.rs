@@ -12,12 +12,13 @@ use gpui_kit::{
 };
 use waypoints_backend::{Client, RunStatus};
 use waypoints_core::{
-    run::{RunState, SnapshotState},
+    run::SnapshotState,
     storage::{NodeRevisionEntry, NodeRevisionPage},
 };
 
 use super::{
-    Load, NodeKey, NodeWorkspace, Target, Workspace, message, node_runs, run_backend, short_id,
+    Load, NodeKey, NodeWorkspace, Target, Workspace, message, node_runs, run_backend,
+    run_state_visual, short_id,
 };
 
 const HISTORY_PAGE_SIZE: usize = 30;
@@ -425,18 +426,7 @@ fn history_row(
 
 fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, cx: &App) -> Div {
     let id = status.run.id;
-    let (state_icon, state_color) = match &status.run.state {
-        RunState::Completed => (IconName::CircleCheck, cx.theme().success),
-        RunState::Failed { .. } | RunState::Interrupted { .. } => {
-            (IconName::CircleX, cx.theme().danger)
-        }
-        RunState::AwaitingPermission => (IconName::ShieldAlert, cx.theme().warning),
-        RunState::Starting | RunState::Running | RunState::Finalizing | RunState::Cancelling => {
-            (IconName::Clock, cx.theme().warning)
-        }
-        RunState::Cancelled => (IconName::Square, cx.theme().muted_foreground),
-        _ => (IconName::CircleAlert, cx.theme().muted_foreground),
-    };
+    let (state_icon, state_color) = run_state_visual(&status.run.state, cx.theme());
     let (snapshot, snapshot_icon, snapshot_color) = match &status.run.snapshot {
         SnapshotState::Saved { revision } => (
             format!("Snapshot saved · {}", short_id(&revision.commit_id)),

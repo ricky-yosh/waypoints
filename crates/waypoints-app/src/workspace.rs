@@ -466,29 +466,12 @@ fn run_backend<T>(f: impl AsyncFnOnce(Client) -> Result<T, String>) -> Result<T,
         .build()
         .map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let database = state_directory()?.join("workflows.db");
-        let config = Config::new(&database, &database.with_extension("sock")).map_err(|e| e.to_string())?;
+        let config = Config::default_paths().map_err(|e| e.to_string())?;
         let client = Client::connect(&config).await.map_err(|e| format!(
             "Couldn’t connect to the backend: {e}. Start it with `cargo run -p waypoints-cli -- workflow list --project .`, then refresh."
         ))?;
         f(client).await
     })
-}
-
-fn state_directory() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("XDG_STATE_HOME").filter(|p| !p.is_empty()) {
-        let path = PathBuf::from(path);
-        if !path.is_absolute() {
-            return Err("XDG_STATE_HOME must be absolute.".into());
-        }
-        return Ok(path.join("waypoints"));
-    }
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set.")?);
-    #[cfg(target_os = "macos")]
-    let path = home.join("Library/Application Support/waypoints");
-    #[cfg(not(target_os = "macos"))]
-    let path = home.join(".local/state/waypoints");
-    Ok(path)
 }
 
 fn message(text: impl Into<SharedString>) -> gpui_kit::Div {

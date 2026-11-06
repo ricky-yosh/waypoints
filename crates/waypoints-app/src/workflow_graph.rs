@@ -194,3 +194,70 @@ pub(super) fn render_graph(
                 })),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn graph(nodes: &[i64], edges: &[(i64, i64)]) -> WorkflowGraph {
+        serde_json::from_value(json!({
+            "workflow": {
+                "id": 1,
+                "project_path": "/tmp/project",
+                "name": "Workflow",
+            },
+            "nodes": nodes
+                .iter()
+                .map(|id| json!({"id": id, "workflow_id": 1, "prompt": format!("Node {id}")}))
+                .collect::<Vec<_>>(),
+            "connections": edges
+                .iter()
+                .map(|(source, target)| json!({
+                    "workflow_id": 1,
+                    "source_id": source,
+                    "target_id": target,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .expect("graph fixture matches the storage schema")
+    }
+
+    #[test]
+    fn positions_follow_the_longest_dependency_path() {
+        let positions = positions(&graph(&[1, 2, 3], &[(1, 2), (2, 3)]));
+
+        assert_eq!(positions[&1], (PADDING, PADDING));
+        assert_eq!(positions[&2], (PADDING + COLUMN_STEP, PADDING));
+        assert_eq!(positions[&3], (PADDING + 2. * COLUMN_STEP, PADDING));
+    }
+
+    #[test]
+    fn positions_pack_siblings_into_rows_by_node_order() {
+        let positions = positions(&graph(&[1, 2, 3, 4], &[(1, 2), (1, 3), (2, 4), (3, 4)]));
+
+        assert_eq!(positions[&2], (PADDING + COLUMN_STEP, PADDING));
+        assert_eq!(positions[&3], (PADDING + COLUMN_STEP, PADDING + ROW_STEP));
+        assert_eq!(positions[&4], (PADDING + 2. * COLUMN_STEP, PADDING));
+    }
+
+    #[test]
+    fn positions_keep_disconnected_and_cyclic_nodes_on_the_first_column() {
+        let disconnected = positions(&graph(&[1, 2, 3], &[]));
+        assert_eq!(disconnected[&1], (PADDING, PADDING));
+        assert_eq!(disconnected[&2], (PADDING, PADDING + ROW_STEP));
+        assert_eq!(disconnected[&3], (PADDING, PADDING + 2. * ROW_STEP));
+
+        let cyclic = positions(&graph(&[1, 2], &[(1, 2), (2, 1)]));
+        assert_eq!(cyclic[&1], (PADDING, PADDING));
+        assert_eq!(cyclic[&2], (PADDING, PADDING + ROW_STEP));
+    }
+
+    #[test]
+    fn positions_ignore_edges_to_unknown_nodes() {
+        let positions = positions(&graph(&[1, 2], &[(1, 99), (99, 2)]));
+
+        assert_eq!(positions[&1], (PADDING, PADDING));
+        assert_eq!(positions[&2], (PADDING, PADDING + ROW_STEP));
+    }
+}

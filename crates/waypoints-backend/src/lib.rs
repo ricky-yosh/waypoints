@@ -10,7 +10,7 @@ mod runs;
 mod server;
 
 pub use client::Client;
-pub use config::Config;
+pub use config::{Config, default_state_directory};
 pub use protocol::BackendInfo;
 pub use protocol::RpcError;
 pub use runs::{Permission, PermissionOption, RunEvent, RunEventOrigin, RunEvents, RunStatus};

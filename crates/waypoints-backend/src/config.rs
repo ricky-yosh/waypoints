@@ -46,6 +46,40 @@ impl Config {
     pub fn socket(&self) -> &Path {
         &self.socket
     }
+
+    /// Builds the default database and sibling socket under the platform state directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state directory cannot be resolved or the paths are invalid.
+    pub fn default_paths() -> Result<Self, BackendError> {
+        let database = default_state_directory()?.join("workflows.db");
+        Self::new(&database, &database.with_extension("sock"))
+    }
+}
+
+/// Resolves the platform state directory that holds the default database.
+///
+/// Uses `XDG_STATE_HOME` when set, otherwise `~/Library/Application Support` on
+/// macOS and `~/.local/state` elsewhere.
+///
+/// # Errors
+///
+/// Returns an error if `XDG_STATE_HOME` is relative or `HOME` is unavailable.
+pub fn default_state_directory() -> Result<PathBuf, BackendError> {
+    if let Some(path) = std::env::var_os("XDG_STATE_HOME").filter(|path| !path.is_empty()) {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err(anyhow::anyhow!("XDG_STATE_HOME must be absolute").into());
+        }
+        return Ok(path.join("waypoints"));
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    #[cfg(target_os = "macos")]
+    let path = home.join("Library/Application Support/waypoints");
+    #[cfg(not(target_os = "macos"))]
+    let path = home.join(".local/state/waypoints");
+    Ok(path)
 }
 
 fn absolute_file(path: &Path) -> anyhow::Result<PathBuf> {

@@ -7,7 +7,7 @@ mod node_runs;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Selectable as _, Sizable as _,
+    ActiveTheme as _, Selectable as _, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffFile, DiffFileStatus, DiffMode, DiffState},
     input::{Textarea, TextareaState},
@@ -18,13 +18,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 #[cfg(feature = "native-qa")]
 use gpui_kit::{App, Focusable as _};
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, relative,
+    AppContext as _, ClipboardItem, Context, Div, Entity, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, relative,
 };
 use waypoints_backend::{Client, RunStatus};
 use waypoints_core::{
-    run::SnapshotState,
+    run::{RunState, SnapshotState},
     storage::{Node, NodeRevisionPage},
 };
 
@@ -110,6 +110,19 @@ fn status_label(status: DiffFileStatus) -> &'static str {
         DiffFileStatus::Unchanged => "=",
         DiffFileStatus::Conflicted => "!",
         _ => "?",
+    }
+}
+
+fn run_state_visual(state: &RunState, theme: &Theme) -> (IconName, Hsla) {
+    match state {
+        RunState::Completed => (IconName::CircleCheck, theme.success),
+        RunState::Failed { .. } | RunState::Interrupted { .. } => (IconName::CircleX, theme.danger),
+        RunState::AwaitingPermission => (IconName::ShieldAlert, theme.warning),
+        RunState::Starting | RunState::Running | RunState::Finalizing | RunState::Cancelling => {
+            (IconName::Clock, theme.warning)
+        }
+        RunState::Cancelled => (IconName::Square, theme.muted_foreground),
+        _ => (IconName::CircleAlert, theme.muted_foreground),
     }
 }
 
@@ -586,13 +599,7 @@ impl Workspace {
                     })?;
                     let files =
                         DiffFile::parse(&review.patch).map_err(|error| error.to_string())?;
-                    let source = match &target {
-                        Target::Current => "Current recorded revision".to_owned(),
-                        Target::Run(id) => format!("Run #{id} snapshot"),
-                        Target::Revision(commit) => {
-                            format!("Native revision {}", short_id(commit))
-                        }
-                    };
+                    let source = target_label(&target);
                     Ok::<_, String>((
                         source,
                         review.revision.commit_id,
@@ -771,520 +778,531 @@ impl Workspace {
                     })),
             );
         match node.tab {
-            Tab::Assignment => {
-                let draft = node.draft.read(cx).value();
-                let dirty = draft.as_ref() != node.saved;
-                let toolbar = div()
-                    .flex()
-                    .gap_2()
-                    .items_center()
-                    .flex_wrap()
-                    .children(
-                        [
-                            (IconName::PenLine, "Edit", false),
-                            (IconName::Eye, "Preview", true),
-                        ]
-                        .map(|(icon, label, preview)| {
-                            Button::new(label)
-                                .ghost()
-                                .when(compact, |button| button.small())
-                                .icon(icon)
-                                .label(label)
-                                .selected(node.assignment_preview == preview)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(node) = this.node_workspaces.get_mut(&key) {
-                                        node.assignment_preview = preview;
-                                        cx.notify();
-                                    }
-                                }))
-                        }),
-                    )
-                    .child(
-                        Button::new("save-assignment")
-                            .primary()
-                            .when(compact, |button| button.small())
-                            .icon(IconName::Save)
-                            .label("Save assignment")
-                            .disabled(!dirty || node.saving)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.save_assignment(key, cx);
-                            })),
-                    )
-                    .child(message(if node.saving {
-                        "Saving…"
-                    } else if dirty {
-                        "Unsaved edits"
-                    } else {
-                        "Saved assignment"
-                    }));
-                let root = root
-                    .child(toolbar)
-                    .when_some(node.external_saved.clone(), |root, saved| {
-                        root.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .flex_wrap()
-                                .gap_2()
-                                .child(
-                                    message(
-                                        "The saved assignment changed outside Waypoints. Your draft is preserved.",
-                                    )
-                                    .text_color(cx.theme().warning),
-                                )
-                                .child(
-                                    Button::new("load-external-assignment")
-                                        .small()
-                                        .outline()
-                                        .label("Load saved assignment")
-                                        .disabled(node.saving)
-                                        .tooltip(
-                                            "Replace the draft with the newer saved assignment (undoable)",
-                                        )
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if let Some(node) =
-                                                this.node_workspaces.get_mut(&key)
-                                            {
-                                                let saved = saved.clone();
-                                                node.draft.update(cx, |draft, cx| {
-                                                    draft.replace_all(saved, window, cx);
-                                                });
-                                                node.external_saved = None;
-                                                cx.notify();
-                                            }
-                                        })),
-                                ),
-                        )
-                    })
-                    .when_some(node.save_error.clone(), |root, error| {
-                        root.child(message(error).text_color(cx.theme().danger))
-                    });
-                if node.assignment_preview {
-                    root.child(
-                        div()
-                            .id("assignment-preview")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&node.assignment_preview_scroll)
-                            .child(
-                                div()
-                                    .max_w(gpui_kit::rems(48.))
-                                    .p_3()
-                                    .when(draft.trim().is_empty(), |body| {
-                                        body.child(
-                                            message("This assignment is empty.")
-                                                .text_color(cx.theme().muted_foreground),
-                                        )
-                                    })
-                                    .when(!draft.trim().is_empty(), |body| {
-                                        body.child(markdown_with_copy(
-                                            format!("assignment-{}-{}-{}", key.0, key.1, key.2),
-                                            draft.to_string(),
-                                        ))
-                                    }),
-                            ),
-                    )
-                } else {
-                    root.child(
-                        div()
-                            .id("assignment-content")
-                            .test_support()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&node.assignment_edit_scroll)
-                            .vertical_scrollbar(&node.assignment_edit_scroll)
-                            .child(
-                                message("Saved assignments apply to future runs.")
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(
-                                div().flex_1().min_h(gpui_kit::rems(12.)).child(
-                                    Textarea::new(&node.draft)
-                                        .h(relative(1.))
-                                        .aria_label("Assignment"),
-                                ),
-                            ),
-                    )
-                }
-            }
+            Tab::Assignment => self.render_node_assignment(key, node, compact, root, cx),
             Tab::Output => self.render_run_panel(key, root, window, cx),
-            Tab::Changes => {
-                let target = target_label(&node.target);
-                let root = root.child(
+            Tab::Changes => self.render_node_changes(key, node, root, cx),
+            Tab::History => self.render_node_history(key, node, root, cx),
+        }
+    }
+
+    fn render_node_assignment(
+        &self,
+        key: NodeKey,
+        node: &NodeWorkspace,
+        compact: bool,
+        root: Div,
+        cx: &Context<Self>,
+    ) -> Div {
+        let draft = node.draft.read(cx).value();
+        let dirty = draft.as_ref() != node.saved;
+        let toolbar = div()
+            .flex()
+            .gap_2()
+            .items_center()
+            .flex_wrap()
+            .children(
+                [
+                    (IconName::PenLine, "Edit", false),
+                    (IconName::Eye, "Preview", true),
+                ]
+                .map(|(icon, label, preview)| {
+                    Button::new(label)
+                        .ghost()
+                        .when(compact, |button| button.small())
+                        .icon(icon)
+                        .label(label)
+                        .selected(node.assignment_preview == preview)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(node) = this.node_workspaces.get_mut(&key) {
+                                node.assignment_preview = preview;
+                                cx.notify();
+                            }
+                        }))
+                }),
+            )
+            .child(
+                Button::new("save-assignment")
+                    .primary()
+                    .when(compact, |button| button.small())
+                    .icon(IconName::Save)
+                    .label("Save assignment")
+                    .disabled(!dirty || node.saving)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_assignment(key, cx);
+                    })),
+            )
+            .child(message(if node.saving {
+                "Saving…"
+            } else if dirty {
+                "Unsaved edits"
+            } else {
+                "Saved assignment"
+            }));
+        let root = root
+            .child(toolbar)
+            .when_some(node.external_saved.clone(), |root, saved| {
+                root.child(
                     div()
                         .flex()
-                        .gap_2()
+                        .items_center()
                         .flex_wrap()
+                        .gap_2()
                         .child(
-                            Button::new("current-review")
-                                .ghost()
-                                .icon(IconName::GitCommitHorizontal)
-                                .label("Review current")
-                                .disabled(node.target == Target::Current)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_review(key, Target::Current, cx)
-                                })),
+                            message(
+                                "The saved assignment changed outside Waypoints. Your draft is preserved.",
+                            )
+                            .text_color(cx.theme().warning),
                         )
                         .child(
-                            Button::new("reload-review")
-                                .ghost()
-                                .icon(IconName::RefreshCw)
-                                .tooltip("Reload this comparison target")
-                                .accessibility_label("Reload review")
-                                .disabled(matches!(node.review, Load::Loading))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(node) = this.node_workspaces.get(&key) {
-                                        this.open_review(key, node.target.clone(), cx);
-                                    }
-                                })),
-                        ),
-                );
-                match &node.review {
-                    Load::Idle | Load::Loading => root
-                        .child(div().font_semibold().child(target.clone()))
-                        .child(message("Loading changes…").text_color(cx.theme().muted_foreground)),
-                    Load::Error(error) => root
-                        .child(div().font_semibold().child(target.clone()))
-                        .child(message(error.clone()).text_color(cx.theme().danger))
-                        .child(
-                            Button::new("retry-review")
-                                .ghost()
+                            Button::new("load-external-assignment")
                                 .small()
-                                .icon(IconName::RefreshCw)
-                                .label("Try again")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(node) = this.node_workspaces.get(&key) {
-                                        this.open_review(key, node.target.clone(), cx);
+                                .outline()
+                                .label("Load saved assignment")
+                                .disabled(node.saving)
+                                .tooltip(
+                                    "Replace the draft with the newer saved assignment (undoable)",
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if let Some(node) =
+                                        this.node_workspaces.get_mut(&key)
+                                    {
+                                        let saved = saved.clone();
+                                        node.draft.update(cx, |draft, cx| {
+                                            draft.replace_all(saved, window, cx);
+                                        });
+                                        node.external_saved = None;
+                                        cx.notify();
                                     }
                                 })),
                         ),
-                    Load::Ready(review) => {
-                        let commit = review.commit.clone();
-                        let short_commit = short_id(&commit);
-                        let mut header = div()
-                            .flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .items_center()
-                            .child(div().font_semibold().child(review.label.clone()))
-                            .child(
-                                Button::new("copy-review-id")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Copy)
-                                    .child(
-                                        div()
-                                            .font_family(cx.theme().mono_font_family.clone())
-                                            .child(short_commit),
-                                    )
-                                    .accessibility_label("Copy revision ID")
-                                    .tooltip(format!("Copy revision {commit}"))
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            commit.clone(),
-                                        ));
-                                    }),
-                            )
-                            .when(review.conflicted, |row| {
-                                row.child(message("Conflicts").text_color(cx.theme().warning))
+                )
+            })
+            .when_some(node.save_error.clone(), |root, error| {
+                root.child(message(error).text_color(cx.theme().danger))
+            });
+        if node.assignment_preview {
+            root.child(
+                div()
+                    .id("assignment-preview")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&node.assignment_preview_scroll)
+                    .child(
+                        div()
+                            .max_w(gpui_kit::rems(48.))
+                            .p_3()
+                            .when(draft.trim().is_empty(), |body| {
+                                body.child(
+                                    message("This assignment is empty.")
+                                        .text_color(cx.theme().muted_foreground),
+                                )
                             })
-                            .when(
-                                node.target == Target::Current && node.current_review_stale,
-                                |row| {
-                                    row.child(div().id("review-stale").test_support().child(
-                                        message(
-                                            "The recorded revision changed. Reload to review the latest.",
-                                        )
-                                        .text_color(cx.theme().warning),
-                                    ))
-                                },
-                            )
+                            .when(!draft.trim().is_empty(), |body| {
+                                body.child(markdown_with_copy(
+                                    format!("assignment-{}-{}-{}", key.0, key.1, key.2),
+                                    draft.to_string(),
+                                ))
+                            }),
+                    ),
+            )
+        } else {
+            root.child(
+                div()
+                    .id("assignment-content")
+                    .test_support()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&node.assignment_edit_scroll)
+                    .vertical_scrollbar(&node.assignment_edit_scroll)
+                    .child(
+                        message("Saved assignments apply to future runs.")
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div().flex_1().min_h(gpui_kit::rems(12.)).child(
+                            Textarea::new(&node.draft)
+                                .h(relative(1.))
+                                .aria_label("Assignment"),
+                        ),
+                    ),
+            )
+        }
+    }
+
+    fn render_node_changes(
+        &self,
+        key: NodeKey,
+        node: &NodeWorkspace,
+        root: Div,
+        cx: &Context<Self>,
+    ) -> Div {
+        let target = target_label(&node.target);
+        let root = root.child(
+            div()
+                .flex()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    Button::new("current-review")
+                        .ghost()
+                        .icon(IconName::GitCommitHorizontal)
+                        .label("Review current")
+                        .disabled(node.target == Target::Current)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_review(key, Target::Current, cx)
+                        })),
+                )
+                .child(
+                    Button::new("reload-review")
+                        .ghost()
+                        .icon(IconName::RefreshCw)
+                        .tooltip("Reload this comparison target")
+                        .accessibility_label("Reload review")
+                        .disabled(matches!(node.review, Load::Loading))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(node) = this.node_workspaces.get(&key) {
+                                this.open_review(key, node.target.clone(), cx);
+                            }
+                        })),
+                ),
+        );
+        match &node.review {
+            Load::Idle | Load::Loading => root
+                .child(div().font_semibold().child(target.clone()))
+                .child(message("Loading changes…").text_color(cx.theme().muted_foreground)),
+            Load::Error(error) => root
+                .child(div().font_semibold().child(target.clone()))
+                .child(message(error.clone()).text_color(cx.theme().danger))
+                .child(
+                    Button::new("retry-review")
+                        .ghost()
+                        .small()
+                        .icon(IconName::RefreshCw)
+                        .label("Try again")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(node) = this.node_workspaces.get(&key) {
+                                this.open_review(key, node.target.clone(), cx);
+                            }
+                        })),
+                ),
+            Load::Ready(review) => {
+                let commit = review.commit.clone();
+                let short_commit = short_id(&commit);
+                let mut header = div()
+                    .flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .items_center()
+                    .child(div().font_semibold().child(review.label.clone()))
+                    .child(
+                        Button::new("copy-review-id")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Copy)
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .ml_auto()
-                                    .child(
-                                        Button::new("wrap-review")
-                                            .ghost()
-                                            .small()
-                                            .icon(IconName::TextWrap)
-                                            .label(if node.review_wrap {
-                                                "Wrapping lines"
-                                            } else {
-                                                "Unwrapped lines"
-                                            })
-                                            .selected(node.review_wrap)
-                                            .tooltip(if node.review_wrap {
-                                                "Show long lines without wrapping"
-                                            } else {
-                                                "Wrap long lines"
-                                            })
-                                            .accessibility_label("Wrap long lines")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(node) =
-                                                    this.node_workspaces.get_mut(&key)
-                                                {
-                                                    node.review_wrap = !node.review_wrap;
-                                                    cx.notify();
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(short_commit),
+                            )
+                            .accessibility_label("Copy revision ID")
+                            .tooltip(format!("Copy revision {commit}"))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(commit.clone()));
+                            }),
+                    )
+                    .when(review.conflicted, |row| {
+                        row.child(message("Conflicts").text_color(cx.theme().warning))
+                    })
+                    .when(
+                        node.target == Target::Current && node.current_review_stale,
+                        |row| {
+                            row.child(div().id("review-stale").test_support().child(
+                                message(
+                                    "The recorded revision changed. Reload to review the latest.",
+                                )
+                                .text_color(cx.theme().warning),
+                            ))
+                        },
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .ml_auto()
+                            .child(
+                                Button::new("wrap-review")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::TextWrap)
+                                    .label(if node.review_wrap {
+                                        "Wrapping lines"
+                                    } else {
+                                        "Unwrapped lines"
+                                    })
+                                    .selected(node.review_wrap)
+                                    .tooltip(if node.review_wrap {
+                                        "Show long lines without wrapping"
+                                    } else {
+                                        "Wrap long lines"
+                                    })
+                                    .accessibility_label("Wrap long lines")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(node) = this.node_workspaces.get_mut(&key) {
+                                            node.review_wrap = !node.review_wrap;
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new("split-review")
+                                    .ghost()
+                                    .small()
+                                    .icon(match node.review_mode {
+                                        DiffMode::Split => IconName::Columns2,
+                                        _ => IconName::Rows3,
+                                    })
+                                    .label(match node.review_mode {
+                                        DiffMode::Split => "Split view",
+                                        _ => "Unified view",
+                                    })
+                                    .selected(node.review_mode == DiffMode::Split)
+                                    .tooltip(match node.review_mode {
+                                        DiffMode::Split => "Switch to unified view",
+                                        _ => "Switch to split view",
+                                    })
+                                    .accessibility_label("Toggle split view")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(node) = this.node_workspaces.get_mut(&key) {
+                                            node.review_mode = match node.review_mode {
+                                                DiffMode::Split => DiffMode::Unified,
+                                                _ => DiffMode::Split,
+                                            };
+                                            if let Load::Ready(review) = &node.review {
+                                                for (_, diff) in &review.files {
+                                                    diff.update(cx, |diff, cx| {
+                                                        diff.set_mode(node.review_mode, cx)
+                                                    });
                                                 }
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("split-review")
-                                            .ghost()
-                                            .small()
-                                            .icon(match node.review_mode {
-                                                DiffMode::Split => IconName::Columns2,
-                                                _ => IconName::Rows3,
-                                            })
-                                            .label(match node.review_mode {
-                                                DiffMode::Split => "Split view",
-                                                _ => "Unified view",
-                                            })
-                                            .selected(node.review_mode == DiffMode::Split)
-                                            .tooltip(match node.review_mode {
-                                                DiffMode::Split => "Switch to unified view",
-                                                _ => "Switch to split view",
-                                            })
-                                            .accessibility_label("Toggle split view")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(node) =
-                                                    this.node_workspaces.get_mut(&key)
-                                                {
-                                                    node.review_mode = match node.review_mode {
-                                                        DiffMode::Split => DiffMode::Unified,
-                                                        _ => DiffMode::Split,
-                                                    };
-                                                    if let Load::Ready(review) = &node.review {
-                                                        for (_, diff) in &review.files {
-                                                            diff.update(cx, |diff, cx| {
-                                                                diff.set_mode(node.review_mode, cx)
-                                                            });
-                                                        }
-                                                    }
-                                                    cx.notify();
-                                                }
-                                            })),
-                                    ),
-                            );
-                        if review.files.is_empty() {
-                            header = header.child(
-                                message("This revision has no file changes.")
-                                    .text_color(cx.theme().muted_foreground),
-                            );
-                            return root.child(header);
-                        }
-                        let root = root.child(header);
-                        let additions = review
-                            .files
-                            .iter()
-                            .map(|(_, diff)| diff.read(cx).files()[0].additions())
-                            .sum::<usize>();
-                        let deletions = review
-                            .files
-                            .iter()
-                            .map(|(_, diff)| diff.read(cx).files()[0].deletions())
-                            .sum::<usize>();
-                        let binary = review
-                            .files
-                            .iter()
-                            .filter(|(_, diff)| diff.read(cx).files()[0].is_binary())
-                            .count();
-                        let files = review.files.len();
-                        let Some((_, diff)) = review.files.get(review.selected) else {
-                            return root.child(
-                                message("Select a changed file to review.")
-                                    .text_color(cx.theme().muted_foreground),
-                            );
-                        };
-                        root.child(
+                                            }
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    );
+                if review.files.is_empty() {
+                    header = header.child(
+                        message("This revision has no file changes.")
+                            .text_color(cx.theme().muted_foreground),
+                    );
+                    return root.child(header);
+                }
+                let root = root.child(header);
+                let additions = review
+                    .files
+                    .iter()
+                    .map(|(_, diff)| diff.read(cx).files()[0].additions())
+                    .sum::<usize>();
+                let deletions = review
+                    .files
+                    .iter()
+                    .map(|(_, diff)| diff.read(cx).files()[0].deletions())
+                    .sum::<usize>();
+                let binary = review
+                    .files
+                    .iter()
+                    .filter(|(_, diff)| diff.read(cx).files()[0].is_binary())
+                    .count();
+                let files = review.files.len();
+                let Some((_, diff)) = review.files.get(review.selected) else {
+                    return root.child(
+                        message("Select a changed file to review.")
+                            .text_color(cx.theme().muted_foreground),
+                    );
+                };
+                root.child(
+                    div()
+                        .flex()
+                        .items_stretch()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(
                             div()
                                 .flex()
-                                .items_stretch()
+                                .flex_col()
+                                .w_56()
+                                .max_w(relative(0.36))
+                                .min_h_0()
+                                .border_r_1()
+                                .border_color(cx.theme().border)
+                                .pr_2()
+                                .child(
+                                    div()
+                                        .px_1()
+                                        .pb_1()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{files} {} · +{additions} −{deletions}{}",
+                                            if files == 1 { "file" } else { "files" },
+                                            if binary > 0 {
+                                                format!(" · {binary} binary")
+                                            } else {
+                                                String::new()
+                                            }
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("review-files")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&node.review_files_scroll)
+                                        .children(review.files.iter().enumerate().map(
+                                            |(index, (path, diff))| {
+                                                let file = &diff.read(cx).files()[0];
+                                                let status = file.status();
+                                                let (name, directory) = split_path(path);
+                                                let secondary = if status
+                                                    == DiffFileStatus::Renamed
+                                                {
+                                                    file.original_path()
+                                                        .map(|old| {
+                                                            format!("{old} → {path}")
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            directory.unwrap_or("").into()
+                                                        })
+                                                } else {
+                                                    directory.unwrap_or("").to_owned()
+                                                };
+                                                let counts = if file.is_binary() {
+                                                    "Binary".to_owned()
+                                                } else if status
+                                                    == DiffFileStatus::Renamed
+                                                    && file.additions() == 0
+                                                    && file.deletions() == 0
+                                                {
+                                                    "Renamed".to_owned()
+                                                } else {
+                                                    format!(
+                                                        "+{} −{}",
+                                                        file.additions(),
+                                                        file.deletions()
+                                                    )
+                                                };
+                                                let status_color = match status {
+                                                    DiffFileStatus::Added => {
+                                                        cx.theme().success
+                                                    }
+                                                    DiffFileStatus::Deleted => {
+                                                        cx.theme().danger
+                                                    }
+                                                    DiffFileStatus::Conflicted => {
+                                                        cx.theme().warning
+                                                    }
+                                                    _ => cx.theme().muted_foreground,
+                                                };
+                                                Button::new(path.clone())
+                                                    .ghost()
+                                                    .w_full()
+                                                    .tooltip(path.to_string())
+                                                    .selected(review.selected == index)
+                                                    .accessibility_label(format!(
+                                                        "Review {path}"
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_1()
+                                                            .text_left()
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .gap_2()
+                                                                    .child(
+                                                                        div()
+                                                                            .w_3()
+                                                                            .text_xs()
+                                                                            .text_color(
+                                                                                status_color,
+                                                                            )
+                                                                            .child(
+                                                                                status_label(
+                                                                                    status,
+                                                                                ),
+                                                                            ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .min_w_0()
+                                                                            .flex_1()
+                                                                            .truncate()
+                                                                            .child(
+                                                                                name.to_owned(),
+                                                                            ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(
+                                                                                cx.theme()
+                                                                                    .muted_foreground,
+                                                                            )
+                                                                            .child(counts),
+                                                                    ),
+                                                            )
+                                                            .when(
+                                                                !secondary.is_empty(),
+                                                                |row| {
+                                                                    row.child(
+                                                                        div()
+                                                                            .truncate()
+                                                                            .text_xs()
+                                                                            .text_color(
+                                                                                cx.theme()
+                                                                                    .muted_foreground,
+                                                                            )
+                                                                            .child(secondary),
+                                                                    )
+                                                                },
+                                                            ),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            if let Some(node) = this
+                                                                .node_workspaces
+                                                                .get_mut(&key)
+                                                                && let Load::Ready(
+                                                                    review,
+                                                                ) = &mut node.review
+                                                            {
+                                                                review.selected = index;
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                    ))
+                                            },
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
                                 .flex_1()
                                 .min_h_0()
                                 .min_w_0()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .w_56()
-                                        .max_w(relative(0.36))
-                                        .min_h_0()
-                                        .border_r_1()
-                                        .border_color(cx.theme().border)
-                                        .pr_2()
-                                        .child(
-                                            div()
-                                                .px_1()
-                                                .pb_1()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "{files} {} · +{additions} −{deletions}{}",
-                                                    if files == 1 { "file" } else { "files" },
-                                                    if binary > 0 {
-                                                        format!(" · {binary} binary")
-                                                    } else {
-                                                        String::new()
-                                                    }
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("review-files")
-                                                .flex_1()
-                                                .min_h_0()
-                                                .overflow_y_scroll()
-                                                .track_scroll(&node.review_files_scroll)
-                                                .children(review.files.iter().enumerate().map(
-                                                    |(index, (path, diff))| {
-                                                        let file = &diff.read(cx).files()[0];
-                                                        let status = file.status();
-                                                        let (name, directory) = split_path(path);
-                                                        let secondary = if status
-                                                            == DiffFileStatus::Renamed
-                                                        {
-                                                            file.original_path()
-                                                                .map(|old| {
-                                                                    format!("{old} → {path}")
-                                                                })
-                                                                .unwrap_or_else(|| {
-                                                                    directory.unwrap_or("").into()
-                                                                })
-                                                        } else {
-                                                            directory.unwrap_or("").to_owned()
-                                                        };
-                                                        let counts = if file.is_binary() {
-                                                            "Binary".to_owned()
-                                                        } else if status
-                                                            == DiffFileStatus::Renamed
-                                                            && file.additions() == 0
-                                                            && file.deletions() == 0
-                                                        {
-                                                            "Renamed".to_owned()
-                                                        } else {
-                                                            format!(
-                                                                "+{} −{}",
-                                                                file.additions(),
-                                                                file.deletions()
-                                                            )
-                                                        };
-                                                        let status_color = match status {
-                                                            DiffFileStatus::Added => {
-                                                                cx.theme().success
-                                                            }
-                                                            DiffFileStatus::Deleted => {
-                                                                cx.theme().danger
-                                                            }
-                                                            DiffFileStatus::Conflicted => {
-                                                                cx.theme().warning
-                                                            }
-                                                            _ => cx.theme().muted_foreground,
-                                                        };
-                                                        Button::new(path.clone())
-                                                            .ghost()
-                                                            .w_full()
-                                                            .tooltip(path.to_string())
-                                                            .selected(review.selected == index)
-                                                            .accessibility_label(format!(
-                                                                "Review {path}"
-                                                            ))
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .flex_1()
-                                                                    .text_left()
-                                                                    .child(
-                                                                        div()
-                                                                            .flex()
-                                                                            .items_center()
-                                                                            .gap_2()
-                                                                            .child(
-                                                                                div()
-                                                                                    .w_3()
-                                                                                    .text_xs()
-                                                                                    .text_color(
-                                                                                        status_color,
-                                                                                    )
-                                                                                    .child(
-                                                                                        status_label(
-                                                                                            status,
-                                                                                        ),
-                                                                                    ),
-                                                                            )
-                                                                            .child(
-                                                                                div()
-                                                                                    .min_w_0()
-                                                                                    .flex_1()
-                                                                                    .truncate()
-                                                                                    .child(
-                                                                                        name.to_owned(),
-                                                                                    ),
-                                                                            )
-                                                                            .child(
-                                                                                div()
-                                                                                    .text_xs()
-                                                                                    .text_color(
-                                                                                        cx.theme()
-                                                                                            .muted_foreground,
-                                                                                    )
-                                                                                    .child(counts),
-                                                                            ),
-                                                                    )
-                                                                    .when(
-                                                                        !secondary.is_empty(),
-                                                                        |row| {
-                                                                            row.child(
-                                                                                div()
-                                                                                    .truncate()
-                                                                                    .text_xs()
-                                                                                    .text_color(
-                                                                                        cx.theme()
-                                                                                            .muted_foreground,
-                                                                                    )
-                                                                                    .child(secondary),
-                                                                            )
-                                                                        },
-                                                                    ),
-                                                            )
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    if let Some(node) = this
-                                                                        .node_workspaces
-                                                                        .get_mut(&key)
-                                                                        && let Load::Ready(
-                                                                            review,
-                                                                        ) = &mut node.review
-                                                                    {
-                                                                        review.selected = index;
-                                                                        cx.notify();
-                                                                    }
-                                                                },
-                                                            ))
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .min_w_0()
-                                        .child(Diff::new(diff).soft_wrap(node.review_wrap)),
-                                ),
-                        )
-                    }
-                }
+                                .child(Diff::new(diff).soft_wrap(node.review_wrap)),
+                        ),
+                )
             }
-            Tab::History => self.render_node_history(key, node, root, cx),
         }
     }
 }

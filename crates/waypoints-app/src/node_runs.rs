@@ -1,28 +1,26 @@
 use std::{cell::Cell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
-    input::{Input, InputState},
-    message_scroller::{MessageScroller, MessageScrollerState},
-    text::TextView,
-};
-use gpui_kit::{Div, WeakEntity, prelude::FluentBuilder as _};
-use waypoints_backend::{Permission, RunEventOrigin};
-use waypoints_core::run::{RunState, SnapshotState};
-
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::{
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    input::{Textarea, TextareaState},
+    input::{Input, InputState, Textarea, TextareaState},
+    message_scroller::{MessageScroller, MessageScrollerState},
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyWindowHandle, App, AppContext as _, Context, Div, Entity, InteractiveElement as _,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    Window, div,
 };
-use waypoints_backend::{Client, RunEvent, RunStatus};
+use waypoints_backend::{Client, Permission, RunEvent, RunEventOrigin, RunStatus};
+use waypoints_core::run::{RunState, SnapshotState};
 
-use super::{NodeKey, Target, Workspace, current_review_changed, message, run_backend};
+use super::{
+    NodeKey, Target, Workspace, current_review_changed, markdown_with_copy, message, run_backend,
+    run_state_visual,
+};
 
 const OUTPUT_LIMIT: usize = 128 * 1024;
 
@@ -999,19 +997,7 @@ impl Workspace {
         }
         if let Some(status) = status {
             let id = status.run.id;
-            let (state_icon, state_color) = match &status.run.state {
-                RunState::Completed => (IconName::CircleCheck, cx.theme().success),
-                RunState::Failed { .. } | RunState::Interrupted { .. } => {
-                    (IconName::CircleX, cx.theme().danger)
-                }
-                RunState::AwaitingPermission => (IconName::ShieldAlert, cx.theme().warning),
-                RunState::Starting
-                | RunState::Running
-                | RunState::Finalizing
-                | RunState::Cancelling => (IconName::Clock, cx.theme().warning),
-                RunState::Cancelled => (IconName::Square, cx.theme().muted_foreground),
-                _ => (IconName::CircleAlert, cx.theme().muted_foreground),
-            };
+            let (state_icon, state_color) = run_state_visual(&status.run.state, cx.theme());
             summary = summary.child(
                 div()
                     .flex()
@@ -1259,22 +1245,6 @@ fn render_activity(
                 format!("details-{key:?}-{sequence}"),
                 details,
             ))
-        })
-}
-
-fn markdown_with_copy(id: impl Into<gpui_kit::ElementId>, text: String) -> TextView {
-    TextView::markdown(id, text)
-        .selectable(true)
-        .code_block_actions(|block, _, _cx| {
-            let code = block.code();
-            Button::new("copy-code")
-                .ghost()
-                .small()
-                .label("Copy")
-                .accessibility_label("Copy code")
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
-                })
         })
 }
 

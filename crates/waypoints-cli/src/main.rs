@@ -6,7 +6,8 @@ use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use waypoints_backend::{Client, Config};
+use serde::Serialize;
+use waypoints_backend::{Client, Config, default_state_directory};
 use waypoints_core::jj::ChangeState;
 use waypoints_core::run::RecoveryConfirmation;
 use waypoints_core::storage::{
@@ -199,6 +200,25 @@ enum RunCommand {
         #[arg(long)]
         option: String,
     },
+}
+
+impl RunCommand {
+    /// Explicit starts, continuations, and durable queries may launch the backend.
+    /// Live controls must not conceal a restart.
+    fn may_start_backend(&self) -> bool {
+        matches!(
+            self,
+            Self::Start { .. }
+                | Self::Continue { .. }
+                | Self::Restore { .. }
+                | Self::RestoreStatus { .. }
+                | Self::List { .. }
+                | Self::Status { .. }
+                | Self::Inputs { .. }
+                | Self::Review { .. }
+                | Self::Recovery { .. }
+        )
+    }
 }
 
 #[derive(Subcommand)]
@@ -552,7 +572,7 @@ fn run_cli() -> anyhow::Result<()> {
 async fn run(args: Args) -> anyhow::Result<()> {
     let database = match args.database {
         Some(path) => path,
-        None => state_directory()?.join("workflows.db"),
+        None => default_state_directory()?.join("workflows.db"),
     };
     let socket = args
         .socket
@@ -563,36 +583,12 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::Repository {
             command: RepositoryCommand::Inspect { project },
         } => {
-            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let client = connect(&config, true).await?;
             let inspection = client.inspect_repository(&project).await?;
-            println!(
-                "{}",
-                if args.json {
-                    serde_json::to_string(&inspection)?
-                } else {
-                    serde_json::to_string_pretty(&inspection)?
-                }
-            );
+            print_json(&inspection, args.json)?;
         }
         Command::Run { command } => {
-            // Explicit starts/continuations and durable queries may launch the backend.
-            // Live controls must not conceal a restart.
-            let client = if matches!(
-                command,
-                RunCommand::Start { .. }
-                    | RunCommand::Continue { .. }
-                    | RunCommand::Restore { .. }
-                    | RunCommand::RestoreStatus { .. }
-                    | RunCommand::List { .. }
-                    | RunCommand::Status { .. }
-                    | RunCommand::Inputs { .. }
-                    | RunCommand::Review { .. }
-                    | RunCommand::Recovery { .. }
-            ) {
-                Client::connect_or_start(&config, &env::current_exe()?).await?
-            } else {
-                Client::connect(&config).await?
-            };
+            let client = connect(&config, command.may_start_backend()).await?;
             let value = match command {
                 RunCommand::Restore { run } => {
                     serde_json::to_value(client.restore_run(run).await?)?
@@ -678,14 +674,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         .await?,
                 )?,
             };
-            if args.json {
-                println!("{}", serde_json::to_string(&value)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&value)?);
-            }
+            print_json(&value, args.json)?;
         }
         Command::History { command } => {
-            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let client = connect(&config, true).await?;
             let status = match command {
                 HistoryCommand::Status { project } => client.history_status(&project).await?,
                 HistoryCommand::Undo { project, expected } => {
@@ -698,17 +690,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
             print_history(status, args.json)?;
         }
         Command::Backend { command } => {
-            let client = Client::connect(&config).await?;
+            let client = connect(&config, false).await?;
             match command {
                 BackendCommand::Status => {
+                    let info = client.info();
                     if args.json {
-                        println!("{}", serde_json::to_string(client.info())?);
+                        println!("{}", serde_json::to_string(info)?);
                     } else {
-                        println!(
-                            "Backend PID {} · {}",
-                            client.info().pid,
-                            client.info().database.display()
-                        );
+                        println!("Backend PID {} · {}", info.pid, info.database.display());
                     }
                 }
                 BackendCommand::Stop => {
@@ -722,7 +711,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             }
         }
         Command::Workflow { command } => {
-            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let client = connect(&config, true).await?;
             match command {
                 WorkflowCommand::Archive { workflow } => {
                     let workflow = client.archive_workflow(workflow).await?;
@@ -753,14 +742,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     base_nodes,
                 } => {
                     let graph = client.adopt_workflow_roots(workflow, &base_nodes).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&graph)?
-                        } else {
-                            serde_json::to_string_pretty(&graph)?
-                        }
-                    );
+                    print_json(&graph, args.json)?;
                 }
                 WorkflowCommand::Create {
                     project,
@@ -784,14 +766,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 }
                 WorkflowCommand::Get { workflow } => {
                     let workflow = client.workflow(workflow).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&workflow)?
-                        } else {
-                            serde_json::to_string_pretty(&workflow)?
-                        }
-                    );
+                    print_json(&workflow, args.json)?;
                 }
                 WorkflowCommand::SetBase {
                     workflow,
@@ -801,14 +776,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     let source = base_source(base, base_revision)
                         .context("select --base or --base-revision")?;
                     let workflow = client.set_workflow_base(workflow, &source).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&workflow)?
-                        } else {
-                            serde_json::to_string_pretty(&workflow)?
-                        }
-                    );
+                    print_json(&workflow, args.json)?;
                 }
                 WorkflowCommand::List {
                     project,
@@ -865,40 +833,38 @@ async fn run(args: Args) -> anyhow::Result<()> {
             }
         }
         Command::Node { command } => {
-            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let client = connect(&config, true).await?;
             match command {
-                NodeCommand::Workspace { command } => {
-                    if let WorkspaceCommand::UpdateStale { workflow, node } = command {
+                NodeCommand::Workspace { command } => match command {
+                    WorkspaceCommand::UpdateStale { workflow, node } => {
                         let result = client.update_stale_node_workspace(workflow, node).await?;
                         if args.json {
-                            println!("{}", serde_json::to_string(&result)?);
+                            print_json(&result, true)?;
                         } else {
                             println!("Workspace update: {:?}", result.outcome);
                             print_node_workspace(result.workspace, false)?;
                         }
-                        return Ok(());
                     }
-                    let value = match command {
-                        WorkspaceCommand::Create {
-                            workflow,
-                            node,
-                            directory,
-                        } => {
-                            let directory = env::current_dir()?.join(directory);
-                            client
-                                .create_node_workspace(workflow, node, &directory)
-                                .await?
-                        }
-                        WorkspaceCommand::Verify { workflow, node } => {
-                            client.verify_node_workspace(workflow, node).await?
-                        }
-                        WorkspaceCommand::Status { workflow, node } => {
-                            client.node_workspace(workflow, node).await?
-                        }
-                        WorkspaceCommand::UpdateStale { .. } => unreachable!("handled above"),
-                    };
-                    print_node_workspace(value, args.json)?;
-                }
+                    WorkspaceCommand::Create {
+                        workflow,
+                        node,
+                        directory,
+                    } => {
+                        let directory = env::current_dir()?.join(directory);
+                        let workspace = client
+                            .create_node_workspace(workflow, node, &directory)
+                            .await?;
+                        print_node_workspace(workspace, args.json)?;
+                    }
+                    WorkspaceCommand::Verify { workflow, node } => {
+                        let workspace = client.verify_node_workspace(workflow, node).await?;
+                        print_node_workspace(workspace, args.json)?;
+                    }
+                    WorkspaceCommand::Status { workflow, node } => {
+                        let workspace = client.node_workspace(workflow, node).await?;
+                        print_node_workspace(workspace, args.json)?;
+                    }
+                },
                 NodeCommand::Associate {
                     workflow,
                     node,
@@ -928,33 +894,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     from_base,
                     parent,
                 } => {
-                    let parent = if from_base {
-                        NodeParent::WorkflowBase {}
-                    } else {
-                        NodeParent::Node {
-                            node_id: parent.context("select --parent or --from-base")?,
-                        }
-                    };
+                    let parent = node_parent(from_base, parent)?;
                     let graph = client.move_prompt_node(workflow, node, &parent).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&graph)?
-                        } else {
-                            serde_json::to_string_pretty(&graph)?
-                        }
-                    );
+                    print_json(&graph, args.json)?;
                 }
                 NodeCommand::DeletePrompt { workflow, node } => {
                     let graph = client.delete_prompt_node(workflow, node).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&graph)?
-                        } else {
-                            serde_json::to_string_pretty(&graph)?
-                        }
-                    );
+                    print_json(&graph, args.json)?;
                 }
                 NodeCommand::Reparent {
                     workflow,
@@ -963,13 +909,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     parent,
                     accept_undo_boundary,
                 } => {
-                    let parent = if from_base {
-                        NodeParent::WorkflowBase {}
-                    } else {
-                        NodeParent::Node {
-                            node_id: parent.context("select --parent or --from-base")?,
-                        }
-                    };
+                    let parent = node_parent(from_base, parent)?;
                     let operation = client
                         .reparent_node(
                             workflow,
@@ -1008,14 +948,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                                 .then_some(RecoveryConfirmation::ProcessesStopped),
                         )
                         .await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&result)?
-                        } else {
-                            serde_json::to_string_pretty(&result)?
-                        }
-                    );
+                    print_json(&result, args.json)?;
                 }
                 NodeCommand::Delete {
                     workflow,
@@ -1050,25 +983,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 }
                 NodeCommand::Operations { workflow } => {
                     let operations = client.dependency_operations(workflow).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&operations)?
-                        } else {
-                            serde_json::to_string_pretty(&operations)?
-                        }
-                    );
+                    print_json(&operations, args.json)?;
                 }
                 NodeCommand::ReparentRecovery { operation } => {
                     let value = client.inspect_dependency_recovery(operation).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&value)?
-                        } else {
-                            serde_json::to_string_pretty(&value)?
-                        }
-                    );
+                    print_json(&value, args.json)?;
                 }
                 NodeCommand::RecoverReparent {
                     operation,
@@ -1081,14 +1000,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                                 .then_some(RecoveryConfirmation::ProcessesStopped),
                         )
                         .await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&value)?
-                        } else {
-                            serde_json::to_string_pretty(&value)?
-                        }
-                    );
+                    print_json(&value, args.json)?;
                 }
                 NodeCommand::RestoreWithDescendants {
                     preview,
@@ -1103,14 +1015,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                             waypoints_core::storage::RestoreRebaseConfirmation::RestoreAndRebase,
                         ),
                     ).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&operation)?
-                        } else {
-                            serde_json::to_string_pretty(&operation)?
-                        }
-                    );
+                    print_json(&operation, args.json)?;
                 }
                 NodeCommand::RestoreImpact {
                     workflow,
@@ -1118,14 +1023,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     commit,
                 } => {
                     let impact = client.node_restore_impact(workflow, node, &commit).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&impact)?
-                        } else {
-                            serde_json::to_string_pretty(&impact)?
-                        }
-                    );
+                    print_json(&impact, args.json)?;
                 }
                 NodeCommand::Restore {
                     workflow,
@@ -1135,25 +1033,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     let operation = client
                         .restore_node_revision(workflow, node, &commit)
                         .await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&operation)?
-                        } else {
-                            serde_json::to_string_pretty(&operation)?
-                        }
-                    );
+                    print_json(&operation, args.json)?;
                 }
                 NodeCommand::Restores { workflow, node } => {
                     let operations = client.node_restores(workflow, node).await?;
-                    println!(
-                        "{}",
-                        if args.json {
-                            serde_json::to_string(&operations)?
-                        } else {
-                            serde_json::to_string_pretty(&operations)?
-                        }
-                    );
+                    print_json(&operations, args.json)?;
                 }
                 NodeCommand::Revisions {
                     workflow,
@@ -1253,7 +1137,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             }
         }
         Command::Connection { command } => {
-            let client = Client::connect_or_start(&config, &env::current_exe()?).await?;
+            let client = connect(&config, true).await?;
             match command {
                 ConnectionCommand::Create {
                     workflow,
@@ -1280,6 +1164,33 @@ fn base_source(bookmark: Option<String>, revision: Option<String>) -> Option<Bas
     bookmark
         .map(|name| BaseSource::Bookmark { name })
         .or_else(|| revision.map(|id| BaseSource::Revision { id }))
+}
+
+fn node_parent(from_base: bool, parent: Option<i64>) -> anyhow::Result<NodeParent> {
+    if from_base {
+        Ok(NodeParent::WorkflowBase {})
+    } else {
+        Ok(NodeParent::Node {
+            node_id: parent.context("select --parent or --from-base")?,
+        })
+    }
+}
+
+fn print_json<T: Serialize>(value: &T, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(value)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    }
+    Ok(())
+}
+
+async fn connect(config: &Config, start: bool) -> anyhow::Result<Client> {
+    if start {
+        Ok(Client::connect_or_start(config, &env::current_exe()?).await?)
+    } else {
+        Ok(Client::connect(config).await?)
+    }
 }
 
 fn print_history(status: HistoryStatus, json: bool) -> anyhow::Result<()> {
@@ -1399,18 +1310,4 @@ fn print_node_workspace(value: NodeWorkspace, json: bool) -> anyhow::Result<()> 
         }
     }
     Ok(())
-}
-
-fn state_directory() -> anyhow::Result<PathBuf> {
-    if let Some(path) = env::var_os("XDG_STATE_HOME").filter(|path| !path.is_empty()) {
-        let path = PathBuf::from(path);
-        anyhow::ensure!(path.is_absolute(), "XDG_STATE_HOME must be absolute");
-        return Ok(path.join("waypoints"));
-    }
-    let home = PathBuf::from(env::var_os("HOME").context("HOME is not set; supply --database")?);
-    #[cfg(target_os = "macos")]
-    let path = home.join("Library/Application Support/waypoints");
-    #[cfg(not(target_os = "macos"))]
-    let path = home.join(".local/state/waypoints");
-    Ok(path)
 }
