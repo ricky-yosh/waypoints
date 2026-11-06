@@ -1,14 +1,15 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Disableable as _, StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _,
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     scroll::ScrollableElement as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ClipboardItem, Context, Div, InteractiveElement as _, IntoElement as _,
-    ListState, ParentElement as _, SharedString, Styled as _, WeakEntity, div, list,
+    ListState, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, div, list, relative,
 };
 use waypoints_backend::{Client, RunStatus};
 use waypoints_core::{
@@ -17,13 +18,59 @@ use waypoints_core::{
 };
 
 use super::{
-    Load, NodeKey, NodeWorkspace, Target, Workspace, message, node_runs, run_backend,
+    Load, NodeKey, NodeWorkspace, Tab, Target, Workspace, message, node_runs, run_backend,
     run_state_visual, short_id,
 };
 
 const HISTORY_PAGE_SIZE: usize = 30;
 
 type History = Load<(Vec<RunStatus>, Result<NodeRevisionPage, String>)>;
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum HistorySelection {
+    Run(i64),
+    Revision(String),
+}
+
+enum HistoryDetail<'a> {
+    Run(&'a RunStatus),
+    Revision(&'a NodeRevisionEntry),
+}
+
+impl HistoryDetail<'_> {
+    fn selection(&self) -> HistorySelection {
+        match self {
+            Self::Run(status) => HistorySelection::Run(status.run.id),
+            Self::Revision(entry) => {
+                HistorySelection::Revision(entry.evolution.revision.commit_id.clone())
+            }
+        }
+    }
+}
+
+fn history_detail(node: &NodeWorkspace) -> Option<HistoryDetail<'_>> {
+    let Load::Ready((runs, page)) = &node.history else {
+        return None;
+    };
+    let entries = page
+        .as_ref()
+        .ok()
+        .map_or(&[][..], |page| page.entries.as_slice());
+    let selected = match node.history_selection.as_ref() {
+        Some(HistorySelection::Run(id)) => runs
+            .iter()
+            .find(|status| status.run.id == *id)
+            .map(HistoryDetail::Run),
+        Some(HistorySelection::Revision(commit)) => entries
+            .iter()
+            .find(|entry| &entry.evolution.revision.commit_id == commit)
+            .map(HistoryDetail::Revision),
+        None => None,
+    };
+    selected
+        .or_else(|| runs.first().map(HistoryDetail::Run))
+        .or_else(|| entries.first().map(HistoryDetail::Revision))
+}
 
 fn readable_timestamp(timestamp: &str) -> String {
     let timestamp = timestamp.trim();
@@ -311,6 +358,9 @@ impl Workspace {
             _ => None,
         };
         let workspace = cx.weak_entity();
+        let detail = history_detail(node);
+        let selected = detail.as_ref().map(HistoryDetail::selection);
+        let list_workspace = workspace.clone();
         root.child(
             div()
                 .flex()
@@ -320,6 +370,7 @@ impl Workspace {
                 .child(
                     Button::new("reload-history")
                         .ghost()
+                        .small()
                         .icon(IconName::RefreshCw)
                         .tooltip("Refresh run and revision history")
                         .accessibility_label("Refresh history")
@@ -332,6 +383,7 @@ impl Workspace {
                             toolbar.child(
                                 Button::new("older-revisions")
                                     .ghost()
+                                    .small()
                                     .icon(IconName::ChevronsDown)
                                     .label(if node.loading_older {
                                         "Loading older revisions…"
@@ -350,6 +402,7 @@ impl Workspace {
                             } else {
                                 format!("All {} revisions loaded", page.entries.len())
                             })
+                            .text_xs()
                             .text_color(cx.theme().muted_foreground),
                         )
                         .when(node.history_stale, |toolbar| {
@@ -357,6 +410,7 @@ impl Workspace {
                                 message("New history is available. Refresh to update.")
                                     .id("history-stale")
                                     .test_support()
+                                    .text_xs()
                                     .text_color(cx.theme().muted_foreground),
                             )
                         })
@@ -368,31 +422,128 @@ impl Workspace {
         .child(
             div()
                 .flex()
-                .flex_col()
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .child(
-                    list(node.history_scroll.clone(), move |index, _, cx| {
-                        let Some(entity) = workspace.upgrade() else {
-                            return div().into_any_element();
-                        };
-                        let Some(node) = entity.read(cx).node_workspaces.get(&key) else {
-                            return div().into_any_element();
-                        };
-                        history_row(index, &node.history, key, workspace.clone(), cx)
-                            .into_any_element()
-                    })
-                    .flex_1()
-                    .min_h_0(),
+                    div()
+                        .id("history-navigation")
+                        .test_support()
+                        .flex()
+                        .flex_col()
+                        .w_72()
+                        .max_w(relative(0.42))
+                        .min_h_0()
+                        .border_r_1()
+                        .border_color(cx.theme().border)
+                        .pr_2()
+                        .child(
+                            list(node.history_scroll.clone(), move |index, _, cx| {
+                                let Some(entity) = list_workspace.upgrade() else {
+                                    return div().into_any_element();
+                                };
+                                let Some(node) = entity.read(cx).node_workspaces.get(&key) else {
+                                    return div().into_any_element();
+                                };
+                                history_row(
+                                    index,
+                                    &node.history,
+                                    selected.as_ref(),
+                                    key,
+                                    list_workspace.clone(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            })
+                            .flex_1()
+                            .min_h_0(),
+                        )
+                        .vertical_scrollbar(&node.history_scroll),
                 )
-                .vertical_scrollbar(&node.history_scroll),
+                .child(
+                    div()
+                        .id("history-detail")
+                        .test_support()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .p_2()
+                        .overflow_y_scroll()
+                        .track_scroll(&node.history_detail_scroll)
+                        .when_some(detail, |panel, detail| match detail {
+                            HistoryDetail::Run(status) => panel
+                                .child(run_row(status, key, workspace.clone(), cx))
+                                .child(
+                                    div()
+                                        .pt_3()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .child("Run instructions"),
+                                )
+                                .child(
+                                    div()
+                                        .pt_1()
+                                        .text_sm()
+                                        .whitespace_normal()
+                                        .child(status.run.prompt.clone()),
+                                )
+                                .child(self.render_history_run_output(key, status.run.id, cx)),
+                            HistoryDetail::Revision(entry) => {
+                                panel.child(revision_row(entry, key, workspace, cx))
+                            }
+                        }),
+                ),
         )
+    }
+
+    fn render_history_run_output(&self, key: NodeKey, run: i64, cx: &Context<Self>) -> Div {
+        let activity = self.graph_activity(key);
+        let retained = activity.run.is_some_and(|status| status.id == run)
+            && (activity.assistant.is_some() || activity.tool.is_some());
+        let muted = cx.theme().muted_foreground;
+        let section = div()
+            .mt_3()
+            .pt_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(div().text_sm().font_semibold().child("Run output"));
+        if !retained {
+            return section.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("No retained output is available for this run."),
+            );
+        }
+        section
+            .when_some(activity.assistant, |section, text| {
+                section.child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .line_clamp(4)
+                        .child(text.to_owned()),
+                )
+            })
+            .when_some(activity.exception().or(activity.tool), |section, title| {
+                section.child(div().text_xs().text_color(muted).line_clamp(2).child(title))
+            })
+            .child(
+                Button::new("history-open-output")
+                    .ghost()
+                    .small()
+                    .label("Open output")
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_tab(key, Tab::Output, cx)),
+                    ),
+            )
     }
 }
 
 fn history_row(
     index: usize,
     history: &History,
+    selected: Option<&HistorySelection>,
     key: NodeKey,
     workspace: WeakEntity<Workspace>,
     cx: &App,
@@ -403,25 +554,118 @@ fn history_row(
         Load::Ready((runs, revisions)) => (runs, revisions),
     };
     if index == 0 {
-        return div().font_semibold().child("Runs");
+        return div().py_1().px_2().text_sm().font_semibold().child("Runs");
     }
     let revision_heading = runs.len().max(1) + 1;
     if index < revision_heading {
         return runs.get(index - 1).map_or_else(
             || message("No runs yet.").text_color(cx.theme().muted_foreground),
-            |run| run_row(run, key, workspace, cx),
+            |run| history_choice(HistoryDetail::Run(run), selected, key, workspace, cx),
         );
     }
     if index == revision_heading {
-        return div().pt_3().font_semibold().child("Native revisions");
+        return div()
+            .pt_3()
+            .pb_1()
+            .px_2()
+            .text_sm()
+            .font_semibold()
+            .child("Native revisions");
     }
     match revisions {
         Ok(page) => page.entries.get(index - revision_heading - 1).map_or_else(
             || message("No native revisions.").text_color(cx.theme().muted_foreground),
-            |entry| revision_row(entry, key, workspace, cx),
+            |entry| history_choice(HistoryDetail::Revision(entry), selected, key, workspace, cx),
         ),
         Err(error) => message(error.clone()).text_color(cx.theme().danger),
     }
+}
+
+fn history_choice(
+    detail: HistoryDetail<'_>,
+    selected: Option<&HistorySelection>,
+    key: NodeKey,
+    workspace: WeakEntity<Workspace>,
+    cx: &App,
+) -> Div {
+    let selection = detail.selection();
+    let (id, icon, color, title, subtitle) = match detail {
+        HistoryDetail::Run(status) => {
+            let (icon, color) = run_state_visual(&status.run.state, cx.theme());
+            (
+                format!("history-run-{}", status.run.id),
+                icon,
+                color,
+                super::node_title(status.run.id, &status.run.prompt),
+                format!(
+                    "Run #{} · {}",
+                    status.run.id,
+                    node_runs::state_label(&status.run.state)
+                ),
+            )
+        }
+        HistoryDetail::Revision(entry) => {
+            let revision = &entry.evolution.revision;
+            let title = revision
+                .description
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "Native revision".into());
+            (
+                format!("history-revision-{}", revision.commit_id),
+                IconName::GitCommitHorizontal,
+                cx.theme().muted_foreground,
+                title,
+                format!(
+                    "{} · {}",
+                    short_id(&revision.commit_id),
+                    readable_timestamp(&entry.evolution.timestamp)
+                ),
+            )
+        }
+    };
+    div().pb_1().child(
+        Button::new(SharedString::from(id))
+            .ghost()
+            .w_full()
+            .h_10()
+            .selected(selected == Some(&selection))
+            .accessibility_label(format!("{title}. {subtitle}"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(Icon::new(icon).size_4().flex_none().text_color(color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().text_ellipsis().child(title))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .text_ellipsis()
+                                    .child(subtitle),
+                            ),
+                    ),
+            )
+            .on_click(move |_, _, cx| {
+                let _ = workspace.update(cx, |this, cx| {
+                    if let Some(node) = this.node_workspaces.get_mut(&key)
+                        && node.history_selection.as_ref() != Some(&selection)
+                    {
+                        node.history_selection = Some(selection.clone());
+                        node.history_detail_scroll.set_offset(Default::default());
+                        cx.notify();
+                    }
+                });
+            }),
+    )
 }
 
 fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, cx: &App) -> Div {
@@ -447,46 +691,15 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
     div()
         .border_b_1()
         .border_color(cx.theme().border)
-        .py_2()
+        .pb_2()
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap_2()
+                .justify_between()
                 .flex_wrap()
+                .gap_1()
                 .child(message(format!("Run #{id}")).font_semibold())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(Icon::new(state_icon).size_3().text_color(state_color))
-                        .child(
-                            message(node_runs::state_label(&status.run.state))
-                                .text_color(cx.theme().muted_foreground),
-                        ),
-                )
-                .when_some(status.run.continued_from, |row, previous| {
-                    row.child(
-                        message(format!("Continued from run #{previous}"))
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .flex_wrap()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(Icon::new(snapshot_icon).size_3().text_color(snapshot_color))
-                        .child(message(snapshot).text_color(cx.theme().muted_foreground)),
-                )
                 .when(
                     matches!(status.run.snapshot, SnapshotState::Saved { .. }),
                     |row| {
@@ -495,7 +708,9 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                                 .ghost()
                                 .small()
                                 .icon(IconName::GitCommitHorizontal)
-                                .label("Review snapshot")
+                                .label("Review")
+                                .accessibility_label("Review saved snapshot")
+                                .tooltip("Review saved snapshot")
                                 .on_click(move |_, _, cx| {
                                     let _ = workspace.update(cx, |this, cx| {
                                         this.open_review(key, Target::Run(id), cx)
@@ -505,6 +720,40 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                     },
                 ),
         )
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap_1()
+                .pt_1()
+                .child(
+                    Icon::new(state_icon)
+                        .size_3()
+                        .text_color(state_color)
+                        .flex_none(),
+                )
+                .child(message(node_runs::state_label(&status.run.state))),
+        )
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap_1()
+                .pt_1()
+                .child(
+                    Icon::new(snapshot_icon)
+                        .size_3()
+                        .text_color(snapshot_color)
+                        .flex_none(),
+                )
+                .child(message(snapshot).text_color(cx.theme().muted_foreground)),
+        )
+        .when_some(status.run.continued_from, |detail, previous| {
+            detail.child(
+                message(format!("Continued from run #{previous}"))
+                    .text_color(cx.theme().muted_foreground),
+            )
+        })
 }
 
 fn revision_row(

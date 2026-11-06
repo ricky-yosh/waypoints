@@ -16,7 +16,7 @@ use gpui_kit::{
     App, AppContext as _, Bounds, Context, Entity, ScrollDelta, Window, WindowBounds,
     WindowOptions, point, px, size,
 };
-use waypoints_core::storage::Workflow;
+use waypoints_core::{run::RunState, storage::Workflow};
 
 use super::{Load, ScreenshotSurface, Workspace};
 
@@ -27,6 +27,7 @@ pub(crate) fn run() {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            super::init(cx);
             // Exercise the documented 1.5x interface scale at the minimum
             // outer window size.
             Theme::global_mut(cx).font_size *= 1.5;
@@ -82,7 +83,7 @@ pub(crate) fn run() {
 }
 
 fn install_fixture(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    workspace.qa_fixture_mode = true;
+    workspace.fixture_mode = true;
     let first = workspace
         .state
         .add(PathBuf::from("/tmp/waypoints-native-qa/project-a"))
@@ -107,9 +108,8 @@ fn install_fixture(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
         .expect("native QA graph fixture matches the storage schema"),
     );
     workspace.selected_nodes.insert((first, 7), 1);
-    // Keep the assignment editor inside the minimum window for the first
-    // interactions; the Output section restores the graph and checks it again.
-    workspace.graph_collapsed = true;
+    // Start expanded to exercise the editor at minimum window size.
+    workspace.expanded_workbench = true;
     workspace.open_node(1, window, cx);
 
     if let Some(node) = workspace.node_workspaces.get_mut(&(first, 7, 1)) {
@@ -146,6 +146,65 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
         f32::from(window.viewport_size().height)
     );
     require(window, "workflow-1-7", "selected workflow")?;
+
+    // Restore the floating surface, close it with the keyboard, and reopen
+    // the same assignment from its restored graph focus.
+    window.click("expand-workbench", cx);
+    window.render_frame(cx);
+    require(
+        window,
+        "workbench-resize",
+        "floating workbench resize handle",
+    )?;
+    require(window, "graph-node-1", "workflow graph node")?;
+    let graph = window.find("graph-node-1").bounds();
+    let floating = window.find("workbench").bounds();
+    let grip = window.find("workbench-resize").bounds().center();
+    window.drag(grip, grip - point(px(0.), px(18.)), cx);
+    window.render_frame(cx);
+    check(
+        window.find("workbench").bounds().top() < floating.top(),
+        "workbench did not resize",
+    )?;
+    check(
+        window.find("graph-node-1").bounds() == graph,
+        "resizing moved the graph",
+    )?;
+    window.press("escape", cx);
+    window.render_frame(cx);
+    check(
+        window.try_find("workbench").is_none(),
+        "workbench stayed open",
+    )?;
+    window.press("shift-enter", cx);
+    window.render_frame(cx);
+    require(
+        window,
+        "open-preview-workbench",
+        "anchored keyboard preview",
+    )?;
+    window.press("escape", cx);
+    window.render_frame(cx);
+    check(
+        window.try_find("open-preview-workbench").is_none(),
+        "graph preview stayed open",
+    )?;
+    window.click("graph-zoom-out", cx);
+    window.click("graph-zoom-out", cx);
+    window.render_frame(cx);
+    let compact = window.find("graph-node-1").bounds().size.width;
+    window.click("graph-zoom-reset", cx);
+    window.render_frame(cx);
+    check(
+        window.find("graph-node-1").bounds().size.width > compact,
+        "zoom reset did not restore the graph size",
+    )?;
+    window.click("graph-node-1", cx);
+    window.render_frame(cx);
+    require(window, "close-workbench", "reopened workbench")?;
+    window.click("expand-workbench", cx);
+    window.render_frame(cx);
+    eprintln!("NATIVE_QA_OK floating workbench, Escape and keyboard reopen");
 
     // Assignment: type a local draft, then let a project refresh replace the
     // saved assignment. The dirty draft must be preserved with a warning.
@@ -201,6 +260,14 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
     )?;
     eprintln!("NATIVE_QA_OK assignment refresh");
 
+    window.click("continue-session", cx);
+    require(window, "submit-follow-up", "assignment follow-up dialog")?;
+    window.press("escape", cx);
+    check(
+        wait_for_absent(window, "submit-follow-up", cx),
+        "assignment follow-up did not dismiss",
+    )?;
+
     // Multiple pending permissions stay visible as separate, compact
     // controls and remain answerable over the current workspace.
     workspace.update(cx, |workspace, cx| {
@@ -249,6 +316,31 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
     });
     window.render_frame(cx);
     require(window, "history-stale", "history freshness notice")?;
+    for run in [42, 41] {
+        let id = format!("history-run-{run}");
+        let navigation = window.find("history-navigation").bounds();
+        if window
+            .try_find(id.clone())
+            .is_none_or(|row| !navigation.contains(&row.bounds().center()))
+        {
+            window.scroll(
+                "history-navigation",
+                ScrollDelta::Pixels(point(px(0.), px(-65.))),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+        window.click(id, cx);
+        window.render_frame(cx);
+        if run == 42 {
+            require(window, "run-42", "review selected run snapshot")?;
+        } else {
+            check(
+                window.try_find("run-42").is_none(),
+                "the previous run review command remained visible",
+            )?;
+        }
+    }
     eprintln!("NATIVE_QA_OK history freshness");
 
     // Changes: review target, diff controls, and stale-current notice.
@@ -272,7 +364,7 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
     // beside the node title and opens a dialog instead of falling below the
     // window.
     workspace.update(cx, |workspace, cx| {
-        workspace.graph_collapsed = false;
+        workspace.expanded_workbench = false;
         cx.notify();
     });
     window.render_frame(cx);
@@ -289,6 +381,26 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
         "follow-up dialog did not dismiss",
     )?;
     eprintln!("NATIVE_QA_OK run follow-up at minimum size and 1.5x text");
+
+    workspace.update(cx, |workspace, cx| {
+        if let Some(node) = workspace.node_workspaces.get_mut(&(1, 7, 1)) {
+            node.install_screenshot_activity(1, RunState::Running, cx);
+        }
+        cx.notify();
+    });
+    window.render_frame(cx);
+    require(window, "cancel-run", "running toolbar cancel control")?;
+    window.click("close-workbench", cx);
+    window.render_frame(cx);
+    check(
+        workspace
+            .read(cx)
+            .graph_activity((1, 7, 1))
+            .run
+            .is_some_and(|run| run.state == RunState::Running),
+        "closing the workbench changed the run state",
+    )?;
+    eprintln!("NATIVE_QA_OK running toolbar and close without cancellation");
 
     Ok(())
 }

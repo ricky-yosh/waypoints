@@ -363,12 +363,24 @@ fn assignment_preview_preserves_unsaved_source_when_switching_nodes(cx: &mut Tes
         );
         window.click("Preview", cx);
         assert!(window.try_find("input-state").is_none());
+        window.scroll(
+            "graph-node-1",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-85.))),
+            cx,
+        );
+        window.render_frame(cx);
         window.click("graph-node-2", cx);
         assert_eq!(
             workspace.read(cx).assignment_draft((1, 7, 2), cx).as_ref(),
             "# Second assignment"
         );
         assert!(window.find("input-state").visible());
+        window.scroll(
+            "graph-node-2",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(85.))),
+            cx,
+        );
+        window.render_frame(cx);
         window.click("graph-node-1", cx);
         assert!(window.try_find("input-state").is_none());
         window.click("Edit", cx);
@@ -423,77 +435,87 @@ fn install_graph_fixture(workspace: &gpui_kit::Entity<Workspace>, cx: &mut App) 
 }
 
 #[gpui_kit::test]
-fn short_window_shrinks_the_graph_without_overwriting_its_saved_height(cx: &mut TestAppContext) {
+fn floating_workbench_restores_size_focus_and_draft(cx: &mut TestAppContext) {
     let (handle, workspace) = open_workspace(cx);
     cx.update_window(handle, |_, window, cx| {
         install_graph_fixture(&workspace, cx);
-        workspace.update(cx, |workspace, cx| workspace.open_node(1, window, cx));
         window.render_frame(cx);
-        assert_eq!(workspace.read(cx).graph_height, 192.);
-    })
-    .expect("workspace window remains open");
-    let wide_assignment = cx
-        .update_window(handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.find("Assignment").bounds()
-        })
-        .expect("workspace window remains open");
+        let graph = window.find("graph-node-1").bounds();
+        assert!(window.try_find("Assignment").is_none());
 
-    cx.simulate_window_resize(handle, size(px(720.), px(480.)));
-    cx.update_window(handle, |_, window, cx| {
+        window.click("graph-node-1", cx);
         window.render_frame(cx);
+        let floating = window.find("Assignment").bounds();
+        let divider = window.find("workbench-resize").bounds().center();
+        window.drag(divider, divider - gpui_kit::point(px(0.), px(32.)), cx);
+        window.render_frame(cx);
+        let resized = window.find("Assignment").bounds();
+        assert!(resized.top() < floating.top());
+        assert_eq!(window.find("graph-node-1").bounds(), graph);
+
+        window.click("expand-workbench", cx);
+        window.render_frame(cx);
+        assert!(window.find("Assignment").bounds().top() < resized.top());
+        window.click("expand-workbench", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("Assignment").bounds(), resized);
+
+        window.click("input-state", cx);
+        window.input(" Local draft", cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("Assignment").is_none());
+        assert_eq!(window.find("graph-node-1").bounds(), graph);
+        assert!(workspace.read(cx).graph_node_focus[&(1, 7, 1)].is_focused(window));
+
+        window.press("shift-enter", cx);
+        window.render_frame(cx);
+        assert!(window.find("open-preview-workbench").visible());
+        assert!(workspace.read(cx).graph_preview_focus.is_focused(window));
+        assert_eq!(window.find("graph-node-1").bounds(), graph);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("open-preview-workbench").is_none());
+        assert!(workspace.read(cx).graph_node_focus[&(1, 7, 1)].is_focused(window));
+
+        window.press("enter", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("Assignment").bounds(), resized);
         assert!(
-            window.find("Assignment").bounds().top() < wide_assignment.top(),
-            "short windows give the node workspace priority over the graph"
+            workspace
+                .read(cx)
+                .assignment_draft((1, 7, 1), cx)
+                .contains("Local draft")
         );
-    })
-    .expect("workspace window remains open");
-
-    cx.simulate_window_resize(handle, size(px(900.), px(700.)));
-    cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
-        assert_eq!(
-            window.find("Assignment").bounds(),
-            wide_assignment,
-            "growing the window restores the saved graph height"
-        );
-        assert_eq!(workspace.read(cx).graph_height, 192.);
     })
     .expect("workspace window remains open");
 }
 
 #[gpui_kit::test]
-fn graph_resize_and_collapse_keep_the_node_workspace_reachable_at_minimum_width(
-    cx: &mut TestAppContext,
-) {
+async fn graph_hover_preview_can_be_opened_without_moving_the_node(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestAppContextExt as _;
     let (handle, workspace) = open_workspace(cx);
-    cx.simulate_window_resize(handle, size(px(720.), px(520.)));
-    cx.update_window(handle, |_, window, cx| {
-        install_graph_fixture(&workspace, cx);
-        window.render_frame(cx);
-        window.click("graph-node-1", cx);
-        let assignment = window.find("Assignment").bounds();
-        let divider = window
-            .within("graph-split")
-            .find(("resizable-handle", 0_usize))
-            .bounds()
-            .center();
-        window.drag(divider, divider - gpui_kit::point(px(0.), px(48.)), cx);
-        window.render_frame(cx);
-        let resized = window.find("Assignment").bounds();
-        assert!(
-            resized.top() < assignment.top(),
-            "graph divider drag gives space to the node workspace"
-        );
-        assert!(window.find("input-state").visible());
+    let node_bounds = cx
+        .update_window(handle, |_, window, cx| {
+            install_graph_fixture(&workspace, cx);
+            window.render_frame(cx);
+            let bounds = window.find("graph-node-1").bounds();
+            window.hover("graph-node-1", cx);
+            bounds
+        })
+        .expect("workspace window remains open");
 
-        window.click("toggle-graph", cx);
-        assert!(window.try_find("graph-node-1").is_none());
-        assert!(window.find("input-state").visible());
-        window.click("toggle-graph", cx);
-        assert!(window.find("graph-node-1").visible());
-        assert_eq!(window.find("Assignment").bounds(), resized);
-        assert_eq!(workspace.read(cx).selected_nodes.get(&(1, 7)), Some(&1));
+    cx.wait_for(handle, std::time::Duration::from_secs(2), |window, _| {
+        window.try_find("open-preview-workbench").is_some()
+    })
+    .await;
+    cx.update_window(handle, |_, window, cx| {
+        assert_eq!(window.find("graph-node-1").bounds(), node_bounds);
+        window.hover("open-preview-workbench", cx);
+        window.click("open-preview-workbench", cx);
+        window.render_frame(cx);
+        assert!(window.find("close-workbench").visible());
+        assert!(window.try_find("open-preview-workbench").is_none());
     })
     .expect("workspace window remains open");
 }

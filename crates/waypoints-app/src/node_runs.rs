@@ -220,6 +220,7 @@ pub(super) struct RunPanel {
     follow_up: Entity<TextareaState>,
     status: Option<RunStatus>,
     polling: bool,
+    checked: bool,
     busy: bool,
     error: Option<String>,
     output: Transcript,
@@ -240,7 +241,7 @@ impl RunPanel {
         self.busy
     }
 
-    #[cfg(feature = "native-qa")]
+    #[cfg(feature = "screenshot-fixtures")]
     pub(super) fn install_qa_permission(&mut self, node_id: i64, run_id: i64, title: &str) {
         self.status = Some(
             serde_json::from_value(serde_json::json!({
@@ -287,12 +288,14 @@ impl RunPanel {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
         let executable =
             cx.new(|cx| InputState::new(window, cx).placeholder("/absolute/path/to/agent-acp"));
-        let follow_up = cx.new(|cx| TextareaState::new(window, cx));
+        let follow_up =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder("Follow-up instructions"));
         Self {
             executable,
             follow_up,
             status: None,
             polling: false,
+            checked: false,
             busy: false,
             error: None,
             output: Transcript::default(),
@@ -300,6 +303,55 @@ impl RunPanel {
             cursor: 0,
             output_notice: None,
         }
+    }
+
+    #[cfg(feature = "screenshot-fixtures")]
+    pub(super) fn set_screenshot_phase(
+        &mut self,
+        id: i64,
+        state: RunState,
+        cx: &mut gpui_kit::App,
+    ) {
+        if let Some(status) = &mut self.status {
+            status.run.node_id = id;
+            status.run.id += id;
+            if state != RunState::Completed {
+                status.run.snapshot = SnapshotState::NotRecorded;
+            }
+            status.run.state = state.clone();
+        }
+        match state {
+            RunState::Running => {
+                if let Some(tool) = self
+                    .output
+                    .blocks
+                    .iter_mut()
+                    .find(|block| block.sequence == 6)
+                {
+                    tool.expanded = true;
+                }
+            }
+            RunState::Completed => {
+                self.output = Transcript::default();
+                self.output.push(
+                    1,
+                    RunEventOrigin::Live,
+                    serde_json::json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "fixture-test",
+                        "title": "Verify stale review handling",
+                        "status": "failed"
+                    }),
+                );
+            }
+            _ => self.output = Transcript::default(),
+        }
+        self.output_scroll = cx.new(|cx| MessageScrollerState::new(self.output.blocks.len(), cx));
+    }
+
+    #[cfg(feature = "screenshot-fixtures")]
+    pub(super) fn set_screenshot_unrun(&mut self) {
+        self.checked = true;
     }
 
     #[cfg(feature = "screenshot-fixtures")]
@@ -543,6 +595,7 @@ impl Workspace {
                 node.run.busy = false;
                 match result {
                     Ok(status) => {
+                        node.run.checked = true;
                         let discovered = status.clone();
                         node.run.status = status;
                         if let Some(status) = &discovered {
@@ -852,7 +905,7 @@ impl Workspace {
                                 .disabled(panel.busy)
                                 .on_click(move |_, window, cx| {
                                     let _ = submit_weak.update(cx, |this, cx| {
-                                        this.start_node_run(key, Some(run_id), cx);
+                                        this.continue_node_run(key, run_id, cx);
                                     });
                                     window.close_dialog(cx);
                                 }),
@@ -861,23 +914,45 @@ impl Workspace {
         });
     }
 
-    pub(in crate::workspace) fn graph_run_status(&self, node: i64) -> Option<&'static str> {
-        let (project, workflow) = self.state.selected?;
-        let status = self
-            .node_workspaces
-            .get(&(project, workflow, node))?
-            .run
-            .status
-            .as_ref()?;
-        match status.run.state {
-            RunState::AwaitingPermission => Some("Permission needed"),
-            RunState::Starting | RunState::Running => Some("Running"),
-            RunState::Finalizing => Some("Recording revision"),
-            RunState::Cancelling => Some("Cancelling"),
-            RunState::Completed => Some("Completed"),
-            RunState::Failed { .. } => Some("Run failed"),
-            RunState::Interrupted { .. } => Some("Interrupted"),
+    pub(in crate::workspace) fn graph_activity(
+        &self,
+        key: NodeKey,
+    ) -> super::super::workflow_graph::GraphActivity<'_> {
+        use super::super::workflow_graph::GraphActivity;
+
+        let Some(panel) = self.node_workspaces.get(&key).map(|node| &node.run) else {
+            return GraphActivity::default();
+        };
+        let blocks = &panel.output.blocks;
+        let assistant = blocks.iter().rev().find_map(|block| match &block.activity {
+            Activity::Text(Stream::Assistant, text) if !text.trim().is_empty() => {
+                Some(text.as_str())
+            }
             _ => None,
+        });
+        let tool = blocks.iter().rev().find_map(|block| match &block.activity {
+            Activity::Tool { fields, .. } => Some(tool_heading(fields, "Tool call")),
+            _ => None,
+        });
+        let failed_tool = blocks.iter().rev().find_map(|block| match &block.activity {
+            Activity::Tool { fields, .. }
+                if fields.get("status").and_then(serde_json::Value::as_str) == Some("failed") =>
+            {
+                Some(tool_heading(fields, "Tool call"))
+            }
+            _ => None,
+        });
+        GraphActivity {
+            checked: panel.checked,
+            run: panel.status.as_ref().map(|status| &status.run),
+            permission: panel
+                .status
+                .as_ref()
+                .and_then(|status| status.permission.as_ref())
+                .map(|permission| tool_heading(&permission.tool_call, "Tool call")),
+            assistant,
+            tool,
+            failed_tool,
         }
     }
 
@@ -915,6 +990,51 @@ impl Workspace {
         div().flex_1().min_w_0().child(actions)
     }
 
+    pub(super) fn render_follow_up(
+        &self,
+        key: NodeKey,
+        panel: &RunPanel,
+        run: i64,
+        cx: &Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .pt_2()
+            .child(
+                div().flex_1().min_w_0().child(
+                    Textarea::new(&panel.follow_up)
+                        .h(gpui_kit::rems(2.5))
+                        .aria_label("Follow-up instructions"),
+                ),
+            )
+            .child(
+                Button::new("continue-run")
+                    .outline()
+                    .small()
+                    .icon(IconName::Send)
+                    .label("Continue session")
+                    .disabled(panel.busy)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.continue_node_run(key, run, cx)),
+                    ),
+            )
+    }
+
+    fn continue_node_run(&mut self, key: NodeKey, run: i64, cx: &mut Context<Self>) {
+        if self
+            .node_workspaces
+            .get(&key)
+            .is_some_and(|node| node.run.continue_target() == Some(run))
+        {
+            self.open_tab(key, super::Tab::Output, cx);
+            self.start_node_run(key, Some(run), cx);
+        }
+    }
+
     pub(super) fn render_run_panel(
         &self,
         key: NodeKey,
@@ -936,27 +1056,61 @@ impl Workspace {
             .flex_wrap()
             .gap_2()
             .items_center()
-            .child(
-                div()
-                    .w_56()
-                    .child(Input::new(&panel.executable).aria_label("ACP executable")),
-            )
-            .child(
-                Button::new("start-run")
-                    .primary()
-                    .icon(IconName::Play)
-                    .label("Start run")
-                    .disabled(panel.busy || running || unsaved || node.saving)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.start_node_run(key, None, cx)),
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .pb_1();
+        if let Some(status) = status.filter(|_| running) {
+            let executable = status.run.executable.to_string_lossy();
+            let name = status
+                .run
+                .executable
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(executable.as_ref());
+            let (icon, color) = run_state_visual(&status.run.state, cx.theme());
+            toolbar = toolbar
+                .child(message(format!("Agent · {name}")).text_color(cx.theme().muted_foreground))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Icon::new(icon).size_3().text_color(color))
+                        .child(message(state_label(&status.run.state))),
+                )
+                .child(
+                    message(format!("Run #{}", status.run.id))
+                        .text_color(cx.theme().muted_foreground),
+                );
+        } else {
+            toolbar = toolbar
+                .child(
+                    div().w_56().max_w_full().child(
+                        Input::new(&panel.executable)
+                            .small()
+                            .aria_label("ACP executable"),
                     ),
-            );
+                )
+                .child(
+                    Button::new("start-run")
+                        .primary()
+                        .small()
+                        .icon(IconName::Play)
+                        .label("Start run")
+                        .disabled(panel.busy || unsaved || node.saving)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.start_node_run(key, None, cx)),
+                        ),
+                );
+        }
         if let Some(status) = status {
             let id = status.run.id;
             if running {
                 toolbar = toolbar.child(
                     Button::new("cancel-run")
                         .outline()
+                        .small()
+                        .ml_auto()
                         .icon(IconName::Square)
                         .label("Cancel run")
                         .disabled(
@@ -975,6 +1129,7 @@ impl Workspace {
                 toolbar = toolbar.child(
                     Button::new("refresh-run")
                         .ghost()
+                        .small()
                         .icon(IconName::RefreshCw)
                         .tooltip("Refresh run status and output")
                         .accessibility_label("Refresh run")
@@ -998,17 +1153,19 @@ impl Workspace {
         if let Some(status) = status {
             let id = status.run.id;
             let (state_icon, state_color) = run_state_visual(&status.run.state, cx.theme());
-            summary = summary.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(Icon::new(state_icon).size_3().text_color(state_color))
-                    .child(message(format!(
-                        "Run #{id} · {}",
-                        state_label(&status.run.state)
-                    ))),
-            );
+            if !running {
+                summary = summary.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Icon::new(state_icon).size_3().text_color(state_color))
+                        .child(message(format!(
+                            "Run #{id} · {}",
+                            state_label(&status.run.state)
+                        ))),
+                );
+            }
             match &status.run.snapshot {
                 SnapshotState::Saved { .. } => {
                     summary = summary.child(
@@ -1025,29 +1182,11 @@ impl Workspace {
                 SnapshotState::Failed { detail } => {
                     summary = summary.child(message(format!("Snapshot failed. {detail}")))
                 }
-                _ => summary = summary.child(message("No saved snapshot.")),
+                _ if !running => summary = summary.child(message("No saved snapshot.")),
+                _ => {}
             }
             if can_continue(status) && !compact_follow_up {
-                follow_up = Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .gap_1()
-                        .child(message("Follow-up instructions"))
-                        .child(Textarea::new(&panel.follow_up).aria_label("Follow-up instructions"))
-                        .child(
-                            Button::new("continue-run")
-                                .outline()
-                                .small()
-                                .icon(IconName::Play)
-                                .label("Continue session")
-                                .disabled(panel.busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.start_node_run(key, Some(id), cx)
-                                })),
-                        ),
-                );
+                follow_up = Some(self.render_follow_up(key, panel, id, cx));
             }
         }
         if let Some(notice) = panel.output_notice {
@@ -1086,7 +1225,7 @@ impl Workspace {
                         render_activity(block, replay, key, workspace.clone(), cx)
                     },
                 )
-                .with_jump_button_label("Latest output")
+                .with_jump_button_label("Jump to latest")
                 .with_row_style(gpui_kit::StyleRefinement::default().pb_2().px_0())
                 .flex_1()
                 .min_h_0(),
@@ -1235,7 +1374,10 @@ fn render_activity(
                 .child(summary),
         );
     }
-    row.flex()
+    row.w_full()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .flex()
         .flex_col()
         .items_start()
         .gap_1()
@@ -1658,10 +1800,10 @@ mod tests {
             });
             window.render_frame(cx);
             let viewport = window.viewport_size();
-            let toggle = window.find("toggle-graph").bounds();
+            let zoom = window.find("graph-zoom-reset").bounds();
             assert!(
-                toggle.right() <= viewport.width,
-                "graph toggle {toggle:?} is outside {viewport:?}"
+                zoom.right() <= viewport.width,
+                "graph zoom {zoom:?} is outside {viewport:?}"
             );
             for id in 1..=6 {
                 let button = window.find(format!("permission-{}", 100 + id));
@@ -1705,7 +1847,7 @@ mod tests {
                 })).expect("workflow graph fixture matches the storage schema"));
                 workspace.open_node(2, window, cx);
                 workspace.open_node(1, window, cx);
-                workspace.graph_collapsed = true;
+                workspace.expanded_workbench = true;
 
                 workspace.node_workspaces.get_mut(&(1, 7, 2)).expect("permission node").run.status =
                     Some(serde_json::from_value(json!({
@@ -1786,7 +1928,7 @@ mod tests {
                     .expect("workflow graph fixture matches the storage schema"),
                 );
                 workspace.open_node(1, window, cx);
-                workspace.graph_collapsed = false;
+                workspace.expanded_workbench = false;
                 let node = workspace.node_workspaces.get_mut(&(1, 7, 1)).expect("node");
                 node.tab = Tab::Output;
                 node.run.status = Some(

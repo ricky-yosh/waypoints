@@ -2,9 +2,14 @@
 
 Open a project and select a workflow in the sidebar. The graph shows saved
 dependencies, with arrows pointing downstream. Click a node or focus it and
-press Enter to open its workspace below the graph. Scroll the graph to reach
-more nodes, drag its bottom divider to resize it, or use **Hide graph** to give
-the workspace more room. Waypoints remembers the divider and visibility.
+press Enter to open its floating workbench. Scroll the visible graph to reach
+more nodes, or drag the workbench's top edge to resize it. **Expand** fills the
+workflow area and **Restore** returns to the previous floating size.
+**Close** or Escape from the workbench returns focus to the graph node.
+Closing preserves per-node context and lets runs continue. Hover over a node
+or press Shift-Enter on a focused node to preview its assignment and recent
+monitored activity. The zoom controls progressively reduce card detail.
+A node whose run status has yet to be checked shows **Unknown**.
 
 - **Assignment** edits the saved prompt. Use **Edit** for Markdown source and
   **Preview** for selectable rendered Markdown, including code blocks with copy
@@ -14,7 +19,8 @@ the workspace more room. Waypoints remembers the divider and visibility.
   status stays visible in both modes. A project refresh also reconciles the
   selected assignment: a clean draft follows the newly saved text, while an
   unsaved draft is kept with a warning and an undoable **Load saved assignment**
-  action.
+  action. When the node has an eligible saved session, the footer accepts
+  follow-up instructions and opens Output when you continue.
 - **Output** starts a fresh run using the saved assignment and an absolute path
   to an installed ACP executable. The backend requires an associated native
   change and a verified, ready workspace. Use the [CLI](11-backend-cli.md) to
@@ -27,9 +33,8 @@ the workspace more room. Waypoints remembers the divider and visibility.
   place; replay boundaries, expired-event notices, and truncation notices stay
   outside the Markdown. Expand a tool row to inspect its original input/output
   as JSON with a copy action. Output follows the tail when you are reading the
-  latest rows and stops following when you scroll upward; **Latest output**
-  returns to the newest content. At the minimum window height the graph yields
-  space before the run controls are pushed below the window. When the inline
+  latest rows and stops following when you scroll upward; **Jump to latest**
+  returns to the newest content. At the minimum window height, expand the workbench for more room. When the inline
   composer does not fit, **Continue session…** moves beside the node title and
   opens a follow-up dialog. The run outcome and snapshot outcome are separate.
 - **Changes** shows the current recorded revision, a saved run snapshot, or an
@@ -43,7 +48,8 @@ the workspace more room. Waypoints remembers the divider and visibility.
   target, selected file, and per-file diff position within the session.
   Current review is marked stale when a run records a new revision and only
   reloads when you ask. Historical and saved-run targets remain pinned.
-- **History** separates run records from native revisions. Runs show lifecycle
+- **History** separates run records from native revisions. Select an entry in
+  the list to inspect its details alongside the list. Runs show lifecycle
   state, readable timestamps, continued-from references, and snapshot state as
   distinct facts. Native revisions show a short operation description, current
   head and conflict indicators, associated run references, and a short revision
@@ -90,23 +96,22 @@ not a backend or agent session:
 cargo run -p waypoints-app --features native-qa --bin waypoints-native-qa
 ```
 
-It prints each completed step and exits successfully only after printing
-`NATIVE_QA_OK`. This is a native layout and interaction smoke check, not
-end-to-end agent validation. When launching the normal app for manual QA,
+A passing native fixture run prints each completed step and a final standalone
+`NATIVE_QA_OK`. This harness uses deterministic run and review fixtures. When launching the normal app for manual QA,
 point `WAYPOINTS_WORKSPACE_FILE` at an isolated absolute preferences file and
 `XDG_STATE_HOME` at a disposable state directory; macOS otherwise uses
 `~/Library/Application Support` for preferences.
 
-The four node surfaces can also be rendered without a window server using the
-fixture-backed screenshot binary:
+The fixture renderer captures the graph overview and four workbench tabs.
 
 ```sh
 cargo run -p waypoints-app --features screenshot-fixtures \
   --bin waypoints-screenshots -- .screenshots
 ```
 
-It opens the real workspace views through GPUI Fast's headless renderer at
-1200×860 in light and dark themes and writes `assignment-preview-*.png`,
-`output-*.png`, `changes-*.png`, and `history-*.png`. The data is deterministic
-fixture data; this exercises layout, typography, syntax highlighting, and theme
-contrast, not a real agent session or backend round trip.
+It captures the overview at 1440 × 510 and the workbench at 1280 × 720 in
+light and dark themes. The filenames use the surface names
+`overview-preview`, `overview-compact`, `assignment-preview`, `output`,
+`changes`, and `history`. Pass `--inspect <surface> <light|dark>` in place of
+the directory to open a fixture in a native window. Set `XDG_STATE_HOME` to a
+disposable directory before trying actions that contact the backend.

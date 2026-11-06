@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{StyledExt as _, TestSupportExt as _};
@@ -8,14 +9,14 @@ use gpui_kit::component::{
     alert::Alert,
     button::{Button, ButtonVariants as _},
     menu::{DropdownMenu as _, PopupMenuItem},
-    resizable::{h_resizable, resizable_panel, v_resizable},
+    resizable::{HandleEdge, h_resizable, resizable_panel, resize_handle},
     spinner::Spinner,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, PathPromptOptions, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, actions, div, px,
+    App, AppContext as _, Axis, Context, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyBinding, ParentElement as _, PathPromptOptions, Render, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, actions, div, px, relative,
 };
 use waypoints_backend::{Client, Config};
 use waypoints_core::storage::{Workflow, WorkflowGraph};
@@ -33,14 +34,17 @@ mod workflow_graph;
 #[cfg(feature = "screenshot-fixtures")]
 pub(crate) use node_workspace::ScreenshotSurface;
 
-const DEFAULT_GRAPH_HEIGHT: f32 = 192.0;
-const MIN_GRAPH_HEIGHT: f32 = 80.0;
-// Keep enough room for the node workspace's own title, tabs, and run
-// controls when the graph is visible at the minimum window height.
-const MIN_NODE_HEIGHT: f32 = 380.0;
-// The workflow title row above the graph split is outside the resizable
-// body, so the graph's maximum must account for it.
-const WORKFLOW_HEADER_HEIGHT: f32 = 40.0;
+const DEFAULT_WORKBENCH_FRACTION: f32 = 0.74;
+const MIN_WORKBENCH_FRACTION: f32 = 0.55;
+const MAX_WORKBENCH_FRACTION: f32 = 0.92;
+
+struct ResizeWorkbench;
+
+impl Render for ResizeWorkbench {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 // Reserve a readable detail column when the navigator is expanded.
 const MIN_DETAIL_WIDTH: f32 = 320.0;
@@ -54,7 +58,10 @@ actions!(
         AddProject,
         RefreshProject,
         FocusNext,
-        FocusPrevious
+        FocusPrevious,
+        CloseWorkbench,
+        InspectGraphNode,
+        DismissGraphPreview
     ]
 );
 
@@ -70,6 +77,9 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new(refresh, RefreshProject, None),
         KeyBinding::new("tab", FocusNext, Some("WaypointsWorkspace")),
         KeyBinding::new("shift-tab", FocusPrevious, Some("WaypointsWorkspace")),
+        KeyBinding::new("escape", CloseWorkbench, Some("WaypointsWorkbench")),
+        KeyBinding::new("shift-enter", InspectGraphNode, Some("WaypointsGraphNode")),
+        KeyBinding::new("escape", DismissGraphPreview, Some("WaypointsGraphPreview")),
     ]);
 }
 
@@ -85,8 +95,17 @@ pub(crate) struct Workspace {
     state: WorkspaceState,
     graph: Load<WorkflowGraph>,
     graph_revision: u64,
-    graph_height: f32,
-    graph_collapsed: bool,
+    workbench_fraction: f32,
+    expanded_workbench: bool,
+    open_workbenches: BTreeSet<(u64, i64)>,
+    workbench_focus: FocusHandle,
+    graph_cameras: BTreeMap<(u64, i64), workflow_graph::GraphCamera>,
+    graph_preview: Option<i64>,
+    graph_preview_keyboard: bool,
+    graph_preview_task: Option<gpui_kit::Task<()>>,
+    graph_preview_focus: FocusHandle,
+    _preview_focus_out: gpui_kit::Subscription,
+    graph_node_focus: BTreeMap<(u64, i64, i64), FocusHandle>,
     selected_nodes: BTreeMap<(u64, i64), i64>,
     node_workspaces: BTreeMap<(u64, i64, i64), node_workspace::NodeWorkspace>,
     sidebar_visible: bool,
@@ -94,8 +113,8 @@ pub(crate) struct Workspace {
     focus: FocusHandle,
     path_error: Option<String>,
     preferences_error: Option<String>,
-    #[cfg(feature = "native-qa")]
-    qa_fixture_mode: bool,
+    #[cfg(any(test, feature = "screenshot-fixtures"))]
+    fixture_mode: bool,
 }
 
 struct Project {
@@ -186,13 +205,30 @@ impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let graph_preview_focus = cx.focus_handle();
+        let preview_focus_out = cx.on_focus_out(&graph_preview_focus, window, |this, _, _, cx| {
+            if this.graph_preview_keyboard {
+                this.graph_preview = None;
+                this.graph_preview_keyboard = false;
+                cx.notify();
+            }
+        });
         Self {
             appearance: Appearance::System,
             state: WorkspaceState::default(),
             graph: Load::Idle,
             graph_revision: 0,
-            graph_height: DEFAULT_GRAPH_HEIGHT,
-            graph_collapsed: false,
+            workbench_fraction: DEFAULT_WORKBENCH_FRACTION,
+            expanded_workbench: false,
+            open_workbenches: BTreeSet::new(),
+            workbench_focus: cx.focus_handle(),
+            graph_cameras: BTreeMap::new(),
+            graph_preview: None,
+            graph_preview_keyboard: false,
+            graph_preview_task: None,
+            graph_preview_focus,
+            _preview_focus_out: preview_focus_out,
+            graph_node_focus: BTreeMap::new(),
             selected_nodes: BTreeMap::new(),
             node_workspaces: BTreeMap::new(),
             sidebar_visible: true,
@@ -200,9 +236,75 @@ impl Workspace {
             focus,
             path_error: None,
             preferences_error: None,
-            #[cfg(feature = "native-qa")]
-            qa_fixture_mode: false,
+            #[cfg(any(test, feature = "screenshot-fixtures"))]
+            fixture_mode: cfg!(test),
         }
+    }
+
+    fn close_workbench(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(key) = self.state.selected {
+            self.open_workbenches.remove(&key);
+            self.expanded_workbench = false;
+            let focus = self
+                .selected_nodes
+                .get(&key)
+                .and_then(|id| self.graph_node_focus.get(&(key.0, key.1, *id)))
+                .unwrap_or(&self.focus);
+            focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn render_workbench(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .id("workbench")
+            .test_support()
+            .key_context("WaypointsWorkbench")
+            .track_focus(&self.workbench_focus)
+            .on_action(cx.listener(|this, _: &CloseWorkbench, window, cx| {
+                this.close_workbench(window, cx);
+            }))
+            .absolute()
+            .occlude()
+            .min_h_0()
+            .min_w_0()
+            .bg(cx.theme().popover.blend(cx.theme().muted.opacity(0.42)))
+            .border_1()
+            .border_color(cx.theme().ring.opacity(0.62))
+            .when(self.expanded_workbench, |frame| frame.inset_0())
+            .when(!self.expanded_workbench, |frame| {
+                frame
+                    .left_2()
+                    .right_2()
+                    .bottom_2()
+                    .h(relative(self.workbench_fraction))
+                    .rounded_lg()
+                    .shadow_lg()
+            })
+            .child(self.render_node_workspace(window, cx))
+            .when(!self.expanded_workbench, |frame| {
+                frame.child(
+                    resize_handle("workbench-resize", Axis::Vertical)
+                        .inside(HandleEdge::Leading)
+                        .with_appearance(Rc::new(|_, _, cx| {
+                            Some(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .w_8()
+                                            .h_0p5()
+                                            .rounded_full()
+                                            .bg(cx.theme().muted_foreground),
+                                    )
+                                    .into_any_element(),
+                            )
+                        }))
+                        .on_drag(ResizeWorkbench, |_, _, _, cx| cx.new(|_| ResizeWorkbench)),
+                )
+            })
     }
 
     fn open_project(&mut self, cx: &mut Context<Self>) {
@@ -315,6 +417,12 @@ impl Workspace {
     }
 
     fn load_graph(&mut self, project: u64, id: i64, cx: &mut Context<Self>) {
+        if self.state.selected != Some((project, id)) {
+            self.expanded_workbench = false;
+        }
+        self.graph_preview = None;
+        self.graph_preview_keyboard = false;
+        self.graph_preview_task = None;
         self.state.selected = Some((project, id));
         self.graph_revision += 1;
         let revision = self.graph_revision;
@@ -353,11 +461,10 @@ impl Workspace {
         self.appearance = preferences.appearance;
         self.sidebar_visible = preferences.sidebar_visible;
         self.sidebar_width = preferences.sidebar_width;
-        self.graph_collapsed = preferences.graph_collapsed;
-        self.graph_height = preferences
-            .graph_height
-            .filter(|height| height.is_finite() && *height >= MIN_GRAPH_HEIGHT)
-            .unwrap_or(DEFAULT_GRAPH_HEIGHT);
+        self.workbench_fraction = preferences
+            .workbench_fraction
+            .filter(|fraction| (MIN_WORKBENCH_FRACTION..=MAX_WORKBENCH_FRACTION).contains(fraction))
+            .unwrap_or(DEFAULT_WORKBENCH_FRACTION);
         for saved in preferences.projects {
             if let Some(id) = self.state.add(saved.path.clone())
                 && let Some(project) = self.state.projects.iter_mut().find(|entry| entry.id == id)
@@ -407,8 +514,7 @@ impl Workspace {
             }),
             sidebar_width: self.sidebar_width,
             sidebar_visible: self.sidebar_visible,
-            graph_height: Some(self.graph_height),
-            graph_collapsed: self.graph_collapsed,
+            workbench_fraction: Some(self.workbench_fraction),
             window_bounds: Some(WindowGeometry {
                 x: bounds.origin.x.into(),
                 y: bounds.origin.y.into(),
@@ -759,61 +865,51 @@ impl Render for Workspace {
                     .overflow_y_scroll()
                     .child(list),
             );
-        let detail = if let Load::Ready(graph) = &self.graph {
-            let selected = self
-                .state
-                .selected
-                .and_then(|key| self.selected_nodes.get(&key).copied());
-            let node_workspace = self.render_node_workspace(window, cx);
-            let body = if self.graph_collapsed || graph.nodes.is_empty() {
-                node_workspace.into_any_element()
-            } else {
-                let weak = cx.entity().downgrade();
-                let max_height = (f32::from(window.viewport_size().height)
-                    - MIN_NODE_HEIGHT
-                    - WORKFLOW_HEADER_HEIGHT)
-                    .max(MIN_GRAPH_HEIGHT);
-                v_resizable("graph-split")
-                    .on_resize(move |state, _, cx| {
-                        if let Some(height) = state.read(cx).sizes().first().copied() {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.graph_height = height.into();
-                                cx.notify();
-                            });
+        let detail = if let (Some(key), Load::Ready(graph)) = (self.state.selected, &self.graph) {
+            let selected = self.selected_nodes.get(&key).copied();
+            self.graph_cameras.entry(key).or_default();
+            for node in &graph.nodes {
+                self.graph_node_focus
+                    .entry((key.0, key.1, node.id))
+                    .or_insert_with(|| cx.focus_handle());
+            }
+            let workbench_open = self.open_workbenches.contains(&key)
+                && selected.is_some_and(|id| graph.nodes.iter().any(|node| node.id == id));
+            let canvas = div()
+                .id("graph-canvas")
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .on_drag_move(cx.listener(
+                    |this, event: &gpui_kit::DragMoveEvent<ResizeWorkbench>, window, cx| {
+                        let height = event.bounds.size.height;
+                        if height > px(0.) {
+                            let margin = window.rem_size() * 0.5;
+                            this.workbench_fraction =
+                                ((event.bounds.bottom() - event.event.position.y - margin)
+                                    / height)
+                                    .clamp(MIN_WORKBENCH_FRACTION, MAX_WORKBENCH_FRACTION);
+                            cx.notify();
                         }
-                    })
-                    .child(
-                        resizable_panel()
-                            .fixed()
-                            .size(px(self.graph_height.clamp(MIN_GRAPH_HEIGHT, max_height)))
-                            .size_range(px(MIN_GRAPH_HEIGHT)..px(max_height))
-                            .child(workflow_graph::render_graph(
-                                graph,
-                                selected,
-                                |id| self.graph_run_status(id),
-                                cx,
-                            )),
-                    )
-                    .child(resizable_panel().child(node_workspace))
-                    .into_any_element()
-            };
+                    },
+                ))
+                .child(self.render_graph(graph, key, selected, window, cx))
+                .when(workbench_open, |canvas| {
+                    canvas.child(self.render_workbench(window, cx))
+                });
             div().id("detail").size_full().min_w_0().min_h_0().flex().flex_col()
                 .child(div().flex().items_center().justify_between().gap_2().px_3().py_2()
                     .border_b_1().border_color(cx.theme().border)
                     .child(div().min_w_0().font_semibold().overflow_hidden().text_ellipsis()
                         .child(graph.workflow.name.clone()))
                     .child(self.permission_actions(cx))
-                    .child(Button::new("toggle-graph").ghost().small()
-                        .label(if self.graph_collapsed { "Show graph" } else { "Hide graph" })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.graph_collapsed = !this.graph_collapsed;
-                            cx.notify();
-                        }))))
+                    .child(self.graph_zoom_controls(key, cx)))
                 .when(graph.nodes.is_empty(), |detail| detail.child(message("No nodes in this workflow.").px_3()))
                 .when(graph.unresolved_dependency_operation.is_some(), |detail| {
                     detail.child(Alert::warning("graph-unresolved", "Saved edges may differ from jj while a dependency operation is unresolved.").small())
                 })
-                .child(div().flex_1().min_w_0().min_h_0().child(body))
+                .child(canvas)
         } else {
             div()
                 .id("detail")

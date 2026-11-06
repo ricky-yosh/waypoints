@@ -7,11 +7,10 @@ mod node_runs;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, Theme,
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffFile, DiffFileStatus, DiffMode, DiffState},
-    input::{Textarea, TextareaState},
-    scroll::ScrollableElement as _,
+    input::{Editor, EditorState},
     text::TextView,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -59,14 +58,13 @@ struct Review {
 pub(super) struct NodeWorkspace {
     run: node_runs::RunPanel,
     saved: String,
-    draft: Entity<TextareaState>,
+    draft: Entity<EditorState>,
     _watch_draft: Subscription,
     assignment_preview: bool,
     assignment_preview_scroll: ScrollHandle,
     saving: bool,
     save_error: Option<String>,
     external_saved: Option<String>,
-    assignment_edit_scroll: ScrollHandle,
     tab: Tab,
     target: Target,
     review: Load<Review>,
@@ -77,13 +75,15 @@ pub(super) struct NodeWorkspace {
     review_files_scroll: ScrollHandle,
     history: Load<(Vec<RunStatus>, Result<NodeRevisionPage, String>)>,
     history_scroll: gpui_kit::ListState,
+    history_selection: Option<node_history::HistorySelection>,
+    history_detail_scroll: ScrollHandle,
     history_stale: bool,
     history_generation: u64,
     loading_older: bool,
     older_error: Option<String>,
 }
 
-fn short_id(id: &str) -> String {
+pub(super) fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
 }
 
@@ -113,13 +113,14 @@ fn status_label(status: DiffFileStatus) -> &'static str {
     }
 }
 
-fn run_state_visual(state: &RunState, theme: &Theme) -> (IconName, Hsla) {
+pub(super) fn run_state_visual(state: &RunState, theme: &Theme) -> (IconName, Hsla) {
     match state {
         RunState::Completed => (IconName::CircleCheck, theme.success),
         RunState::Failed { .. } | RunState::Interrupted { .. } => (IconName::CircleX, theme.danger),
         RunState::AwaitingPermission => (IconName::ShieldAlert, theme.warning),
-        RunState::Starting | RunState::Running | RunState::Finalizing | RunState::Cancelling => {
-            (IconName::Clock, theme.warning)
+        RunState::Running => (IconName::CirclePlay, theme.success),
+        RunState::Starting | RunState::Finalizing | RunState::Cancelling => {
+            (IconName::Clock, theme.info)
         }
         RunState::Cancelled => (IconName::Square, theme.muted_foreground),
         _ => (IconName::CircleAlert, theme.muted_foreground),
@@ -145,6 +146,8 @@ fn markdown_with_copy(id: impl Into<gpui_kit::ElementId>, text: String) -> TextV
 #[cfg(feature = "screenshot-fixtures")]
 #[derive(Clone, Copy)]
 pub(crate) enum ScreenshotSurface {
+    Overview,
+    CompactOverview,
     Assignment,
     Output,
     Changes,
@@ -322,6 +325,20 @@ index 8888888..9999999 100644
 
 #[cfg(feature = "screenshot-fixtures")]
 impl NodeWorkspace {
+    pub(super) fn install_screenshot_activity(
+        &mut self,
+        id: i64,
+        state: RunState,
+        cx: &mut gpui_kit::App,
+    ) {
+        self.run.install_screenshot_fixture(cx);
+        self.run.set_screenshot_phase(id, state, cx);
+    }
+
+    pub(super) fn set_screenshot_unrun(&mut self) {
+        self.run.set_screenshot_unrun();
+    }
+
     pub(super) fn install_screenshot_fixture(
         &mut self,
         surface: ScreenshotSurface,
@@ -329,9 +346,11 @@ impl NodeWorkspace {
         cx: &mut gpui_kit::App,
     ) {
         match surface {
+            ScreenshotSurface::Overview | ScreenshotSurface::CompactOverview => {}
             ScreenshotSurface::Assignment => {
                 self.tab = Tab::Assignment;
-                self.assignment_preview = true;
+                self.run.install_screenshot_fixture(cx);
+                self.assignment_preview = false;
                 self.saved = SCREENSHOT_ASSIGNMENT_SAVED.into();
                 self.draft.update(cx, |draft, cx| {
                     draft.set_value(SCREENSHOT_ASSIGNMENT_DRAFT, window, cx)
@@ -371,17 +390,21 @@ impl NodeWorkspace {
             ScreenshotSurface::History => {
                 self.tab = Tab::History;
                 self.install_screenshot_history();
+                self.history_selection = Some(node_history::HistorySelection::Run(40));
             }
         }
     }
 }
 
-#[cfg(feature = "native-qa")]
+#[cfg(feature = "screenshot-fixtures")]
 impl NodeWorkspace {
     pub(super) fn install_qa_permission(&mut self, node_id: i64, run_id: i64, title: &str) {
         self.run.install_qa_permission(node_id, run_id, title);
     }
+}
 
+#[cfg(feature = "native-qa")]
+impl NodeWorkspace {
     pub(super) fn set_qa_run_idle(&mut self) {
         self.run.set_qa_idle();
     }
@@ -458,18 +481,37 @@ impl Workspace {
     }
 
     pub(super) fn open_node(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some((project, workflow)), Load::Ready(graph)) = (self.state.selected, &self.graph)
-        else {
+        let Some((project, workflow, id)) = self.prepare_node(id, window, cx) else {
             return;
         };
-        let Some(node) = graph.nodes.iter().find(|node| node.id == id) else {
-            return;
-        };
-        let key = (project, workflow, id);
         self.selected_nodes.insert((project, workflow), id);
+        self.open_workbenches.insert((project, workflow));
+        self.graph_preview = None;
+        self.graph_preview_keyboard = false;
+        self.graph_preview_task = None;
+        self.workbench_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn prepare_node(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<NodeKey> {
+        let (project, workflow) = self.state.selected?;
+        let Load::Ready(graph) = &self.graph else {
+            return None;
+        };
+        let node = graph.nodes.iter().find(|node| node.id == id)?;
+        let key = (project, workflow, id);
         self.node_workspaces.entry(key).or_insert_with(|| {
             let saved = node.prompt.clone();
-            let draft = cx.new(|cx| TextareaState::new(window, cx).default_value(saved.clone()));
+            let draft = cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language("markdown")
+                    .default_value(saved.clone())
+            });
             let watch_draft = cx.observe(&draft, |_, _, cx| cx.notify());
             NodeWorkspace {
                 run: node_runs::RunPanel::new(window, cx),
@@ -481,7 +523,6 @@ impl Workspace {
                 saving: false,
                 save_error: None,
                 external_saved: None,
-                assignment_edit_scroll: ScrollHandle::new(),
                 tab: Tab::default(),
                 target: Target::Current,
                 review: Load::Idle,
@@ -496,19 +537,20 @@ impl Workspace {
                     gpui_kit::ListAlignment::Top,
                     gpui_kit::px(400.),
                 ),
+                history_selection: None,
+                history_detail_scroll: ScrollHandle::new(),
                 history_stale: false,
                 history_generation: 0,
                 loading_older: false,
                 older_error: None,
             }
         });
-        #[cfg(feature = "native-qa")]
-        if self.qa_fixture_mode {
-            cx.notify();
-            return;
+        #[cfg(any(test, feature = "screenshot-fixtures"))]
+        if self.fixture_mode {
+            return Some(key);
         }
         self.discover_run(key, cx);
-        cx.notify();
+        Some(key)
     }
 
     fn save_assignment(&mut self, key: NodeKey, cx: &mut Context<Self>) {
@@ -707,8 +749,10 @@ impl Workspace {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_3();
+            .gap_1()
+            .px_3()
+            .pt_3()
+            .pb_2();
         let Some((project, workflow)) = self.state.selected else {
             return root;
         };
@@ -726,7 +770,10 @@ impl Workspace {
             (IconName::FileClock, "History", Tab::History),
         ];
         let compact = node_runs::compact_follow_up(window);
-        let compact_continue = node.run.continue_target().filter(|_| compact);
+        let compact_continue = node
+            .run
+            .continue_target()
+            .filter(|_| compact && matches!(node.tab, Tab::Assignment | Tab::Output));
         let root = root
             .child(
                 div()
@@ -734,14 +781,29 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .min_w_0()
+                    .child(Icon::new(IconName::FileText).size_4().flex_none())
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .font_semibold()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(node_title(id, &node.saved)),
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .text_ellipsis()
+                                    .child(node_title(id, &node.saved)),
+                            )
+                            .when_some(
+                                super::workflow_graph::assignment_summary(&node.saved),
+                                |title, summary| {
+                                    title.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .text_ellipsis()
+                                            .child(summary.to_owned()),
+                                    )
+                                },
+                            ),
                     )
                     .when_some(compact_continue, |row, run_id| {
                         row.child(
@@ -755,7 +817,36 @@ impl Workspace {
                                     this.open_follow_up(key, run_id, window, cx)
                                 })),
                         )
-                    }),
+                    })
+                    .child(
+                        Button::new("expand-workbench")
+                            .outline()
+                            .small()
+                            .icon(if self.expanded_workbench {
+                                IconName::Minimize2
+                            } else {
+                                IconName::Maximize2
+                            })
+                            .label(if self.expanded_workbench {
+                                "Restore"
+                            } else {
+                                "Expand"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.expanded_workbench = !this.expanded_workbench;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("close-workbench")
+                            .outline()
+                            .small()
+                            .icon(IconName::X)
+                            .label("Close")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_workbench(window, cx)),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -768,7 +859,8 @@ impl Workspace {
                     .children(tabs.into_iter().map(|(icon, label, tab)| {
                         Button::new(label)
                             .ghost()
-                            .when(compact, |button| button.small())
+                            .small()
+                            .when(compact, |tab| tab.xsmall())
                             .icon(icon)
                             .label(label)
                             .selected(node.tab == tab)
@@ -778,7 +870,10 @@ impl Workspace {
                     })),
             );
         match node.tab {
-            Tab::Assignment => self.render_node_assignment(key, node, compact, root, cx),
+            Tab::Assignment => self.render_node_assignment(key, node, root, cx).when_some(
+                node.run.continue_target().filter(|_| !compact),
+                |root, run| root.child(self.render_follow_up(key, &node.run, run, cx)),
+            ),
             Tab::Output => self.render_run_panel(key, root, window, cx),
             Tab::Changes => self.render_node_changes(key, node, root, cx),
             Tab::History => self.render_node_history(key, node, root, cx),
@@ -789,7 +884,6 @@ impl Workspace {
         &self,
         key: NodeKey,
         node: &NodeWorkspace,
-        compact: bool,
         root: Div,
         cx: &Context<Self>,
     ) -> Div {
@@ -801,15 +895,10 @@ impl Workspace {
             .items_center()
             .flex_wrap()
             .children(
-                [
-                    (IconName::PenLine, "Edit", false),
-                    (IconName::Eye, "Preview", true),
-                ]
-                .map(|(icon, label, preview)| {
+                [("Edit", false), ("Preview", true)].map(|(label, preview)| {
                     Button::new(label)
                         .ghost()
-                        .when(compact, |button| button.small())
-                        .icon(icon)
+                        .small()
                         .label(label)
                         .selected(node.assignment_preview == preview)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -821,23 +910,27 @@ impl Workspace {
                 }),
             )
             .child(
+                div()
+                    .ml_auto()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if node.saving {
+                        "Saving…"
+                    } else if dirty {
+                        "Unsaved changes"
+                    } else {
+                        "Saved assignment"
+                    }),
+            )
+            .child(
                 Button::new("save-assignment")
                     .primary()
-                    .when(compact, |button| button.small())
-                    .icon(IconName::Save)
-                    .label("Save assignment")
+                    .small()
+                    .label("Save")
+                    .accessibility_label("Save assignment")
                     .disabled(!dirty || node.saving)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.save_assignment(key, cx);
-                    })),
-            )
-            .child(message(if node.saving {
-                "Saving…"
-            } else if dirty {
-                "Unsaved edits"
-            } else {
-                "Saved assignment"
-            }));
+                    .on_click(cx.listener(move |this, _, _, cx| this.save_assignment(key, cx))),
+            );
         let root = root
             .child(toolbar)
             .when_some(node.external_saved.clone(), |root, saved| {
@@ -911,24 +1004,13 @@ impl Workspace {
                 div()
                     .id("assignment-content")
                     .test_support()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&node.assignment_edit_scroll)
-                    .vertical_scrollbar(&node.assignment_edit_scroll)
                     .child(
-                        message("Saved assignments apply to future runs.")
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        div().flex_1().min_h(gpui_kit::rems(12.)).child(
-                            Textarea::new(&node.draft)
-                                .h(relative(1.))
-                                .aria_label("Assignment"),
-                        ),
+                        Editor::new(&node.draft)
+                            .h(relative(1.))
+                            .text_sm()
+                            .aria_label("Assignment"),
                     ),
             )
         }
@@ -950,6 +1032,7 @@ impl Workspace {
                 .child(
                     Button::new("current-review")
                         .ghost()
+                        .small()
                         .icon(IconName::GitCommitHorizontal)
                         .label("Review current")
                         .disabled(node.target == Target::Current)
@@ -960,6 +1043,7 @@ impl Workspace {
                 .child(
                     Button::new("reload-review")
                         .ghost()
+                        .small()
                         .icon(IconName::RefreshCw)
                         .tooltip("Reload this comparison target")
                         .accessibility_label("Reload review")
@@ -993,7 +1077,7 @@ impl Workspace {
             Load::Ready(review) => {
                 let commit = review.commit.clone();
                 let short_commit = short_id(&commit);
-                let mut header = div()
+                let header = div()
                     .flex()
                     .gap_2()
                     .flex_wrap()
@@ -1017,8 +1101,9 @@ impl Workspace {
                     )
                     .when(review.conflicted, |row| {
                         row.child(message("Conflicts").text_color(cx.theme().warning))
-                    })
-                    .when(
+                    });
+                let root =
+                    root.when(
                         node.target == Target::Current && node.current_review_stale,
                         |row| {
                             row.child(div().id("review-stale").test_support().child(
@@ -1028,81 +1113,56 @@ impl Workspace {
                                 .text_color(cx.theme().warning),
                             ))
                         },
-                    )
+                    );
+                let controls = div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .ml_auto()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .ml_auto()
-                            .child(
-                                Button::new("wrap-review")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::TextWrap)
-                                    .label(if node.review_wrap {
-                                        "Wrapping lines"
-                                    } else {
-                                        "Unwrapped lines"
-                                    })
-                                    .selected(node.review_wrap)
-                                    .tooltip(if node.review_wrap {
-                                        "Show long lines without wrapping"
-                                    } else {
-                                        "Wrap long lines"
-                                    })
-                                    .accessibility_label("Wrap long lines")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(node) = this.node_workspaces.get_mut(&key) {
-                                            node.review_wrap = !node.review_wrap;
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("split-review")
-                                    .ghost()
-                                    .small()
-                                    .icon(match node.review_mode {
-                                        DiffMode::Split => IconName::Columns2,
-                                        _ => IconName::Rows3,
-                                    })
-                                    .label(match node.review_mode {
-                                        DiffMode::Split => "Split view",
-                                        _ => "Unified view",
-                                    })
-                                    .selected(node.review_mode == DiffMode::Split)
-                                    .tooltip(match node.review_mode {
-                                        DiffMode::Split => "Switch to unified view",
-                                        _ => "Switch to split view",
-                                    })
-                                    .accessibility_label("Toggle split view")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(node) = this.node_workspaces.get_mut(&key) {
-                                            node.review_mode = match node.review_mode {
-                                                DiffMode::Split => DiffMode::Unified,
-                                                _ => DiffMode::Split,
-                                            };
-                                            if let Load::Ready(review) = &node.review {
-                                                for (_, diff) in &review.files {
-                                                    diff.update(cx, |diff, cx| {
-                                                        diff.set_mode(node.review_mode, cx)
-                                                    });
-                                                }
+                        Button::new("wrap-review")
+                            .ghost()
+                            .small()
+                            .label("Wrap")
+                            .selected(node.review_wrap)
+                            .accessibility_label("Wrap long lines")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(node) = this.node_workspaces.get_mut(&key) {
+                                    node.review_wrap = !node.review_wrap;
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .children(
+                        [
+                            ("unified-review", "Unified", DiffMode::Unified),
+                            ("split-review", "Split", DiffMode::Split),
+                        ]
+                        .map(|(id, label, mode)| {
+                            Button::new(id)
+                                .ghost()
+                                .small()
+                                .label(label)
+                                .selected(node.review_mode == mode)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(node) = this.node_workspaces.get_mut(&key) {
+                                        node.review_mode = mode;
+                                        if let Load::Ready(review) = &node.review {
+                                            for (_, diff) in &review.files {
+                                                diff.update(cx, |diff, cx| diff.set_mode(mode, cx));
                                             }
-                                            cx.notify();
                                         }
-                                    })),
-                            ),
+                                        cx.notify();
+                                    }
+                                }))
+                        }),
                     );
                 if review.files.is_empty() {
-                    header = header.child(
+                    return root.child(header).child(
                         message("This revision has no file changes.")
                             .text_color(cx.theme().muted_foreground),
                     );
-                    return root.child(header);
                 }
-                let root = root.child(header);
                 let additions = review
                     .files
                     .iter()
@@ -1119,7 +1179,7 @@ impl Workspace {
                     .filter(|(_, diff)| diff.read(cx).files()[0].is_binary())
                     .count();
                 let files = review.files.len();
-                let Some((_, diff)) = review.files.get(review.selected) else {
+                let Some((path, diff)) = review.files.get(review.selected) else {
                     return root.child(
                         message("Select a changed file to review.")
                             .text_color(cx.theme().muted_foreground),
@@ -1142,6 +1202,7 @@ impl Workspace {
                                 .border_r_1()
                                 .border_color(cx.theme().border)
                                 .pr_2()
+                                .child(header)
                                 .child(
                                     div()
                                         .px_1()
@@ -1299,7 +1360,14 @@ impl Workspace {
                                 .flex_1()
                                 .min_h_0()
                                 .min_w_0()
-                                .child(Diff::new(diff).soft_wrap(node.review_wrap)),
+                                .flex()
+                                .flex_col()
+                                .child(div().flex().items_center().flex_wrap().gap_1().px_2()
+                                    .child(div().flex_1().min_w_0().text_xs().text_ellipsis().child(path.clone()))
+                                    .child(controls))
+                                .child(div().flex_1().min_h_0().child(
+                                    Diff::new(diff).header_visible(false).soft_wrap(node.review_wrap),
+                                )),
                         ),
                 )
             }
