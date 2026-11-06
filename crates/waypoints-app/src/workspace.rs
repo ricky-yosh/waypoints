@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::input::{
+    Copy as CopyText, Cut as CutText, Paste as PasteText, Redo as RedoText,
+    SelectAll as SelectAllText, Undo as UndoText,
+};
 use gpui_kit::base::{StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, TitleBar,
@@ -15,8 +19,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Axis, Context, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, PathPromptOptions, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, actions, div, px, relative,
+    KeyBinding, Menu, MenuItem, OsAction, ParentElement as _, PathPromptOptions, Render, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, actions, div, px, relative,
 };
 use waypoints_backend::{Client, Config};
 use waypoints_core::storage::{Workflow, WorkflowGraph};
@@ -37,6 +41,8 @@ pub(crate) use node_workspace::ScreenshotSurface;
 const DEFAULT_WORKBENCH_FRACTION: f32 = 0.74;
 const MIN_WORKBENCH_FRACTION: f32 = 0.55;
 const MAX_WORKBENCH_FRACTION: f32 = 0.92;
+// Navigation stays visibly subordinate to the work area at every window size.
+const MAX_SIDEBAR_FRACTION: f32 = 0.4;
 
 struct ResizeWorkbench;
 
@@ -83,6 +89,42 @@ pub(crate) fn init(cx: &mut App) {
     ]);
 }
 
+/// Build the application menus from the current workspace state.
+pub(crate) fn menus(sidebar_visible: bool, has_selection: bool) -> Vec<Menu> {
+    let mut menus = Vec::new();
+    if cfg!(target_os = "macos") {
+        menus.push(Menu::new("Waypoints").items([
+            MenuItem::action("Settings…", crate::OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Waypoints", crate::Quit),
+        ]));
+    }
+    let mut file = vec![
+        MenuItem::action("Add Project…", AddProject),
+        MenuItem::action("Close Window", crate::CloseWindow),
+    ];
+    if !cfg!(target_os = "macos") {
+        file.push(MenuItem::separator());
+        file.push(MenuItem::action("Settings…", crate::OpenSettings));
+        file.push(MenuItem::action("Quit Waypoints", crate::Quit));
+    }
+    menus.push(Menu::new("File").items(file));
+    menus.push(Menu::new("Edit").items([
+        MenuItem::os_action("Undo", UndoText, OsAction::Undo),
+        MenuItem::os_action("Redo", RedoText, OsAction::Redo),
+        MenuItem::separator(),
+        MenuItem::os_action("Cut", CutText, OsAction::Cut),
+        MenuItem::os_action("Copy", CopyText, OsAction::Copy),
+        MenuItem::os_action("Paste", PasteText, OsAction::Paste),
+        MenuItem::os_action("Select All", SelectAllText, OsAction::SelectAll),
+    ]));
+    menus.push(Menu::new("View").items([
+        MenuItem::action("Show Projects Sidebar", ToggleSidebar).checked(sidebar_visible),
+        MenuItem::action("Refresh Project", RefreshProject).disabled(!has_selection),
+    ]));
+    menus
+}
+
 enum Load<T, E = String> {
     Idle,
     Loading,
@@ -99,6 +141,8 @@ pub(crate) struct Workspace {
     expanded_workbench: bool,
     open_workbenches: BTreeSet<(u64, i64)>,
     workbench_focus: FocusHandle,
+    sidebar_toggle_focus: FocusHandle,
+    add_project_focus: FocusHandle,
     graph_cameras: BTreeMap<(u64, i64), workflow_graph::GraphCamera>,
     graph_preview: Option<i64>,
     graph_preview_keyboard: bool,
@@ -222,6 +266,8 @@ impl Workspace {
             expanded_workbench: false,
             open_workbenches: BTreeSet::new(),
             workbench_focus: cx.focus_handle(),
+            sidebar_toggle_focus: cx.focus_handle(),
+            add_project_focus: cx.focus_handle(),
             graph_cameras: BTreeMap::new(),
             graph_preview: None,
             graph_preview_keyboard: false,
@@ -249,7 +295,7 @@ impl Workspace {
                 .selected_nodes
                 .get(&key)
                 .and_then(|id| self.graph_node_focus.get(&(key.0, key.1, *id)))
-                .unwrap_or(&self.focus);
+                .unwrap_or(&self.sidebar_toggle_focus);
             focus.focus(window, cx);
             cx.notify();
         }
@@ -270,7 +316,7 @@ impl Workspace {
             .min_w_0()
             .bg(cx.theme().popover.blend(cx.theme().muted.opacity(0.42)))
             .border_1()
-            .border_color(cx.theme().ring.opacity(0.62))
+            .border_color(cx.theme().border)
             .when(self.expanded_workbench, |frame| frame.inset_0())
             .when(!self.expanded_workbench, |frame| {
                 frame
@@ -325,10 +371,14 @@ impl Workspace {
                     }
                     Ok(Ok(None)) => {}
                     Ok(Err(error)) => {
-                        this.path_error = Some(format!("Couldn’t open folder picker: {error}"))
+                        this.path_error = Some(format!(
+                            "Couldn’t open the folder picker: {error}. Try again."
+                        ))
                     }
                     Err(error) => {
-                        this.path_error = Some(format!("Couldn’t open folder picker: {error}"))
+                        this.path_error = Some(format!(
+                            "Couldn’t open the folder picker: {error}. Try again."
+                        ))
                     }
                 }
                 cx.notify();
@@ -358,11 +408,18 @@ impl Workspace {
         .detach();
     }
 
+    fn refresh_menus(&self, cx: &mut Context<Self>) {
+        cx.set_menus(menus(self.sidebar_visible, self.state.selected.is_some()));
+    }
+
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         if !self.sidebar_visible {
-            self.focus.focus(window, cx);
+            // Keep keyboard focus on a visible control when the focused
+            // sidebar row is hidden with its panel.
+            self.sidebar_toggle_focus.focus(window, cx);
         }
+        self.refresh_menus(cx);
         cx.notify();
     }
 
@@ -392,6 +449,7 @@ impl Workspace {
                     return;
                 }
                 if selected != this.state.selected {
+                    this.refresh_menus(cx);
                     this.graph_revision += 1;
                     this.graph = Load::Idle;
                 } else if let Some((project, workflow)) =
@@ -424,6 +482,7 @@ impl Workspace {
         self.graph_preview_keyboard = false;
         self.graph_preview_task = None;
         self.state.selected = Some((project, id));
+        self.refresh_menus(cx);
         self.graph_revision += 1;
         let revision = self.graph_revision;
         self.graph = Load::Loading;
@@ -486,6 +545,7 @@ impl Workspace {
         for id in ids {
             self.refresh(id, cx);
         }
+        self.refresh_menus(cx);
         cx.notify();
     }
 
@@ -525,6 +585,10 @@ impl Workspace {
     }
 
     pub(crate) fn show_preferences_error(&mut self, error: String, cx: &mut Context<Self>) {
+        let mut error = error.trim_end().to_owned();
+        if !matches!(error.chars().last(), Some('.' | '!' | '?')) {
+            error.push('.');
+        }
         self.preferences_error = Some(error);
         cx.notify();
     }
@@ -696,17 +760,19 @@ impl Render for Workspace {
                                         });
                                     }),
                             )
+                            .separator()
                             .item(
                                 PopupMenuItem::new("Remove from Sidebar").on_click(
                                     move |_, window, cx| {
                                         let _ = remove.update(cx, |this, cx| {
-                                            this.focus.focus(window, cx);
+                                            this.sidebar_toggle_focus.focus(window, cx);
                                             let selected = this.state.selected;
                                             this.state.remove(project_id);
                                             if selected != this.state.selected {
                                                 this.graph_revision += 1;
                                                 this.graph = Load::Idle;
                                             }
+                                            this.refresh_menus(cx);
                                             cx.notify();
                                         });
                                     },
@@ -735,10 +801,10 @@ impl Render for Workspace {
                         let (status, diagnostic) = match error {
                             ProjectLoadError::DirectoryUnavailable(path) => (
                                 "Folder unavailable",
-                                format!("The project folder is unavailable at {}", path.display()),
+                                format!("The project folder is unavailable at {}.", path.display()),
                             ),
                             ProjectLoadError::Backend(error) => {
-                                ("Couldn’t load workflows", error.clone())
+                                ("Couldn’t load workflows", format!("{error}."))
                             }
                         };
                         contents.child(
@@ -746,28 +812,58 @@ impl Render for Workspace {
                                 .id(("project-error", project_id))
                                 .role(Role::Status)
                                 .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_x_1()
-                                .pl_2()
-                                .child(message(status).text_color(cx.theme().muted_foreground))
+                                .flex_col()
+                                .gap_1()
+                                .px_2()
+                                .py_1()
                                 .child(
-                                    Button::new(("retry-project", project_id))
-                                        .xsmall()
-                                        .ghost()
-                                        .label("Retry")
-                                        .tooltip(diagnostic)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.refresh(project_id, cx);
-                                        })),
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_x_1()
+                                        .child(
+                                            message(status).text_color(cx.theme().muted_foreground),
+                                        )
+                                        .child(
+                                            Button::new(("retry-project", project_id))
+                                                .xsmall()
+                                                .ghost()
+                                                .label("Retry")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.refresh(project_id, cx);
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .whitespace_normal()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(diagnostic),
                                 ),
                         )
                     }
                     Load::Ready(workflows) if workflows.is_empty() => contents.child(
-                        message("No active workflows")
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .px_2()
                             .py_1()
-                            .text_color(cx.theme().muted_foreground),
+                            .child(
+                                message("No active workflows")
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                Button::new(("refresh-empty", project_id))
+                                    .xsmall()
+                                    .ghost()
+                                    .label("Refresh")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.refresh(project_id, cx);
+                                    })),
+                            ),
                     ),
                     Load::Ready(workflows) => {
                         for workflow in workflows {
@@ -815,7 +911,7 @@ impl Render for Workspace {
                 let prompt = match selected_project.map(|project| &project.workflows) {
                     Some(Load::Error(_)) => "Retry the project to reopen the selected workflow.",
                     Some(_) => "Opening the selected workflow…",
-                    None if self.state.projects.is_empty() => "Add a project to see its workflows.",
+                    None if self.state.projects.is_empty() => "No projects open yet.",
                     None => "Select a workflow to see its nodes and dependencies.",
                 };
                 detail = detail.child(
@@ -824,6 +920,13 @@ impl Render for Workspace {
                         .role(Role::Status)
                         .text_color(cx.theme().muted_foreground),
                 );
+                if self.state.projects.is_empty() {
+                    detail = detail.child(
+                        Button::new("empty-add-project")
+                            .label("Add project…")
+                            .on_click(cx.listener(|this, _, _, cx| this.open_project(cx))),
+                    );
+                }
             }
             Load::Loading => {
                 detail = detail.child(
@@ -852,18 +955,28 @@ impl Render for Workspace {
             .size_full()
             .min_h_0()
             .gap_2()
-            .p_2()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
-            .child(div().px_2().text_sm().child("Projects"))
             .child(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Projects"),
+            )
+            .child(
+                // The scroll container owns the panel's trailing edge; the
+                // inset belongs to its content so the scrollbar stays at the
+                // split boundary.
                 div()
                     .id("workflows")
                     .test_support()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(list),
+                    .child(div().px_2().pb_2().child(list)),
             );
         let detail = if let (Some(key), Load::Ready(graph)) = (self.state.selected, &self.graph) {
             let selected = self.selected_nodes.get(&key).copied();
@@ -917,13 +1030,16 @@ impl Render for Workspace {
                 .min_w_0()
                 .min_h_0()
                 .overflow_y_scroll()
-                .p_4()
-                .child(detail)
+                .child(div().p_4().child(detail))
         };
         let weak = cx.entity().downgrade();
-        let max_sidebar_width =
-            (f32::from(window.viewport_size().width) - MIN_DETAIL_WIDTH - DIVIDER_HIT_MARGIN)
-                .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let viewport_width = f32::from(window.viewport_size().width);
+        let available_max =
+            (viewport_width - MIN_DETAIL_WIDTH - DIVIDER_HIT_MARGIN).max(MIN_SIDEBAR_WIDTH);
+        // Keep the detail pane's surplus even when the window is wide.
+        let max_sidebar_width = (viewport_width * MAX_SIDEBAR_FRACTION)
+            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+            .min(available_max);
         let content = if self.sidebar_visible {
             h_resizable("workspace-split")
                 .on_resize(move |state, _, cx| {
@@ -969,6 +1085,7 @@ impl Render for Workspace {
                     .icon(IconName::PanelLeft)
                     .accessibility_label(toggle_label)
                     .tooltip(toggle_label)
+                    .track_focus(&self.sidebar_toggle_focus)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
             .child(
@@ -976,8 +1093,9 @@ impl Render for Workspace {
                     .small()
                     .ghost()
                     .icon(IconName::Plus)
-                    .accessibility_label("Add Project…")
-                    .tooltip("Add Project…")
+                    .accessibility_label("Add project…")
+                    .tooltip("Add project…")
+                    .track_focus(&self.add_project_focus)
                     .on_click(cx.listener(|this, _, _, cx| this.open_project(cx))),
             )
             .child(div().ml_auto().px_2().text_sm().child("Waypoints"));
@@ -990,6 +1108,7 @@ impl Render for Workspace {
                 .border_b_1()
                 .border_color(cx.theme().sidebar_border)
                 .bg(cx.theme().sidebar)
+                .text_color(cx.theme().sidebar_foreground)
                 .into_any_element()
         };
         div()
@@ -1007,9 +1126,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &AddProject, _, cx| {
                 this.open_project(cx);
             }))
-            .on_action(cx.listener(|this, _: &RefreshProject, window, cx| {
+            .on_action(cx.listener(|this, _: &RefreshProject, _, cx| {
                 if let Some((project, _)) = this.state.selected {
-                    this.focus.focus(window, cx);
                     this.refresh(project, cx);
                 }
             }))
@@ -1024,20 +1142,23 @@ impl Render for Workspace {
                         .on_close(move |_, window, cx| {
                             let _ = workspace.update(cx, |workspace, cx| {
                                 workspace.path_error = None;
-                                workspace.focus.focus(window, cx);
+                                workspace.add_project_focus.focus(window, cx);
                                 cx.notify();
                             });
                         }),
                 )
             })
             .when_some(self.preferences_error.clone(), |this, error| {
-                this.child(
-                    Alert::warning(
-                        "preferences-error",
-                        format!("Workspace preferences: {error}"),
-                    )
-                    .small(),
-                )
+                let workspace = cx.entity().downgrade();
+                this.child(Alert::warning("preferences-error", error).small().on_close(
+                    move |_, window, cx| {
+                        let _ = workspace.update(cx, |workspace, cx| {
+                            workspace.preferences_error = None;
+                            workspace.sidebar_toggle_focus.focus(window, cx);
+                            cx.notify();
+                        });
+                    },
+                ))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(content))
     }

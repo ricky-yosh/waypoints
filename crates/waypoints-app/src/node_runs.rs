@@ -1,25 +1,27 @@
 use std::{cell::Cell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
 
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Disableable as _;
+use gpui_kit::base::{Disableable as _, StyledExt as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState, Textarea, TextareaState},
     message_scroller::{MessageScroller, MessageScrollerState},
+    spinner::Spinner,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Div, Entity, InteractiveElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-    Window, div,
+    AnyWindowHandle, App, AppContext as _, Context, Div, Entity, Focusable as _,
+    InteractiveElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _, WeakEntity, Window, div,
 };
 use waypoints_backend::{Client, Permission, RunEvent, RunEventOrigin, RunStatus};
 use waypoints_core::run::{RunState, SnapshotState};
 
 use super::{
     NodeKey, Target, Workspace, current_review_changed, markdown_with_copy, message, run_backend,
-    run_state_visual,
+    run_state_visual, semantic_status,
 };
 
 const OUTPUT_LIMIT: usize = 128 * 1024;
@@ -289,7 +291,7 @@ impl RunPanel {
         let executable =
             cx.new(|cx| InputState::new(window, cx).placeholder("/absolute/path/to/agent-acp"));
         let follow_up =
-            cx.new(|cx| TextareaState::new(window, cx).placeholder("Follow-up instructions"));
+            cx.new(|cx| TextareaState::new(window, cx).placeholder("Describe the next step…"));
         Self {
             executable,
             follow_up,
@@ -683,8 +685,9 @@ impl Workspace {
                                             Some("Some earlier output was omitted.");
                                     }
                                 } else {
-                                    panel.output_notice =
-                                        Some("The backend no longer has this run’s live output.");
+                                    panel.output_notice = Some(
+                                        "Live output is no longer available. The saved run is still in History.",
+                                    );
                                 }
                                 keep_polling
                             }
@@ -794,9 +797,10 @@ impl Workspace {
                 .filter(|status| status.run.id == run_id)
                 .and_then(|status| status.permission.as_ref())
                 .filter(|request| request.id == request_id);
-            let dialog = dialog.title(format!("Permission for run #{run_id}"));
             let Some(request) = request else {
-                return dialog.child(message("This request is no longer pending."));
+                return dialog
+                    .title("Permission request unavailable")
+                    .child(message("This request is no longer pending."));
             };
             let title = request
                 .tool_call
@@ -804,16 +808,47 @@ impl Workspace {
                 .and_then(|value| value.as_str())
                 .unwrap_or("Agent tool request")
                 .to_owned();
-            let call = format!("{:#}", request.tool_call);
-            let mut content = div().flex().flex_col().gap_2().child(message(title)).child(
-                div()
-                    .id("permission-tool-call")
-                    .max_h_48()
-                    .overflow_y_scroll()
-                    .child(message(call)),
-            );
+            let dialog = dialog.title(format!(
+                "Review “{title}” for node #{}?",
+                key.2
+            ));
+            let summary = tool_summary(&request.tool_call);
+            let mut content = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(message(format!(
+                    "Run #{run_id} is paused until you answer. This decision applies only to this request."
+                )))
+                .when_some(summary, |content, summary| {
+                    content.child(
+                        message(summary)
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                })
+                .child(
+                    div()
+                        .id("permission-tool-call")
+                        .max_h_48()
+                        .overflow_y_scroll()
+                        .child(markdown_with_copy(
+                            format!("permission-tool-call-{run_id}-{request_id}"),
+                            json_markdown(&request.tool_call),
+                        )),
+                );
             if let Some(error) = panel.and_then(|panel| panel.error.clone()) {
-                content = content.child(message(error));
+                content = content.child(semantic_status(cx.theme().danger, message(error), cx));
+            }
+            if panel.is_some_and(|panel| panel.busy) {
+                content = content.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Spinner::new().xsmall())
+                        .child(message("Sending response…")),
+                );
             }
             dialog.child(content).footer(
                 div()
@@ -823,7 +858,8 @@ impl Workspace {
                     .child(
                         Button::new("dismiss-permission")
                             .ghost()
-                            .label("Dismiss")
+                            .label("Cancel")
+                            .disabled(panel.is_some_and(|panel| panel.busy))
                             .on_click({
                                 let dialog_open = dialog_open.clone();
                                 move |_, window, cx| {
@@ -864,6 +900,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let weak = cx.entity().downgrade();
+        let follow_up_handle = self
+            .node_workspaces
+            .get(&key)
+            .map(|node| node.run.follow_up.focus_handle(cx));
         window.open_dialog(cx, move |dialog, _, cx| {
             let dialog = dialog.title(format!("Continue run #{run_id}"));
             let view = weak.upgrade();
@@ -882,9 +922,24 @@ impl Workspace {
             dialog
                 .child(message("Send follow-up instructions to the saved session."))
                 .child(
-                    Textarea::new(&panel.follow_up)
-                        .h(gpui_kit::rems(6.))
-                        .aria_label("Follow-up instructions"),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id("follow-up-dialog-label")
+                                .test_support()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Follow-up instructions"),
+                        )
+                        .child(
+                            Textarea::new(&panel.follow_up)
+                                .h(gpui_kit::rems(6.))
+                                .aria_label("Follow-up instructions"),
+                        ),
                 )
                 .footer(
                     div()
@@ -902,6 +957,7 @@ impl Workspace {
                                 .primary()
                                 .icon(IconName::Play)
                                 .label("Continue session")
+                                .loading(panel.busy)
                                 .disabled(panel.busy)
                                 .on_click(move |_, window, cx| {
                                     let _ = submit_weak.update(cx, |this, cx| {
@@ -912,6 +968,11 @@ impl Workspace {
                         ),
                 )
         });
+        if let Some(handle) = follow_up_handle {
+            // open_dialog focuses its container; put the caret in the only field
+            // instead so the first keyboard step is not a Tab.
+            handle.focus(window, cx);
+        }
     }
 
     pub(in crate::workspace) fn graph_activity(
@@ -978,9 +1039,8 @@ impl Workspace {
                         .outline()
                         .small()
                         .icon(IconName::ShieldAlert)
-                        .label(format!("Node #{}", key.2))
+                        .label(format!("Review permission · Node #{}…", key.2))
                         .accessibility_label(format!("Review permission for node #{}", key.2))
-                        .tooltip(format!("Permission needed for node #{}", key.2))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_permission(key, id, &permission, window, cx)
                         })),
@@ -1005,11 +1065,26 @@ impl Workspace {
             .border_color(cx.theme().border)
             .pt_2()
             .child(
-                div().flex_1().min_w_0().child(
-                    Textarea::new(&panel.follow_up)
-                        .h(gpui_kit::rems(2.5))
-                        .aria_label("Follow-up instructions"),
-                ),
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id("follow-up-label")
+                            .test_support()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Follow-up instructions"),
+                    )
+                    .child(
+                        Textarea::new(&panel.follow_up)
+                            .h(gpui_kit::rems(2.5))
+                            .aria_label("Follow-up instructions"),
+                    ),
             )
             .child(
                 Button::new("continue-run")
@@ -1017,6 +1092,7 @@ impl Workspace {
                     .small()
                     .icon(IconName::Send)
                     .label("Continue session")
+                    .loading(panel.busy)
                     .disabled(panel.busy)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.continue_node_run(key, run, cx)),
@@ -1085,11 +1161,24 @@ impl Workspace {
         } else {
             toolbar = toolbar
                 .child(
-                    div().w_56().max_w_full().child(
-                        Input::new(&panel.executable)
-                            .small()
-                            .aria_label("ACP executable"),
-                    ),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Agent executable"),
+                        )
+                        .child(
+                            div().w_56().max_w_full().child(
+                                Input::new(&panel.executable)
+                                    .small()
+                                    .aria_label("Agent executable"),
+                            ),
+                        ),
                 )
                 .child(
                     Button::new("start-run")
@@ -1097,6 +1186,7 @@ impl Workspace {
                         .small()
                         .icon(IconName::Play)
                         .label("Start run")
+                        .loading(panel.busy)
                         .disabled(panel.busy || unsaved || node.saving)
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.start_node_run(key, None, cx)),
@@ -1105,12 +1195,25 @@ impl Workspace {
         }
         if let Some(status) = status {
             let id = status.run.id;
+            let mut trailing = div().flex().items_center().gap_2().ml_auto();
+            if let Some(permission) = &status.permission {
+                let permission = permission.clone();
+                trailing = trailing.child(
+                    Button::new("review-permission")
+                        .outline()
+                        .small()
+                        .icon(IconName::ShieldAlert)
+                        .label("Review permission…")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_permission(key, id, &permission, window, cx)
+                        })),
+                );
+            }
             if running {
-                toolbar = toolbar.child(
+                trailing = trailing.child(
                     Button::new("cancel-run")
                         .outline()
                         .small()
-                        .ml_auto()
                         .icon(IconName::Square)
                         .label("Cancel run")
                         .disabled(
@@ -1126,7 +1229,7 @@ impl Workspace {
                 );
             }
             if !panel.polling {
-                toolbar = toolbar.child(
+                trailing = trailing.child(
                     Button::new("refresh-run")
                         .ghost()
                         .small()
@@ -1136,11 +1239,9 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _, _, cx| this.poll_node_run(key, cx))),
                 );
             }
+            toolbar = toolbar.child(trailing);
         }
         let mut summary = div().flex().items_center().flex_wrap().gap_2();
-        if status.is_none() {
-            summary = summary.child(message("A fresh run requires a saved assignment, a ready workspace, and an ACP executable."));
-        }
         let mut follow_up = None;
         if unsaved {
             summary = summary.child(message(
@@ -1148,7 +1249,11 @@ impl Workspace {
             ));
         }
         if let Some(error) = &panel.error {
-            summary = summary.child(message(error.clone()));
+            summary = summary.child(semantic_status(
+                cx.theme().danger,
+                message(error.clone()),
+                cx,
+            ));
         }
         if let Some(status) = status {
             let id = status.run.id;
@@ -1180,7 +1285,11 @@ impl Workspace {
                     );
                 }
                 SnapshotState::Failed { detail } => {
-                    summary = summary.child(message(format!("Snapshot failed. {detail}")))
+                    summary = summary.child(semantic_status(
+                        cx.theme().danger,
+                        message(format!("Snapshot failed. {detail}")),
+                        cx,
+                    ))
                 }
                 _ if !running => summary = summary.child(message("No saved snapshot.")),
                 _ => {}
@@ -1204,32 +1313,55 @@ impl Workspace {
             );
         }
         let workspace = cx.weak_entity();
+        let empty_message = if running {
+            "Waiting for the agent…"
+        } else if status.is_some() {
+            "No output was recorded for this run."
+        } else {
+            "No output yet. Start a run to see its output."
+        };
         root.child(toolbar)
             .child(summary)
-            .child(
-                MessageScroller::new(
-                    "run-output",
-                    panel.output_scroll.clone(),
-                    move |index, _, cx| {
-                        let Some(entity) = workspace.upgrade() else {
-                            return div();
-                        };
-                        let Some(node) = entity.read(cx).node_workspaces.get(&key) else {
-                            return div();
-                        };
-                        let transcript = &node.run.output;
-                        let Some(block) = transcript.blocks.get(index) else {
-                            return div();
-                        };
-                        let replay = begins_replay(&transcript.blocks, index);
-                        render_activity(block, replay, key, workspace.clone(), cx)
-                    },
+            .when(panel.output.blocks.is_empty(), |root| {
+                root.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .text_color(cx.theme().muted_foreground)
+                        .when(running, |empty| empty.child(Spinner::new().xsmall()))
+                        .child(message(empty_message)),
                 )
-                .with_jump_button_label("Jump to latest")
-                .with_row_style(gpui_kit::StyleRefinement::default().pb_2().px_0())
-                .flex_1()
-                .min_h_0(),
-            )
+            })
+            .when(!panel.output.blocks.is_empty(), |root| {
+                root.child(
+                    MessageScroller::new(
+                        "run-output",
+                        panel.output_scroll.clone(),
+                        move |index, _, cx| {
+                            let Some(entity) = workspace.upgrade() else {
+                                return div();
+                            };
+                            let Some(node) = entity.read(cx).node_workspaces.get(&key) else {
+                                return div();
+                            };
+                            let transcript = &node.run.output;
+                            let Some(block) = transcript.blocks.get(index) else {
+                                return div();
+                            };
+                            let replay = begins_replay(&transcript.blocks, index);
+                            render_activity(block, replay, key, workspace.clone(), cx)
+                        },
+                    )
+                    .with_jump_button_label("Jump to latest")
+                    .with_row_style(gpui_kit::StyleRefinement::default().pb_2().px_0())
+                    .flex_1()
+                    .min_h_0(),
+                )
+            })
             .children(follow_up)
     }
 }
@@ -1303,8 +1435,8 @@ fn render_activity(
     }
     let (title, summary, status, details) = match &block.activity {
         Activity::Text(_, _) => unreachable!("text activities return above"),
-        Activity::Tool { id, fields } => {
-            let title = tool_heading(fields, id);
+        Activity::Tool { fields, .. } => {
+            let title = tool_heading(fields, "Tool call");
             let status = fields
                 .get("status")
                 .and_then(serde_json::Value::as_str)
@@ -1353,16 +1485,12 @@ fn render_activity(
         .min_w_0()
         .child(toggle);
     if let Some(status) = status {
-        header = header.child(
-            div()
-                .text_xs()
-                .text_color(match status.as_str() {
-                    "failed" | "error" => cx.theme().danger,
-                    "pending" | "in_progress" | "running" => cx.theme().warning,
-                    _ => cx.theme().muted_foreground,
-                })
-                .child(status.replace('_', " ")),
-        );
+        let label = div().text_xs().child(activity_status_label(&status));
+        header = header.child(match status.as_str() {
+            "failed" | "error" => semantic_status(cx.theme().danger, label, cx),
+            "pending" | "in_progress" | "running" => semantic_status(cx.theme().warning, label, cx),
+            _ => label.text_color(cx.theme().muted_foreground),
+        });
     }
     if let Some(summary) = summary {
         header = header.child(
@@ -1391,12 +1519,33 @@ fn render_activity(
 }
 
 fn tool_heading(fields: &serde_json::Value, fallback: &str) -> String {
+    if let Some(title) = fields.get("title").and_then(serde_json::Value::as_str) {
+        return title.to_owned();
+    }
     fields
-        .get("title")
+        .get("kind")
         .and_then(serde_json::Value::as_str)
-        .or_else(|| fields.get("kind").and_then(serde_json::Value::as_str))
-        .unwrap_or(fallback)
-        .to_owned()
+        .map_or_else(|| fallback.to_owned(), humanize_identifier)
+}
+
+/// Turn a protocol identifier into a short sentence-case label.
+fn humanize_identifier(value: &str) -> String {
+    let text = value.trim().replace('_', " ");
+    let mut characters = text.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
+}
+
+fn activity_status_label(status: &str) -> String {
+    match status {
+        "pending" => "Pending".into(),
+        "in_progress" | "running" => "In progress".into(),
+        "completed" => "Completed".into(),
+        "failed" | "error" => "Failed".into(),
+        other => humanize_identifier(other),
+    }
 }
 
 fn tool_summary(fields: &serde_json::Value) -> Option<String> {
@@ -1424,7 +1573,7 @@ fn tool_summary(fields: &serde_json::Value) -> Option<String> {
         return Some(truncate_summary(command));
     }
     if let Some(kind) = fields.get("kind").and_then(serde_json::Value::as_str) {
-        return Some(kind.to_owned());
+        return Some(humanize_identifier(kind));
     }
     if let Some(items) = fields.get("content").and_then(serde_json::Value::as_array) {
         let text = items.iter().find_map(|item| {
@@ -1495,7 +1644,7 @@ fn other_heading(update: &serde_json::Value) -> (String, Option<String>) {
                 .filter(|title| !title.trim().is_empty());
             ("Session details updated".into(), title.map(str::to_owned))
         }
-        _ => (name.replace('_', " "), None),
+        _ => (humanize_identifier(name), None),
     }
 }
 
@@ -1949,6 +2098,7 @@ mod tests {
             });
             window.render_frame(cx);
             assert!(window.find("continue-run").visible());
+            assert!(window.find("follow-up-label").visible());
         })
         .expect("workspace window remains open");
 
@@ -1969,9 +2119,20 @@ mod tests {
             window.click("continue-session", cx);
             assert!(window.find("submit-follow-up").visible());
             assert!(window.find("cancel-follow-up").visible());
+            assert!(window.find("follow-up-dialog-label").visible());
             assert!(
                 window.find_all("input-state").len() > inputs_before,
                 "the follow-up dialog contains an instructions field"
+            );
+            window.render_frame(cx);
+            let follow_up = workspace.read(cx).node_workspaces[&(1, 7, 1)]
+                .run
+                .follow_up
+                .clone();
+            let follow_up_focus = gpui_kit::Focusable::focus_handle(&follow_up, cx);
+            assert!(
+                follow_up_focus.is_focused(window),
+                "the follow-up dialog focuses its only field"
             );
             window.press("escape", cx);
             assert!(window.try_find("submit-follow-up").is_none());

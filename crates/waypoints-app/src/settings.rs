@@ -1,13 +1,15 @@
-use gpui_kit::base::StyledExt as _;
+use gpui_kit::base::{StyledExt as _, TestSupportExt as _};
 use std::cell::Cell;
 
 use gpui_kit::component::{
     ActiveTheme as _, Theme, ThemeMode,
     radio::{Radio, RadioGroup},
+    scroll::ScrollableElement as _,
 };
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, IntoElement, ParentElement as _, Render,
-    Styled as _, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions, div, px, size,
+    AnyWindowHandle, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions, div, px, size,
 };
 
 use crate::{OpenSettings, preferences::Appearance, workspace::Workspace};
@@ -41,8 +43,8 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
                 title: Some("Waypoints Settings".into()),
                 ..Default::default()
             }),
-            window_bounds: Some(WindowBounds::centered(size(px(440.), px(240.)), cx)),
-            window_min_size: Some(size(px(360.), px(200.))),
+            window_bounds: Some(WindowBounds::centered(size(px(480.), px(320.)), cx)),
+            window_min_size: Some(size(px(360.), px(240.))),
             ..Default::default()
         };
         let workspace = workspace.clone();
@@ -65,41 +67,69 @@ impl Render for Settings {
             .map(|view| view.read(cx).appearance);
         div()
             .size_full()
-            .p_6()
-            .flex()
-            .flex_col()
-            .gap_3()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(div().text_lg().font_semibold().child("Appearance"))
             .child(
                 div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Choose how Waypoints looks. System follows your device appearance."),
-            )
-            .child(
-                RadioGroup::new("appearance")
-                    .children(APPEARANCES.map(|(_, label)| Radio::new(label).label(label)))
-                    .selected_index(
-                        APPEARANCES
-                            .iter()
-                            .position(|(mode, _)| Some(*mode) == appearance),
-                    )
-                    .on_change(cx.listener(|this, &index, window, cx| {
-                        let (appearance, _) = APPEARANCES[index];
-                        if this
-                            .workspace
-                            .update(cx, |workspace, cx| {
-                                workspace.appearance = appearance;
-                                apply_appearance(appearance, window, cx);
-                                cx.notify();
-                            })
-                            .is_ok()
-                        {
-                            cx.notify();
-                        }
-                    })),
+                    .id("settings-content")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(
+                        div()
+                            .p_6()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .id("appearance-heading")
+                                            .test_support()
+                                            .role(Role::Heading)
+                                            .aria_level(2)
+                                            .text_lg()
+                                            .font_semibold()
+                                            .child("Appearance"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Choose how Waypoints looks. System follows your device appearance."),
+                                    ),
+                            )
+                            .child(
+                                RadioGroup::new("appearance")
+                                    .children(APPEARANCES.map(|(_, label)| {
+                                        Radio::new(label)
+                                            .label(label)
+                                            .accessibility_label(format!("Appearance: {label}"))
+                                    }))
+                                    .selected_index(
+                                        APPEARANCES
+                                            .iter()
+                                            .position(|(mode, _)| Some(*mode) == appearance),
+                                    )
+                                    .on_change(cx.listener(|this, &index, window, cx| {
+                                        let (appearance, _) = APPEARANCES[index];
+                                        if this
+                                            .workspace
+                                            .update(cx, |workspace, cx| {
+                                                workspace.appearance = appearance;
+                                                apply_appearance(appearance, window, cx);
+                                                cx.notify();
+                                            })
+                                            .is_ok()
+                                        {
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    ),
             )
     }
 }

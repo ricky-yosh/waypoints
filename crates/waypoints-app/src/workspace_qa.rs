@@ -305,7 +305,7 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
     eprintln!("NATIVE_QA_OK permissions");
 
     // History: a fresh run is announced without reloading the list.
-    window.click("History", cx);
+    window.within("node-tabs").click(3_usize, cx);
     workspace.update(cx, |workspace, cx| {
         let node = workspace
             .node_workspaces
@@ -344,7 +344,7 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
     eprintln!("NATIVE_QA_OK history freshness");
 
     // Changes: review target, diff controls, and stale-current notice.
-    window.click("Changes", cx);
+    window.within("node-tabs").click(2_usize, cx);
     window.render_frame(cx);
     require(window, "wrap-review", "diff wrap control")?;
     require(window, "split-review", "diff split control")?;
@@ -369,7 +369,7 @@ fn drive(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Re
     });
     window.render_frame(cx);
     require(window, "graph-node-1", "workflow graph node")?;
-    window.click("Output", cx);
+    window.within("node-tabs").click(1_usize, cx);
     window.render_frame(cx);
     require(window, "continue-session", "compact continue trigger")?;
     window.click("continue-session", cx);

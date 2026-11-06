@@ -38,10 +38,10 @@ impl PreferencesWriter {
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(Request::Flush(sender))
-            .map_err(|_| "Workspace writer stopped.".to_owned())?;
-        receiver
-            .await
-            .map_err(|_| "Workspace writer stopped before saving.".to_owned())?
+            .map_err(|_| "Couldn’t save settings because saving stopped.".to_owned())?;
+        receiver.await.map_err(|_| {
+            "Couldn’t save settings because saving stopped before it finished.".to_owned()
+        })?
     }
 }
 
@@ -68,7 +68,7 @@ async fn write_requests(
             .transpose()
             .map(|_| ())
             .map_err(|error| {
-                let message = format!("Couldn’t save workspace preferences: {error:#}");
+                let message = format!("Couldn’t save settings: {error:#}");
                 let _ = errors.send(message.clone());
                 message
             });

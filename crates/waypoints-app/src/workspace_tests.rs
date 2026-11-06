@@ -1,6 +1,6 @@
 use super::*;
 
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{Bounds, TestAppContext, WindowBounds, WindowOptions, size};
 
 pub(super) fn workflow(project: &str, id: i64) -> Workflow {
@@ -53,6 +53,32 @@ pub(super) fn open_workspace(
 }
 
 #[gpui_kit::test]
+fn empty_workspace_offers_a_visible_add_project_action(cx: &mut TestAppContext) {
+    let (handle, _workspace) = cx.update(|cx| {
+        gpui_kit::init(cx);
+        init(cx);
+        gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    Default::default(),
+                    size(px(900.), px(700.)),
+                ))),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| cx.new(|cx| Workspace::new(window, cx)),
+        )
+        .expect("open empty workspace test window")
+    });
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("empty-add-project").visible());
+    })
+    .expect("workspace window remains open");
+}
+
+#[gpui_kit::test]
 fn sidebar_shortcut_preserves_selection_and_restores_focus(cx: &mut TestAppContext) {
     let (handle, workspace) = open_workspace(cx);
     cx.update_window(handle, |_, window, cx| {
@@ -66,7 +92,7 @@ fn sidebar_shortcut_preserves_selection_and_restores_focus(cx: &mut TestAppConte
         window.press(shortcut, cx);
         assert!(window.try_find("workflow-1-7").is_none());
         assert_eq!(workspace.read(cx).state.selected, Some((1, 7)));
-        assert!(workspace.read(cx).focus.is_focused(window));
+        assert!(workspace.read(cx).sidebar_toggle_focus.is_focused(window));
         window.click("toggle-sidebar", cx);
         assert!(window.find("workflow-1-7").visible());
         assert_eq!(workspace.read(cx).state.selected, Some((1, 7)));
@@ -126,17 +152,17 @@ fn project_expansion_and_removal_keep_navigation_consistent(cx: &mut TestAppCont
         assert!(window.find("workflow-1-7").visible());
         window.click(("project-menu", 2_u64), cx);
         let mut menu = window.within("popup-menu");
-        assert_eq!(menu.find(1usize).label(), Some("Remove from Sidebar"));
-        menu.click(1usize, cx);
+        assert_eq!(menu.find(2usize).label(), Some("Remove from Sidebar"));
+        menu.click(2usize, cx);
         assert!(window.try_find("workflow-2-8").is_none());
         assert_eq!(workspace.read(cx).state.selected, Some((1, 7)));
         window.click(("project-menu", 1_u64), cx);
         let mut menu = window.within("popup-menu");
-        assert_eq!(menu.find(1usize).label(), Some("Remove from Sidebar"));
-        menu.click(1usize, cx);
+        assert_eq!(menu.find(2usize).label(), Some("Remove from Sidebar"));
+        menu.click(2usize, cx);
         assert_eq!(workspace.read(cx).state.selected, None);
         assert!(matches!(workspace.read(cx).graph, Load::Idle));
-        assert!(workspace.read(cx).focus.is_focused(window));
+        assert!(workspace.read(cx).sidebar_toggle_focus.is_focused(window));
     })
     .expect("workspace window remains open");
 }
@@ -194,6 +220,14 @@ fn settings_opens_once_and_updates_workspace_appearance(cx: &mut TestAppContext)
     });
     cx.update_window(settings, |_, window, cx| {
         window.render_frame(cx);
+        assert_eq!(
+            window.find("appearance-heading").role(),
+            Some(gpui_kit::Role::Heading)
+        );
+        assert_eq!(
+            window.find_by_label("Appearance: System").role(),
+            Some(gpui_kit::Role::RadioButton)
+        );
         let mut choices = window.within("appearance");
         assert_eq!(choices.find(0usize).checked(), Some(true));
         choices.click(2usize, cx);
@@ -441,30 +475,30 @@ fn floating_workbench_restores_size_focus_and_draft(cx: &mut TestAppContext) {
         install_graph_fixture(&workspace, cx);
         window.render_frame(cx);
         let graph = window.find("graph-node-1").bounds();
-        assert!(window.try_find("Assignment").is_none());
+        assert!(window.try_find("node-tabs").is_none());
 
         window.click("graph-node-1", cx);
         window.render_frame(cx);
-        let floating = window.find("Assignment").bounds();
+        let floating = window.find("node-tabs").bounds();
         let divider = window.find("workbench-resize").bounds().center();
         window.drag(divider, divider - gpui_kit::point(px(0.), px(32.)), cx);
         window.render_frame(cx);
-        let resized = window.find("Assignment").bounds();
+        let resized = window.find("node-tabs").bounds();
         assert!(resized.top() < floating.top());
         assert_eq!(window.find("graph-node-1").bounds(), graph);
 
         window.click("expand-workbench", cx);
         window.render_frame(cx);
-        assert!(window.find("Assignment").bounds().top() < resized.top());
+        assert!(window.find("node-tabs").bounds().top() < resized.top());
         window.click("expand-workbench", cx);
         window.render_frame(cx);
-        assert_eq!(window.find("Assignment").bounds(), resized);
+        assert_eq!(window.find("node-tabs").bounds(), resized);
 
         window.click("input-state", cx);
         window.input(" Local draft", cx);
         window.press("escape", cx);
         window.render_frame(cx);
-        assert!(window.try_find("Assignment").is_none());
+        assert!(window.try_find("node-tabs").is_none());
         assert_eq!(window.find("graph-node-1").bounds(), graph);
         assert!(workspace.read(cx).graph_node_focus[&(1, 7, 1)].is_focused(window));
 
@@ -480,7 +514,7 @@ fn floating_workbench_restores_size_focus_and_draft(cx: &mut TestAppContext) {
 
         window.press("enter", cx);
         window.render_frame(cx);
-        assert_eq!(window.find("Assignment").bounds(), resized);
+        assert_eq!(window.find("node-tabs").bounds(), resized);
         assert!(
             workspace
                 .read(cx)

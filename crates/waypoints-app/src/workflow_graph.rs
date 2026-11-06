@@ -7,6 +7,7 @@ use gpui_kit::base::{Disableable as _, Popup, StyledExt as _, TestSupportExt as 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    scroll::ScrollableElement as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -17,7 +18,10 @@ use gpui_kit::{
 use waypoints_core::run::{Run, RunState, SnapshotState};
 use waypoints_core::storage::{Node, WorkflowGraph};
 
-use super::{DismissGraphPreview, InspectGraphNode, Workspace, node_workspace::run_state_visual};
+use super::{
+    DismissGraphPreview, InspectGraphNode, Workspace,
+    node_workspace::{run_state_visual, semantic_status},
+};
 
 const CARD_WIDTH: f32 = 13.;
 const COLUMN_GAP: f32 = 2.5;
@@ -186,9 +190,12 @@ impl Workspace {
                 Button::new("graph-zoom-reset")
                     .ghost()
                     .small()
-                    .label(format!("{}%", ZOOM_LEVELS[zoom]))
-                    .accessibility_label(format!("Graph zoom {}%. Reset zoom", ZOOM_LEVELS[zoom]))
-                    .tooltip("Reset graph zoom")
+                    .label(format!("Reset zoom · {}%", ZOOM_LEVELS[zoom]))
+                    .accessibility_label(format!(
+                        "Graph zoom {}%. Reset to 100%",
+                        ZOOM_LEVELS[zoom]
+                    ))
+                    .tooltip("Reset graph zoom to 100%.")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_graph_zoom(key, DEFAULT_ZOOM, cx)
                     })),
@@ -330,6 +337,8 @@ impl Workspace {
                     .size_full()
                     .overflow_scroll()
                     .track_scroll(&camera.scroll)
+                    .vertical_scrollbar(&camera.scroll)
+                    .horizontal_scrollbar(&camera.scroll)
                     .flex()
                     .flex_col()
                     .child(
@@ -500,13 +509,20 @@ impl Workspace {
                     ),
             )
             .child(
+                // Keep the semantic hue in the dot and tint while the label
+                // stays on the normal foreground for readable contrast.
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .when(style.show_detail, |badge| badge.ml_4())
                     .rounded_full()
-                    .px_1()
+                    .px_1p5()
+                    .py_0p5()
                     .text_xs()
-                    .text_color(color)
+                    .text_color(cx.theme().foreground)
                     .bg(color.opacity(0.12))
+                    .child(div().w_1p5().h_1p5().rounded_full().flex_none().bg(color))
                     .child(phase),
             )
             .when_some(detail, |card, text| {
@@ -520,18 +536,26 @@ impl Workspace {
                 )
             })
             .when_some(recent, |card, text| {
-                card.child(
-                    div()
-                        .w_full()
-                        .text_xs()
-                        .text_color(recent_color)
-                        .text_ellipsis()
-                        .child(text),
-                )
+                if recent_color == foreground {
+                    card.child(
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .text_color(foreground)
+                            .text_ellipsis()
+                            .child(text),
+                    )
+                } else {
+                    card.child(div().w_full().text_xs().child(semantic_status(
+                        recent_color,
+                        div().min_w_0().text_ellipsis().child(text),
+                        cx,
+                    )))
+                }
             });
 
         let button = Button::new(SharedString::from(format!("graph-node-{id}")))
-            .outline()
+            .ghost()
             .track_focus(&self.graph_node_focus[&(key.0, key.1, id)])
             .selected(style.selected)
             .size_full()
@@ -550,7 +574,9 @@ impl Workspace {
             .bg(cx.theme().popover.blend(cx.theme().muted.opacity(0.32)))
             .border_1()
             .border_color(if style.selected {
-                cx.theme().info
+                // Selection emphasis uses the primary role; info is reserved
+                // for informational status.
+                cx.theme().primary
             } else {
                 cx.theme().background.opacity(0.)
             })
@@ -597,16 +623,22 @@ impl Workspace {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let snapshot = match activity.run.map(|run| &run.snapshot) {
-            Some(SnapshotState::Saved { revision }) => Some(format!(
-                "Recorded revision · {}",
-                super::node_workspace::short_id(&revision.commit_id)
-            )),
-            Some(SnapshotState::Failed { detail }) => {
-                Some(format!("Revision recording failed · {detail}"))
+        let (snapshot, snapshot_color) = match activity.run.map(|run| &run.snapshot) {
+            Some(SnapshotState::Saved { revision }) => (
+                Some(format!(
+                    "Recorded revision · {}",
+                    super::node_workspace::short_id(&revision.commit_id)
+                )),
+                muted,
+            ),
+            Some(SnapshotState::Failed { detail }) => (
+                Some(format!("Revision recording failed · {detail}")),
+                cx.theme().danger,
+            ),
+            Some(SnapshotState::NotRecorded) => {
+                (Some("No revision recorded for this run".into()), muted)
             }
-            Some(SnapshotState::NotRecorded) => Some("No revision recorded for this run".into()),
-            _ => None,
+            _ => (None, muted),
         };
         let assignment = assignment.trim();
         let body = assignment
@@ -662,6 +694,16 @@ impl Workspace {
                             .px_2()
                             .bg(cx.theme().muted.opacity(0.6))
                             .child(activity.phase()),
+                    )
+                    .child(
+                        Button::new(("graph-preview-close", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .accessibility_label("Close preview")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dismiss_graph_preview(id, window, cx);
+                            })),
                     ),
             )
             .child(
@@ -709,29 +751,31 @@ impl Workspace {
                                 )
                             })
                             .when_some(activity.failed_tool.as_ref(), |section, title| {
-                                section.child(
+                                section.child(semantic_status(
+                                    cx.theme().danger,
                                     div()
                                         .text_xs()
-                                        .text_color(cx.theme().danger)
                                         .line_clamp(2)
                                         .child(format!("Tool failed · {title}")),
-                                )
+                                    cx,
+                                ))
                             })
                             .when_some(activity.permission.as_ref(), |section, title| {
-                                section.child(
+                                section.child(semantic_status(
+                                    cx.theme().warning,
                                     div()
                                         .text_xs()
-                                        .text_color(cx.theme().warning)
                                         .line_clamp(2)
                                         .child(format!("Permission requested · {title}")),
-                                )
+                                    cx,
+                                ))
                             }),
                     )
                     .when_some(snapshot, |preview, text| {
                         preview.child(
                             div()
                                 .text_xs()
-                                .text_color(muted)
+                                .text_color(snapshot_color)
                                 .border_t_1()
                                 .border_color(cx.theme().border)
                                 .pt_2()
@@ -739,6 +783,12 @@ impl Workspace {
                                 .child(text),
                         )
                     }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Shift+Enter opens this preview."),
             )
             .child(
                 div().flex().justify_end().child(

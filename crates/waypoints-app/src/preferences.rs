@@ -179,7 +179,7 @@ mod path_encoding {
                 {
                     let _ = windows_wide;
                     Err(serde::de::Error::custom(
-                        "Windows path cannot be decoded on this platform",
+                        "The Windows path cannot be decoded on this platform.",
                     ))
                 }
             }
@@ -196,12 +196,12 @@ fn preferences_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("WAYPOINTS_WORKSPACE_FILE") {
         let path = PathBuf::from(path);
         if !path.is_absolute() {
-            bail!("WAYPOINTS_WORKSPACE_FILE must be absolute");
+            bail!("The WAYPOINTS_WORKSPACE_FILE path must be absolute.");
         }
         return Ok(path);
     }
 
-    let base = dirs::config_dir().context("cannot determine the user configuration directory")?;
+    let base = dirs::config_dir().context("Couldn’t determine the configuration directory.")?;
     Ok(base.join("waypoints").join("workspace.json"))
 }
 
@@ -221,25 +221,27 @@ fn load_from(path: &Path) -> Result<WorkspacePreferences> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(WorkspacePreferences::default());
         }
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Couldn’t read {}", path.display()));
+        }
     };
     // Inspect the version before decoding the rest so future formats get a useful error.
     let header: VersionHeader = serde_json::from_slice(&bytes).with_context(|| {
         format!(
-            "malformed preferences at {}; repair or move the file",
+            "The preferences file at {} is malformed; repair or move it",
             path.display()
         )
     })?;
     let version = header.version;
     if version != VERSION {
         bail!(
-            "unsupported preferences version {version} in {}; use a compatible Waypoints version or move the file",
+            "The preferences file at {} has unsupported version {version}. Use a compatible Waypoints version or move the file.",
             path.display()
         );
     }
     let mut file: PreferencesFile = serde_json::from_slice(&bytes).with_context(|| {
         format!(
-            "malformed preferences at {}; repair or move the file",
+            "The preferences file at {} is malformed; repair or move it",
             path.display()
         )
     })?;
@@ -250,9 +252,13 @@ fn load_from(path: &Path) -> Result<WorkspacePreferences> {
 fn save_to(path: &Path, preferences: &WorkspacePreferences) -> Result<()> {
     let parent = path
         .parent()
-        .context("preferences path has no parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("creating preferences directory {}", parent.display()))?;
+        .context("The preferences path has no parent directory.")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "Couldn’t create the preferences directory {}",
+            parent.display()
+        )
+    })?;
     // Lock a separate, permanent inode: replacing the preferences file must not
     // let another cooperating process acquire a lock on a different inode.
     let lock_path = path.with_extension("lock");
@@ -261,9 +267,18 @@ fn save_to(path: &Path, preferences: &WorkspacePreferences) -> Result<()> {
         .create(true)
         .truncate(false)
         .open(&lock_path)
-        .with_context(|| format!("opening preferences lock {}", lock_path.display()))?;
-    lock.lock()
-        .with_context(|| format!("locking preferences at {}", lock_path.display()))?;
+        .with_context(|| {
+            format!(
+                "Couldn’t open the preferences lock at {}",
+                lock_path.display()
+            )
+        })?;
+    lock.lock().with_context(|| {
+        format!(
+            "Couldn’t lock the preferences file at {}",
+            lock_path.display()
+        )
+    })?;
     // A fallback to defaults after a load failure must not destroy the original file.
     load_from(path)?;
     let mut workspace = preferences.clone();
@@ -272,22 +287,26 @@ fn save_to(path: &Path, preferences: &WorkspacePreferences) -> Result<()> {
         version: VERSION,
         workspace,
     })
-    .context("serializing workspace preferences")?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("creating temporary preferences in {}", parent.display()))?;
+    .context("Couldn’t serialize workspace settings")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "Couldn’t create a temporary settings file in {}",
+            parent.display()
+        )
+    })?;
     temporary
         .write_all(&bytes)
-        .context("writing temporary preferences")?;
+        .context("Couldn’t write the temporary settings file")?;
     temporary
         .write_all(b"\n")
-        .context("writing temporary preferences")?;
+        .context("Couldn’t write the temporary settings file")?;
     temporary
         .as_file()
         .sync_all()
-        .context("syncing temporary preferences")?;
+        .context("Couldn’t sync the temporary settings file")?;
     temporary
         .persist(path)
-        .with_context(|| format!("replacing preferences at {}", path.display()))?;
+        .with_context(|| format!("Couldn’t replace the settings file at {}", path.display()))?;
     Ok(())
 }
 

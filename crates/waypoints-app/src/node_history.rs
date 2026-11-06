@@ -3,13 +3,14 @@ use gpui_kit::base::{Disableable as _, StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ClipboardItem, Context, Div, InteractiveElement as _, IntoElement as _,
     ListState, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, div, list, relative,
+    WeakEntity, div, list, px,
 };
 use waypoints_backend::{Client, RunStatus};
 use waypoints_core::{
@@ -19,10 +20,13 @@ use waypoints_core::{
 
 use super::{
     Load, NodeKey, NodeWorkspace, Tab, Target, Workspace, message, node_runs, run_backend,
-    run_state_visual, short_id,
+    run_state_visual, semantic_status, short_id,
 };
 
 const HISTORY_PAGE_SIZE: usize = 30;
+pub(super) const DEFAULT_HISTORY_LIST_WIDTH: f32 = 288.;
+const MIN_HISTORY_LIST_WIDTH: f32 = 220.;
+const MAX_HISTORY_LIST_WIDTH: f32 = 480.;
 
 type History = Load<(Vec<RunStatus>, Result<NodeRevisionPage, String>)>;
 
@@ -351,12 +355,19 @@ impl Workspace {
         key: NodeKey,
         node: &NodeWorkspace,
         root: Div,
+        window: &gpui_kit::Window,
         cx: &Context<Self>,
     ) -> Div {
         let page = match &node.history {
             Load::Ready((_, Ok(page))) => Some(page),
             _ => None,
         };
+        let list_width = f32::from(window.viewport_size().width);
+        let max_list_width =
+            (list_width * 0.42).clamp(MIN_HISTORY_LIST_WIDTH, MAX_HISTORY_LIST_WIDTH);
+        let list_width = node
+            .history_list_width
+            .clamp(MIN_HISTORY_LIST_WIDTH, max_list_width);
         let workspace = cx.weak_entity();
         let detail = history_detail(node);
         let selected = detail.as_ref().map(HistoryDetail::selection);
@@ -417,83 +428,107 @@ impl Workspace {
                 }),
         )
         .when_some(node.older_error.clone(), |root, error| {
-            root.child(message(error).text_color(cx.theme().danger))
+            root.child(semantic_status(
+                cx.theme().danger,
+                message(format!("Couldn’t load older revisions: {error}")),
+                cx,
+            ))
         })
-        .child(
-            div()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .child(
-                    div()
-                        .id("history-navigation")
-                        .test_support()
-                        .flex()
-                        .flex_col()
-                        .w_72()
-                        .max_w(relative(0.42))
-                        .min_h_0()
-                        .border_r_1()
-                        .border_color(cx.theme().border)
-                        .pr_2()
-                        .child(
-                            list(node.history_scroll.clone(), move |index, _, cx| {
-                                let Some(entity) = list_workspace.upgrade() else {
-                                    return div().into_any_element();
-                                };
-                                let Some(node) = entity.read(cx).node_workspaces.get(&key) else {
-                                    return div().into_any_element();
-                                };
-                                history_row(
-                                    index,
-                                    &node.history,
-                                    selected.as_ref(),
-                                    key,
-                                    list_workspace.clone(),
-                                    cx,
-                                )
-                                .into_any_element()
+        .child(div().flex().flex_1().min_h_0().min_w_0().child({
+            let split_workspace = cx.entity().downgrade();
+            h_resizable(SharedString::from(format!("history-split-{key:?}")))
+                .on_resize(move |state, _, cx| {
+                    if let Some(width) = state.read(cx).sizes().first().copied() {
+                        let width: f32 = width.into();
+                        split_workspace
+                            .update(cx, |this, cx| {
+                                if let Some(node) = this.node_workspaces.get_mut(&key) {
+                                    node.history_list_width = width;
+                                    cx.notify();
+                                }
                             })
-                            .flex_1()
-                            .min_h_0(),
-                        )
-                        .vertical_scrollbar(&node.history_scroll),
+                            .ok();
+                    }
+                })
+                .child(
+                    resizable_panel()
+                        .size(px(list_width))
+                        .size_range(px(MIN_HISTORY_LIST_WIDTH)..px(max_list_width))
+                        .fixed()
+                        .child(
+                            div()
+                                .id("history-navigation")
+                                .test_support()
+                                .flex()
+                                .flex_col()
+                                .w_full()
+                                .h_full()
+                                .min_h_0()
+                                .border_r_1()
+                                .border_color(cx.theme().border)
+                                .pr_2()
+                                .child(
+                                    list(node.history_scroll.clone(), move |index, _, cx| {
+                                        let Some(entity) = list_workspace.upgrade() else {
+                                            return div().into_any_element();
+                                        };
+                                        let Some(node) = entity.read(cx).node_workspaces.get(&key)
+                                        else {
+                                            return div().into_any_element();
+                                        };
+                                        history_row(
+                                            index,
+                                            &node.history,
+                                            selected.as_ref(),
+                                            key,
+                                            list_workspace.clone(),
+                                            cx,
+                                        )
+                                        .into_any_element()
+                                    })
+                                    .flex_1()
+                                    .min_h_0(),
+                                )
+                                .vertical_scrollbar(&node.history_scroll),
+                        ),
                 )
                 .child(
-                    div()
-                        .id("history-detail")
-                        .test_support()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .p_2()
-                        .overflow_y_scroll()
-                        .track_scroll(&node.history_detail_scroll)
-                        .when_some(detail, |panel, detail| match detail {
-                            HistoryDetail::Run(status) => panel
-                                .child(run_row(status, key, workspace.clone(), cx))
-                                .child(
-                                    div()
-                                        .pt_3()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .child("Run instructions"),
-                                )
-                                .child(
-                                    div()
-                                        .pt_1()
-                                        .text_sm()
-                                        .whitespace_normal()
-                                        .child(status.run.prompt.clone()),
-                                )
-                                .child(self.render_history_run_output(key, status.run.id, cx)),
-                            HistoryDetail::Revision(entry) => {
-                                panel.child(revision_row(entry, key, workspace, cx))
-                            }
-                        }),
-                ),
-        )
+                    resizable_panel().child(
+                        div()
+                            .id("history-detail")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .p_2()
+                            .overflow_y_scroll()
+                            .track_scroll(&node.history_detail_scroll)
+                            .vertical_scrollbar(&node.history_detail_scroll)
+                            .when_some(detail, |panel, detail| match detail {
+                                HistoryDetail::Run(status) => panel
+                                    .child(run_row(status, key, workspace.clone(), cx))
+                                    .child(
+                                        div()
+                                            .pt_3()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .child("Run instructions"),
+                                    )
+                                    .child(
+                                        div()
+                                            .pt_1()
+                                            .text_sm()
+                                            .whitespace_normal()
+                                            .child(status.run.prompt.clone()),
+                                    )
+                                    .child(self.render_history_run_output(key, status.run.id, cx)),
+                                HistoryDetail::Revision(entry) => {
+                                    panel.child(revision_row(entry, key, workspace, cx))
+                                }
+                            }),
+                    ),
+                )
+        }))
     }
 
     fn render_history_run_output(&self, key: NodeKey, run: i64, cx: &Context<Self>) -> Div {
@@ -549,8 +584,15 @@ fn history_row(
     cx: &App,
 ) -> Div {
     let (runs, revisions) = match history {
-        Load::Idle | Load::Loading => return message("Loading history…"),
-        Load::Error(error) => return message(error.clone()).text_color(cx.theme().danger),
+        Load::Idle | Load::Loading => return message("Loading history…").px_2(),
+        Load::Error(error) => {
+            return semantic_status(
+                cx.theme().danger,
+                message(format!("Couldn’t load history: {error}")),
+                cx,
+            )
+            .px_2();
+        }
         Load::Ready((runs, revisions)) => (runs, revisions),
     };
     if index == 0 {
@@ -559,7 +601,11 @@ fn history_row(
     let revision_heading = runs.len().max(1) + 1;
     if index < revision_heading {
         return runs.get(index - 1).map_or_else(
-            || message("No runs yet.").text_color(cx.theme().muted_foreground),
+            || {
+                message("No runs yet. Start one from the Output tab.")
+                    .px_2()
+                    .text_color(cx.theme().muted_foreground)
+            },
             |run| history_choice(HistoryDetail::Run(run), selected, key, workspace, cx),
         );
     }
@@ -574,10 +620,19 @@ fn history_row(
     }
     match revisions {
         Ok(page) => page.entries.get(index - revision_heading - 1).map_or_else(
-            || message("No native revisions.").text_color(cx.theme().muted_foreground),
+            || {
+                message("No revisions recorded yet. Runs save revisions as snapshots.")
+                    .px_2()
+                    .text_color(cx.theme().muted_foreground)
+            },
             |entry| history_choice(HistoryDetail::Revision(entry), selected, key, workspace, cx),
         ),
-        Err(error) => message(error.clone()).text_color(cx.theme().danger),
+        Err(error) => semantic_status(
+            cx.theme().danger,
+            message(format!("Couldn’t load revisions: {error}")),
+            cx,
+        )
+        .px_2(),
     }
 }
 
@@ -632,6 +687,9 @@ fn history_choice(
             .h_10()
             .selected(selected == Some(&selection))
             .accessibility_label(format!("{title}. {subtitle}"))
+            // The subtitle truncates in the narrow history column, so expose
+            // its full text on hover.
+            .tooltip(subtitle.clone())
             .child(
                 div()
                     .flex()
@@ -648,6 +706,7 @@ fn history_choice(
                             .child(
                                 div()
                                     .text_xs()
+                                    .font_family(cx.theme().mono_font_family.clone())
                                     .text_color(cx.theme().muted_foreground)
                                     .text_ellipsis()
                                     .child(subtitle),
@@ -791,15 +850,23 @@ fn revision_row(
         .flex_wrap()
         .gap_2()
         .text_color(cx.theme().muted_foreground)
-        .child(message(readable_timestamp(&entry.evolution.timestamp)));
+        .child(
+            message(readable_timestamp(&entry.evolution.timestamp))
+                .font_family(cx.theme().mono_font_family.clone()),
+        );
     if !operation.is_empty() && description != operation {
         metadata = metadata.child(message(operation));
     }
     if entry.is_current {
-        metadata = metadata.child(message("Current head").text_color(cx.theme().link));
+        // Selection emphasis, not a link: the label is not interactive.
+        metadata = metadata.child(message("Current head").text_color(cx.theme().primary));
     }
     if revision.conflicted {
-        metadata = metadata.child(message("Conflicts").text_color(cx.theme().warning));
+        metadata = metadata.child(semantic_status(
+            cx.theme().warning,
+            message("Conflicts"),
+            cx,
+        ));
     }
     if !entry.run_ids.is_empty() {
         metadata = metadata.child(message(

@@ -1,3 +1,5 @@
+use std::hash::{Hash as _, Hasher as _};
+
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::base::{Disableable as _, StyledExt as _};
 #[path = "node_history.rs"]
@@ -5,19 +7,20 @@ mod node_history;
 #[path = "node_runs.rs"]
 mod node_runs;
 
+#[cfg(feature = "native-qa")]
+use gpui_kit::Focusable as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, Theme,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonGroup, ButtonVariants as _},
     diff::{Diff, DiffFile, DiffFileStatus, DiffMode, DiffState},
     input::{Editor, EditorState},
+    tab::{Tab as TabItem, TabBar},
     text::TextView,
 };
 use gpui_kit::prelude::FluentBuilder as _;
-#[cfg(feature = "native-qa")]
-use gpui_kit::{App, Focusable as _};
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Div, Entity, Hsla, InteractiveElement as _,
+    App, AppContext as _, ClipboardItem, Context, Div, Entity, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Window, div, relative,
 };
@@ -77,6 +80,7 @@ pub(super) struct NodeWorkspace {
     history_scroll: gpui_kit::ListState,
     history_selection: Option<node_history::HistorySelection>,
     history_detail_scroll: ScrollHandle,
+    history_list_width: f32,
     history_stale: bool,
     history_generation: u64,
     loading_older: bool,
@@ -85,6 +89,24 @@ pub(super) struct NodeWorkspace {
 
 pub(super) fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
+}
+
+/// Inline semantic status: the hue lives in a small dot while the label keeps
+/// the normal foreground, so warning and danger text stay readable in both
+/// themes instead of relying on a saturated text color.
+pub(super) fn semantic_status(dot: Hsla, content: impl IntoElement, cx: &App) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .min_w_0()
+        .child(div().w_1p5().h_1p5().rounded_full().flex_none().bg(dot))
+        .child(
+            div()
+                .min_w_0()
+                .text_color(cx.theme().foreground)
+                .child(content),
+        )
 }
 
 fn target_label(target: &Target) -> String {
@@ -113,12 +135,26 @@ fn status_label(status: DiffFileStatus) -> &'static str {
     }
 }
 
+fn status_name(status: DiffFileStatus) -> &'static str {
+    match status {
+        DiffFileStatus::Added => "added",
+        DiffFileStatus::Deleted => "deleted",
+        DiffFileStatus::Modified => "modified",
+        DiffFileStatus::Renamed => "renamed",
+        DiffFileStatus::Copied => "copied",
+        DiffFileStatus::Unchanged => "unchanged",
+        DiffFileStatus::Conflicted => "conflicted",
+        _ => "changed",
+    }
+}
+
 pub(super) fn run_state_visual(state: &RunState, theme: &Theme) -> (IconName, Hsla) {
     match state {
         RunState::Completed => (IconName::CircleCheck, theme.success),
         RunState::Failed { .. } | RunState::Interrupted { .. } => (IconName::CircleX, theme.danger),
         RunState::AwaitingPermission => (IconName::ShieldAlert, theme.warning),
-        RunState::Running => (IconName::CirclePlay, theme.success),
+        // A run in flight is progress, not a successful outcome.
+        RunState::Running => (IconName::CirclePlay, theme.info),
         RunState::Starting | RunState::Finalizing | RunState::Cancelling => {
             (IconName::Clock, theme.info)
         }
@@ -127,12 +163,23 @@ pub(super) fn run_state_visual(state: &RunState, theme: &Theme) -> (IconName, Hs
     }
 }
 
-fn markdown_with_copy(id: impl Into<gpui_kit::ElementId>, text: String) -> TextView {
+fn markdown_with_copy(id: String, text: String) -> TextView {
+    let action_prefix = id.clone();
     TextView::markdown(id, text)
         .selectable(true)
-        .code_block_actions(|block, _, _cx| {
+        .code_block_actions(move |block, _, _cx| {
             let code = block.code();
-            Button::new("copy-code")
+            // Every code fence gets its own action identity; a shared id would
+            // make hover, focus, and accessibility state collide across blocks.
+            let suffix = block.span.map_or_else(
+                || {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    code.hash(&mut hasher);
+                    format!("{:x}", hasher.finish())
+                },
+                |span| format!("{}-{}", span.start, span.end),
+            );
+            Button::new(SharedString::from(format!("{action_prefix}-copy-{suffix}")))
                 .ghost()
                 .small()
                 .label("Copy")
@@ -532,13 +579,16 @@ impl Workspace {
                 review_mode: DiffMode::Unified,
                 review_files_scroll: ScrollHandle::new(),
                 history: Load::Idle,
+                // Initial row estimate; keep it on the window's rem scale so
+                // history starts at the right place when the base font zooms.
                 history_scroll: gpui_kit::ListState::new(
                     1,
                     gpui_kit::ListAlignment::Top,
-                    gpui_kit::px(400.),
+                    window.rem_size() * 25.,
                 ),
                 history_selection: None,
                 history_detail_scroll: ScrollHandle::new(),
+                history_list_width: node_history::DEFAULT_HISTORY_LIST_WIDTH,
                 history_stale: false,
                 history_generation: 0,
                 loading_older: false,
@@ -764,10 +814,10 @@ impl Workspace {
             return root;
         };
         let tabs = [
-            (IconName::FileText, "Assignment", Tab::Assignment),
-            (IconName::SquareTerminal, "Output", Tab::Output),
-            (IconName::GitCompareArrows, "Changes", Tab::Changes),
-            (IconName::FileClock, "History", Tab::History),
+            ("Assignment", Tab::Assignment),
+            ("Output", Tab::Output),
+            ("Changes", Tab::Changes),
+            ("History", Tab::History),
         ];
         let compact = node_runs::compact_follow_up(window);
         let compact_continue = node
@@ -820,7 +870,7 @@ impl Workspace {
                     })
                     .child(
                         Button::new("expand-workbench")
-                            .outline()
+                            .ghost()
                             .small()
                             .icon(if self.expanded_workbench {
                                 IconName::Minimize2
@@ -839,7 +889,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("close-workbench")
-                            .outline()
+                            .ghost()
                             .small()
                             .icon(IconName::X)
                             .label("Close")
@@ -850,24 +900,29 @@ impl Workspace {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
+                    .id("node-tabs")
+                    .test_support()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .pb_2()
-                    .children(tabs.into_iter().map(|(icon, label, tab)| {
-                        Button::new(label)
-                            .ghost()
-                            .small()
-                            .when(compact, |tab| tab.xsmall())
-                            .icon(icon)
-                            .label(label)
-                            .selected(node.tab == tab)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.open_tab(key, tab, cx)),
+                    .child(
+                        TabBar::new("node-tabbar")
+                            .pill()
+                            .when(compact, |bar| bar.xsmall())
+                            .selected_index(
+                                tabs.iter()
+                                    .position(|(_, tab)| *tab == node.tab)
+                                    .unwrap_or(0),
                             )
-                    })),
+                            .on_click(cx.listener(
+                                move |this: &mut Workspace, index: &usize, _, cx| {
+                                    if let Some((_, tab)) = tabs.get(*index).copied() {
+                                        this.open_tab(key, tab, cx);
+                                    }
+                                },
+                            ))
+                            .children(tabs.map(|(label, _)| TabItem::new().label(label))),
+                    ),
             );
         match node.tab {
             Tab::Assignment => self.render_node_assignment(key, node, root, cx).when_some(
@@ -876,7 +931,7 @@ impl Workspace {
             ),
             Tab::Output => self.render_run_panel(key, root, window, cx),
             Tab::Changes => self.render_node_changes(key, node, root, cx),
-            Tab::History => self.render_node_history(key, node, root, cx),
+            Tab::History => self.render_node_history(key, node, root, window, cx),
         }
     }
 
@@ -894,20 +949,31 @@ impl Workspace {
             .gap_2()
             .items_center()
             .flex_wrap()
-            .children(
-                [("Edit", false), ("Preview", true)].map(|(label, preview)| {
-                    Button::new(label)
-                        .ghost()
-                        .small()
-                        .label(label)
-                        .selected(node.assignment_preview == preview)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(node) = this.node_workspaces.get_mut(&key) {
-                                node.assignment_preview = preview;
-                                cx.notify();
-                            }
-                        }))
-                }),
+            .child(
+                // One segmented silhouette for the two view modes; the group
+                // supplies the shared boundary, corners, and pressed state.
+                div()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .bg(cx.theme().muted)
+                    .p_0p5()
+                    .child(ButtonGroup::new("assignment-mode").small().children(
+                        [("Edit", false), ("Preview", true)].map(|(label, preview)| {
+                            Button::new(label)
+                                .ghost()
+                                .rounded_sm()
+                                .label(label)
+                                .selected(node.assignment_preview == preview)
+                                .toggled(node.assignment_preview == preview)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(node) = this.node_workspaces.get_mut(&key) {
+                                        node.assignment_preview = preview;
+                                        cx.notify();
+                                    }
+                                }))
+                        }),
+                    )),
             )
             .child(
                 div()
@@ -919,7 +985,7 @@ impl Workspace {
                     } else if dirty {
                         "Unsaved changes"
                     } else {
-                        "Saved assignment"
+                        "Saved"
                     }),
             )
             .child(
@@ -940,12 +1006,13 @@ impl Workspace {
                         .items_center()
                         .flex_wrap()
                         .gap_2()
-                        .child(
+                        .child(semantic_status(
+                            cx.theme().warning,
                             message(
                                 "The saved assignment changed outside Waypoints. Your draft is preserved.",
-                            )
-                            .text_color(cx.theme().warning),
-                        )
+                            ),
+                            cx,
+                        ))
                         .child(
                             Button::new("load-external-assignment")
                                 .small()
@@ -971,7 +1038,11 @@ impl Workspace {
                 )
             })
             .when_some(node.save_error.clone(), |root, error| {
-                root.child(message(error).text_color(cx.theme().danger))
+                root.child(semantic_status(
+                    cx.theme().danger,
+                    message(format!("Couldn’t save assignment: {error}")),
+                    cx,
+                ))
             });
         if node.assignment_preview {
             root.child(
@@ -1035,25 +1106,27 @@ impl Workspace {
                         .small()
                         .icon(IconName::GitCommitHorizontal)
                         .label("Review current")
-                        .disabled(node.target == Target::Current)
+                        .disabled(node.target == Target::Current && !node.current_review_stale)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_review(key, Target::Current, cx)
                         })),
                 )
-                .child(
-                    Button::new("reload-review")
-                        .ghost()
-                        .small()
-                        .icon(IconName::RefreshCw)
-                        .tooltip("Reload this comparison target")
-                        .accessibility_label("Reload review")
-                        .disabled(matches!(node.review, Load::Loading))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(node) = this.node_workspaces.get(&key) {
-                                this.open_review(key, node.target.clone(), cx);
-                            }
-                        })),
-                ),
+                .when(!matches!(node.review, Load::Error(_)), |root| {
+                    root.child(
+                        Button::new("reload-review")
+                            .ghost()
+                            .small()
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Reload this comparison target")
+                            .accessibility_label("Reload review")
+                            .disabled(matches!(node.review, Load::Loading))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(node) = this.node_workspaces.get(&key) {
+                                    this.open_review(key, node.target.clone(), cx);
+                                }
+                            })),
+                    )
+                }),
         );
         match &node.review {
             Load::Idle | Load::Loading => root
@@ -1061,13 +1134,17 @@ impl Workspace {
                 .child(message("Loading changes…").text_color(cx.theme().muted_foreground)),
             Load::Error(error) => root
                 .child(div().font_semibold().child(target.clone()))
-                .child(message(error.clone()).text_color(cx.theme().danger))
+                .child(semantic_status(
+                    cx.theme().danger,
+                    message(format!("Couldn’t load changes: {error}")),
+                    cx,
+                ))
                 .child(
                     Button::new("retry-review")
                         .ghost()
                         .small()
                         .icon(IconName::RefreshCw)
-                        .label("Try again")
+                        .label("Retry")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(node) = this.node_workspaces.get(&key) {
                                 this.open_review(key, node.target.clone(), cx);
@@ -1094,26 +1171,45 @@ impl Workspace {
                                     .child(short_commit),
                             )
                             .accessibility_label("Copy revision ID")
-                            .tooltip(format!("Copy revision {commit}"))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(commit.clone()));
                             }),
                     )
                     .when(review.conflicted, |row| {
-                        row.child(message("Conflicts").text_color(cx.theme().warning))
+                        row.child(semantic_status(
+                            cx.theme().warning,
+                            message("Conflicts"),
+                            cx,
+                        ))
                     });
-                let root =
-                    root.when(
-                        node.target == Target::Current && node.current_review_stale,
-                        |row| {
-                            row.child(div().id("review-stale").test_support().child(
-                                message(
-                                    "The recorded revision changed. Reload to review the latest.",
-                                )
-                                .text_color(cx.theme().warning),
-                            ))
-                        },
-                    );
+                let root = root.when(
+                    node.target == Target::Current && node.current_review_stale,
+                    |row| {
+                        row.child(
+                            div()
+                                .id("review-stale")
+                                .test_support()
+                                .flex()
+                                .items_center()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(semantic_status(
+                                    cx.theme().warning,
+                                    message("The recorded revision changed."),
+                                    cx,
+                                ))
+                                .child(
+                                    Button::new("review-latest")
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Review latest")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_review(key, Target::Current, cx)
+                                        })),
+                                ),
+                        )
+                    },
+                );
                 let controls = div()
                     .flex()
                     .items_center()
@@ -1125,6 +1221,7 @@ impl Workspace {
                             .small()
                             .label("Wrap")
                             .selected(node.review_wrap)
+                            .toggled(node.review_wrap)
                             .accessibility_label("Wrap long lines")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(node) = this.node_workspaces.get_mut(&key) {
@@ -1133,29 +1230,46 @@ impl Workspace {
                                 }
                             })),
                     )
-                    .children(
-                        [
-                            ("unified-review", "Unified", DiffMode::Unified),
-                            ("split-review", "Split", DiffMode::Split),
-                        ]
-                        .map(|(id, label, mode)| {
-                            Button::new(id)
-                                .ghost()
-                                .small()
-                                .label(label)
-                                .selected(node.review_mode == mode)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(node) = this.node_workspaces.get_mut(&key) {
-                                        node.review_mode = mode;
-                                        if let Load::Ready(review) = &node.review {
-                                            for (_, diff) in &review.files {
-                                                diff.update(cx, |diff, cx| diff.set_mode(mode, cx));
-                                            }
-                                        }
-                                        cx.notify();
-                                    }
-                                }))
-                        }),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .bg(cx.theme().muted)
+                            .p_0p5()
+                            .child(
+                                ButtonGroup::new("review-mode").small().children(
+                                    [
+                                        ("unified-review", "Unified", DiffMode::Unified),
+                                        ("split-review", "Split", DiffMode::Split),
+                                    ]
+                                    .map(
+                                        |(id, label, mode)| {
+                                            Button::new(id)
+                                                .ghost()
+                                                .rounded_sm()
+                                                .label(label)
+                                                .selected(node.review_mode == mode)
+                                                .toggled(node.review_mode == mode)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if let Some(node) =
+                                                        this.node_workspaces.get_mut(&key)
+                                                    {
+                                                        node.review_mode = mode;
+                                                        if let Load::Ready(review) = &node.review {
+                                                            for (_, diff) in &review.files {
+                                                                diff.update(cx, |diff, cx| {
+                                                                    diff.set_mode(mode, cx)
+                                                                });
+                                                            }
+                                                        }
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                        },
+                                    ),
+                                ),
+                            ),
                     );
                 if review.files.is_empty() {
                     return root.child(header).child(
@@ -1208,6 +1322,7 @@ impl Workspace {
                                         .px_1()
                                         .pb_1()
                                         .text_xs()
+                                        .font_family(cx.theme().mono_font_family.clone())
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!(
                                             "{files} {} · +{additions} −{deletions}{}",
@@ -1277,7 +1392,8 @@ impl Workspace {
                                                     .tooltip(path.to_string())
                                                     .selected(review.selected == index)
                                                     .accessibility_label(format!(
-                                                        "Review {path}"
+                                                        "Review {path}, {}",
+                                                        status_name(status)
                                                     ))
                                                     .child(
                                                         div()
@@ -1314,6 +1430,11 @@ impl Workspace {
                                                                     .child(
                                                                         div()
                                                                             .text_xs()
+                                                                            .font_family(
+                                                                                cx.theme()
+                                                                                    .mono_font_family
+                                                                                    .clone(),
+                                                                            )
                                                                             .text_color(
                                                                                 cx.theme()
                                                                                     .muted_foreground,
@@ -1326,6 +1447,7 @@ impl Workspace {
                                                                 |row| {
                                                                     row.child(
                                                                         div()
+                                                                            .pl_5()
                                                                             .truncate()
                                                                             .text_xs()
                                                                             .text_color(
@@ -1363,7 +1485,7 @@ impl Workspace {
                                 .flex()
                                 .flex_col()
                                 .child(div().flex().items_center().flex_wrap().gap_1().px_2()
-                                    .child(div().flex_1().min_w_0().text_xs().text_ellipsis().child(path.clone()))
+                                    .child(div().flex_1().min_w_0().text_sm().font_medium().text_ellipsis().child(path.clone()))
                                     .child(controls))
                                 .child(div().flex_1().min_h_0().child(
                                     Diff::new(diff).header_visible(false).soft_wrap(node.review_wrap),

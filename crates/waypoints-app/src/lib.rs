@@ -11,15 +11,17 @@ pub fn run_native_qa() {
     workspace::qa::run();
 }
 
-use gpui_kit::component::{TitleBar, WindowExt as _};
+use gpui_kit::component::{
+    TitleBar, WindowExt as _, button::ButtonVariant, notification::Notification,
+};
 use gpui_kit::{
-    App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, Pixels, WindowBounds, WindowOptions,
-    actions, point, px, size,
+    App, AppContext as _, Bounds, KeyBinding, Pixels, WindowBounds, WindowOptions, actions, point,
+    px, size,
 };
 
 use preferences::{WindowGeometry, WorkspacePreferences};
 
-actions!(waypoints, [Quit, OpenSettings]);
+actions!(waypoints, [Quit, OpenSettings, CloseWindow]);
 
 const MIN_WINDOW_WIDTH: f32 = 720.0;
 const MIN_WINDOW_HEIGHT: f32 = 480.0;
@@ -43,21 +45,22 @@ pub fn run() {
             } else {
                 "ctrl-,"
             };
+            let close_key = if cfg!(target_os = "macos") {
+                "cmd-w"
+            } else {
+                "ctrl-w"
+            };
             cx.bind_keys([
                 KeyBinding::new(quit_key, Quit, None),
                 KeyBinding::new(settings_key, OpenSettings, None),
+                KeyBinding::new(close_key, CloseWindow, None),
             ]);
-            cx.set_menus([
-                Menu::new("Waypoints").items([
-                    MenuItem::action("Settings…", OpenSettings),
-                    MenuItem::action("Quit Waypoints", Quit),
-                ]),
-                Menu::new("File").items([MenuItem::action("Add Project…", workspace::AddProject)]),
-                Menu::new("View").items([
-                    MenuItem::action("Show/Hide Projects", workspace::ToggleSidebar),
-                    MenuItem::action("Refresh Selected Project", workspace::RefreshProject),
-                ]),
-            ]);
+            cx.set_menus(workspace::menus(true, false));
+            cx.on_action(|_: &CloseWindow, cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                }
+            });
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -73,7 +76,10 @@ pub fn run() {
                     .await;
                 let (preferences, error) = match loaded {
                     Ok(preferences) => (preferences, None),
-                    Err(error) => (WorkspacePreferences::default(), Some(format!("{error:#}"))),
+                    Err(error) => (
+                        WorkspacePreferences::default(),
+                        Some(format!("Couldn’t load settings: {error:#}")),
+                    ),
                 };
                 cx.update(|cx| {
                     let options = window_options(preferences.window_bounds, cx);
@@ -179,15 +185,24 @@ fn flush_then_quit(writer: persistence::PreferencesWriter, cx: &mut App) {
                 if let Some(handle) = window {
                     let _ = handle.update(cx, |_, window, cx| {
                         if !window.has_active_dialog(cx) {
+                            let detail = error.clone();
                             window.open_alert_dialog(cx, move |dialog, _, _| {
                                 dialog
-                                    .title("Quit without saving workspace?")
-                                    .description(format!("{error}\nProject files and saved workflows are unaffected. Keep Waypoints open to fix the problem, then quit again to retry."))
+                                    .title("Quit without saving?")
+                                    .description(format!("Changes to window layout, sidebar, selected project, and appearance since the last successful save will be lost. Project files and saved workflows are unaffected.\n\n{detail}\n\nKeep Waypoints open to fix the problem, then quit again to retry."))
                                     .confirm()
-                                    .ok_text("Quit Without Saving")
-                                    .cancel_text("Keep Open")
+                                    .ok_variant(ButtonVariant::Danger)
+                                    .ok_text("Quit without saving")
+                                    .cancel_text("Keep open")
                                     .on_ok(|_, _, cx| { cx.quit(); true })
                             });
+                        } else {
+                            window.push_notification(
+                                Notification::error(format!(
+                                    "{error} Keep Waypoints open and try again."
+                                )),
+                                cx,
+                            );
                         }
                     });
                 }
