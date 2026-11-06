@@ -9,7 +9,10 @@ native deletion with retained workspace folders,
 read-only native code review, paginated revision history and restore-impact inspection,
 an informational upstream-revision hint, and undoable prompt-only move/delete.
 Explicit recovery handles clear interrupted outcomes; ambiguous states remain
-blocked. The desktop app provides an initial readonly workflow browser.
+blocked. The desktop app provides a project/workflow sidebar, dependency graph,
+editable assignments, live agent output and controls, exact patch review, and
+native revision history. Workflow, native-change, and workspace provisioning
+still use the CLI.
 
 **V1 reflects native jj revisions and conflicts.** Users decide what changed
 assumptions require review or rerunning; a separate downstream-context-staleness
@@ -45,7 +48,7 @@ Stopping the backend preserves saved workflows. The next workflow command starts
 it again. See [backend and CLI usage](docs/11-backend-cli.md) for paths, isolated
 test data, the local protocol, and current limitations.
 
-## Try the desktop browser
+## Try the desktop app
 
 Start the backend with a workflow command, for example
 `cargo run -p waypoints-cli -- workflow list --project .`, then run
@@ -66,7 +69,14 @@ Unavailable saved folders remain visible for retry or removal. Invalid or newer
 preferences files produce a warning and are not overwritten; repair or move the
 file to allow preferences to save again.
 
-The browser is readonly, does not automatically start the backend, and uses the
+Select a graph node to open its floating workbench: edit and save its assignment,
+start or explicitly continue an eligible agent session, inspect live output,
+review exact patches, and browse run records and native revisions. Runs require
+an associated native change and a verified, ready workspace provisioned through
+the CLI. History browsing does not restore code. See
+[Working in the desktop app](docs/05-ui-and-diffs.md) for controls and limits.
+
+The app does not automatically start the backend and uses the
 CLI's default database and socket paths (including `XDG_STATE_HOME`); custom CLI
 `--database` and `--socket` options are not yet exposed in the GUI. An interrupted
 dependency operation is shown because saved edges may not reflect native state.
@@ -140,7 +150,7 @@ Waypoints turns a plan into a graph of assignments. A node can own one evolving
 jj change with many exact revisions, and its agent work can use fresh sessions or
 explicit continuation over ACP. Review diffs, branch parallel work, revisit an
 earlier revision, and see jj's resulting changes and conflicts. The headless
-implementation is Rust; the planned desktop client uses GPUI Kit. Codex is the
+implementation is Rust; the desktop client uses GPUI Kit. Codex is the
 manually validated adapter, not a guarantee that every ACP agent is supported.
 
 ## Documentation
@@ -152,7 +162,7 @@ manually validated adapter, not a guarantee that every ACP agent is supported.
 | [`02-architecture.md`](docs/02-architecture.md) | Ownership and scope decisions; explicitly labeled future sketches |
 | [`03-acp-and-agents.md`](docs/03-acp-and-agents.md) | Implemented ACP boundary versus protocol and adapter research |
 | [`04-jj-snapshots.md`](docs/04-jj-snapshots.md) | Evolving changes, exact revisions, native conflicts, and restoration |
-| [`05-ui-and-diffs.md`](docs/05-ui-and-diffs.md) | Future UI sketch and trustworthy diff presentation |
+| [`05-ui-and-diffs.md`](docs/05-ui-and-diffs.md) | Current desktop workflow, node workbench, exact diff presentation, and UI validation |
 | [`06-stack-and-storage.md`](docs/06-stack-and-storage.md) | Current stack, storage ownership, and optional prototype approach |
 | [`07-spikes-and-build-order.md`](docs/07-spikes-and-build-order.md) | Historical spikes, headless-first direction, and integration acceptance |
 | [`08-proa-and-web.md`](docs/08-proa-and-web.md) | Earlier research into an optional web side; not an adopted dependency |
@@ -180,8 +190,8 @@ manually validated adapter, not a guarantee that every ACP agent is supported.
 | Agent integration | ACP client, one adapter per agent, no custom agent loop |
 | Code history | One evolving jj change per node, many exact revisions; workspaces allocated on demand |
 | Native feedback | Reflect jj changes/conflicts; no inferred downstream-context-staleness state for v1 |
-| Diff viewing | Headless exact-revision review implemented; inline GUI review and editor handoff pending; no custom multibuffer |
-| UI | GPUI Kit (`gpui-kit`); initial readonly desktop browser; see [current stack](docs/06-stack-and-storage.md#gpui) |
+| Diff viewing | Headless and GUI exact-revision review implemented; editor handoff pending; no custom multibuffer |
+| UI | GPUI Kit (`gpui-kit`); graph and node workbench backed by the shared API; see [desktop workflow](docs/05-ui-and-diffs.md) and [current stack](docs/06-stack-and-storage.md#gpui) |
 | Storage | Backend-owned Turso with plain SQL; SQLite migration and backup procedures are not implemented |
 | Prototype | React/TypeScript/React Flow is an optional design experiment, not a required build stage |
 | Web / mobile | Optional, undecided; Proa is a candidate for a web side |

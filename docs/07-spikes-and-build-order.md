@@ -29,7 +29,10 @@ contracts rather than an old research target as the implementation specification
 
 ## Build order
 
-**Current decision: core and CLI first, GUI later.** This supersedes the earlier requirement to include a node UI in the first usable slice.
+**Build sequence: core and CLI first, then the desktop client.** This superseded
+the earlier requirement to include a node UI in the first usable slice. The
+desktop graph and node workbench are now implemented; see the
+[desktop workflow](05-ui-and-diffs.md) for the current boundary.
 
 The shared backend remains the workflow engine. The GUI must use the same API,
 not implement its own native editing, storage, or execution lifecycle.
@@ -78,7 +81,8 @@ every step is available today. Individual feature tests do not replace it.
   Real-agent three-parent/conflicted integration and editing existing merge-parent
   sets remain separate work.
 
-The initial readonly GUI uses the backend and supports explicit refresh. End-to-end
+The desktop app uses the backend for assignment editing, runs, review, and history,
+and supports explicit project refresh. End-to-end
 acceptance must still verify CLI edits appearing in the GUI through that refresh,
 not a second local store or workflow engine.
 
@@ -86,7 +90,7 @@ No MCP adapter, transcript archive, or durable notification replay is required. 
 
 ## Open questions
 
-- How should the GUI expose revision browsing, ordinary/confirmed downstream restoration and native retention limits without implying permanent storage or automatic reruns?
+- Beyond implemented revision browsing, how should the GUI expose ordinary/confirmed downstream restoration and native retention limits without implying permanent storage or automatic reruns?
 - Does the Claude ACP adapter emit diff content for edits?
 - Which agents in practice support resume, load, or fork, and does a session survive a change of working directory?
 - Does Zed show a phase's diff correctly in a colocated jj repo?

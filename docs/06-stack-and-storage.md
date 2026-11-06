@@ -2,16 +2,21 @@
 
 ## Rust core
 
-Workflow logic, storage, and jj integration live in a core library with no UI dependency. A local backend hosts that library and exposes the JSON-RPC API used by the CLI and intended for the GUI. The GUI must use the backend client, not shell out to CLI workflow commands or open the store directly. The backend owns database access and coordinates Waypoints-initiated operations; GUI integration is not implemented.
+Workflow logic, storage, and jj integration live in a core library with no UI dependency. A local backend hosts that library and exposes the JSON-RPC API used by both the CLI and desktop app. The GUI uses the backend client, not CLI workflow subprocesses or direct store access. The backend owns database access and coordinates Waypoints-initiated operations.
 
 The CLI is the interface for human scripting and agents with terminal access; no MCP adapter is planned. Keep workflow metadata durable, but leave conversations and transcripts in existing harnesses. Current clients poll bounded run events and refresh saved state after reconnect; subscriptions and durable event replay are not implemented or required. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli) for ownership and the [current status map](20-core-backend-status.md) for implemented boundaries.
 
 ## GPUI
 
-The app manifest selects `gpui-kit`, pinned to 0.8.1 with inspector support.
+The app manifest selects `gpui-kit`, pinned to 0.9.0 with GPUI Fast, inspector,
+and syntect support.
 It reexports GPUI and provides the component layer; do not add separate GPUI or
-`gpui-component` dependencies by copying older research examples. The current
-app executable is still a placeholder, not a backend-connected desktop client.
+`gpui-component` dependencies by copying older research examples. The desktop
+app is backend-connected and provides a project/workflow sidebar, dependency
+graph, and floating node workbench for assignments, output, changes, and history.
+Workflow, native-change, and workspace provisioning and code restoration remain
+CLI operations. See [Working in the desktop app](05-ui-and-diffs.md) for controls
+and limits, and [vendor notes](../vendor/README.md) for local framework patches.
 Use the installed GPUI Kit coding/design guides and verify APIs against the pin.
 
 ## Storage: Turso

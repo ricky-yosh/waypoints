@@ -83,6 +83,22 @@ multiple project folders. Clients never open the store directly.
 - **Recorded references versus retention:** stored native commit IDs and session
   IDs do not guarantee indefinite jj/harness retention.
 
+## Implemented desktop client
+
+The desktop app uses the shared backend for a project/workflow sidebar and
+dependency graph, plus a resizable floating node workbench with editable Markdown
+assignments, structured live output, fresh runs and explicit session continuation,
+permission dialogs, syntect-highlighted exact patch review, and paginated native
+revision history. Per-node drafts, tabs, review targets, and diff positions are
+retained within the app session. Sidebar and window preferences persist across
+restarts. See [Working in the desktop app](05-ui-and-diffs.md) for controls,
+validation commands, and current limitations.
+
+The CLI still provisions workflows, nodes, native changes, and workspaces, and
+performs code restoration and topology edits. The GUI does not automatically
+start the backend or expose custom database/socket paths. Live output is bounded,
+not an archived transcript.
+
 ## Remaining capabilities and decisions for discussion
 
 These are documented gaps, **not newly approved work or a priority order**.
@@ -104,7 +120,7 @@ upstream hint remain unchanged.
 | Review and execution policy | Human review gates distinct from tool permissions; context handoff between phases; additional agent configuration/capability support |
 | Operational durability and portability | A documented backup/restore workflow, broader schema/history upgrade and downgrade policy beyond the targeted restore-journal migration, repository relocation/replacement, and whether portable workflow import/export is wanted |
 | Control scalability | Live controls now bypass storage; broader read concurrency, admission under heavy load, and durable state write latency remain bounded-design tradeoffs |
-| GUI | Native node workspace with a resizable graph, Markdown assignment preview, structured live output, syntect-highlighted exact patch review, paginated native history, live run controls, and permission dialogs. The CLI still provisions workflows, native changes, and workspaces. See [desktop workflow](05-ui-and-diffs.md) |
+| GUI | Workflow/node/native-change/workspace provisioning, topology editing, code restoration, editor handoff, and custom backend paths are not exposed in the desktop client; use the CLI for implemented backend operations. See [desktop workflow](05-ui-and-diffs.md) |
 
 No MCP adapter, custom agent loop, transcript archive, or durable notification
 replay is required by the current architecture. Polling is intentional, not a

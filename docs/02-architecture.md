@@ -42,15 +42,19 @@ This uses polling rather than subscriptions for the initial update transport.
 
 **Implemented topology:** one backend owns a configured database/socket pair,
 using local Unix-domain IPC on macOS/Linux, not a public HTTP endpoint. A database
-can contain workflows for multiple canonical project folders. Clients auto-start
-or reuse the backend; lifetime locks prevent competing owners. Access is restricted
+can contain workflows for multiple canonical project folders. The CLI auto-starts
+or reuses the backend; the desktop app connects to an already-running backend.
+Lifetime locks prevent competing owners. Access is restricted
 to the owning user. Windows named pipes and automatic per-repository backend
 selection are not implemented. See [lifecycle](11-backend-cli.md#lifecycle).
 
-**Current direction: headless core and CLI first; GUI later.** Workflow persistence,
-branching, native editing, and ACP execution now use the shared backend. A separate
+**Implemented direction: headless core with CLI and desktop clients.** Workflow persistence,
+branching, native editing, and ACP execution use the shared backend. The desktop
+provides graph navigation, assignment editing, run controls, output, review, and
+history; provisioning and code restoration still use the CLI. See the
+[desktop workflow](05-ui-and-diffs.md) for the current UI boundary. A separate
 project registry is not implemented: project identity is the canonical folder.
-Workflows are the eventual sidebar items grouped by project; do not introduce a
+Workflows are sidebar items grouped by project; do not introduce a
 separate application-level "session" entity. Agent session references belong to
 existing harnesses. See [acceptance and research](07-spikes-and-build-order.md).
 
@@ -66,7 +70,7 @@ cleanup and broader reconciliation remain pending.
 planning-only model. Legacy unbased commands retain that older behavior; no old
 graph is silently adopted.
 
-- A project identifies a local project folder/repository and groups workflows. The CLI selects projects and workflows explicitly; the later GUI presents that organization in its sidebar.
+- A project identifies a local project folder/repository and groups workflows. The CLI selects projects and workflows explicitly; the desktop presents that organization in its sidebar.
 - A workflow contains prompt nodes and saved connections, with branching supported from the start. See the [interfaces and parallel implementations example](01-concept.md#project-workflow-and-node-example).
 - A node represents a prompt/assignment associated with an evolving jj change, not a frozen commit or a single agent turn. A change ID follows evolving work; commit IDs identify exact code revisions. Resolve native divergence explicitly rather than assuming a change ID always identifies one current commit.
 - Keep workflow metadata and native jj state as distinct sources with checked alignment, not unrelated dependency graphs. Do not guess prompt associations from native ancestry. External disappearance of a change retains its saved node/association as missing; explicit Waypoints deletion instead abandons native work and removes the node from the active graph while preserving historical references.

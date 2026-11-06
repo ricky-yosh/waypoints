@@ -9,7 +9,7 @@ Work with coding agents often means chaining prompts by hand: run one, wait and 
 
 ## The core idea
 
-The workflow is the main object you work with. Workflows are grouped by project folder in the eventual sidebar; the CLI must support the same project/workflow selection without a GUI. A workflow is a branching graph, not a linear prompt queue.
+The workflow is the main object you work with. Workflows are grouped by project folder in the desktop sidebar; the CLI supports explicit project/workflow selection without a GUI. A workflow is a branching graph, not a linear prompt queue.
 
 - Each node represents a phase's prompt/assignment, which can be refined through multiple turns rather than requiring a new node for each turn.
 - A node is associated with an evolving native jj change. Its historical code revisions are native jj commits, not a separate Waypoints snapshot system.

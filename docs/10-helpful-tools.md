@@ -7,13 +7,14 @@ and superseded MCP integration plans.
 
 ## Current choices and boundaries
 
-- Waypoints uses a headless core, a shared local JSON-RPC backend, and a CLI.
-  The future desktop client must use the same backend. See
+- Waypoints uses a headless core, a shared local JSON-RPC backend, and CLI and
+  desktop clients. Both clients use the same backend. See
   [architecture](02-architecture.md#architecture-decision-local-backend-gui-and-cli).
 - The app manifest selects `gpui-kit` with inspector support; see the
-  [current stack](06-stack-and-storage.md#gpui) for the pin. The app is
-  still a placeholder. A comparison between `gpui-component` and `gpui-kit` is
-  not a pending prerequisite; use GPUI Kit's reexports and component layer.
+  [current stack](06-stack-and-storage.md#gpui) for the pin. The app provides the
+  [desktop workflow](05-ui-and-diffs.md). A comparison between `gpui-component`
+  and `gpui-kit` is not a pending prerequisite; use GPUI Kit's reexports and
+  component layer.
 - Installed project skills cover Rust practices/review and GPUI Kit coding/design.
   Read the applicable guides and verify API signatures against the pinned source.
 - MCP is out of scope. Do not install `gpui-mcp`, build an MCP adapter, or make

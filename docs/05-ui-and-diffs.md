@@ -59,6 +59,11 @@ A node whose run status has yet to be checked shows **Unknown**.
   snapshot. If a run records new history while the tab is open, the toolbar
   announces it; Refresh fetches the newer runs and revisions.
 
+  **Refresh limitation:** unlike a failed older-page request, a full History
+  refresh replaces the loaded view with a loading state. If its run-list request
+  fails, the tab shows an error instead of retaining the previously loaded rows.
+  Retry the refresh when the backend is available.
+
 A pending permission appears in the workflow header for a monitored run. Open
 its action to inspect the tool request over the current workspace. Choose one
 of the backend's single-use options or dismiss the dialog to leave the request
