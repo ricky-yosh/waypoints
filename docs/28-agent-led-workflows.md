@@ -6,10 +6,9 @@ other agents through the existing ACP-backed backend. The desktop app is an
 on-demand visual companion for following construction, reviewing code, and
 intervening.
 
-This document specifies intended behavior. The onboarding surfaces, targeted
-open command, and synchronization requirements below are not claims of current
-implementation. See [desktop usage](05-ui-and-diffs.md) and
-[backend/CLI usage](11-backend-cli.md) for existing capabilities.
+This document specifies the implemented behavior and the remaining platform
+limits. See [desktop usage](05-ui-and-diffs.md) and
+[backend/CLI usage](11-backend-cli.md) for usage details.
 
 ## Why use Waypoints
 
@@ -71,18 +70,39 @@ See [frontend-facing backend support](25-backend-frontend-readiness.md),
 
 ## Opening and live synchronization
 
-Provide an agent-facing way to open/focus a specific project and workflow.
-The command name and transport are not selected yet; do not document an
-invented `waypoints open` command as available.
+The selected contract is:
+
+```sh
+waypoints app open --project PATH [--workflow ID] [--json]
+```
+
+It uses a private Unix control socket, separate from the workflow backend
+socket, at `$XDG_STATE_HOME/waypoints/desktop.sock` or
+`~/Library/Application Support/waypoints/desktop.sock` on macOS. Set
+`WAYPOINTS_APP_SOCKET` to choose another absolute path. The CLI validates that
+the folder exists and, when `--workflow` is given, asks the backend client
+whether that workflow exists and belongs to the project. A running app receives
+the request on the socket and comes forward; otherwise the CLI starts
+`waypoints-app` (or `WAYPOINTS_APP_EXECUTABLE`) with the same selection and
+waits for it to accept. Opening is idempotent and separate from creation or
+execution. If no display starts, the CLI reports the failure and the backend's
+headless work is untouched.
 
 - Reuse/focus an existing app instance where appropriate rather than opening
   duplicates or asking the user to find the newly created workflow manually.
 - Opening the visual is separate from creation and execution. If no desktop
   display is available, return a clear result without undoing headless work.
-- Workflows created or changed by the coordinator must become visible without
-  repeated manual Refresh actions. Show reconnect/failure state honestly.
-- Keep selection and unsaved drafts safe when externally changed state arrives.
+- Workflows created or changed by the coordinator become visible without
+  repeated manual Refresh actions: the app quietly refreshes the workflow list,
+  selected graph, and node run statuses every two seconds. Manual Refresh remains
+  available. A failed background refresh reports **Reconnecting** and the error
+  in the project panel while the loaded canvas and drafts stay visible.
+- Selection and unsaved drafts stay safe when externally changed state arrives.
+  A clean draft follows a newly saved prompt; a dirty draft is kept with an
+  explicit warning.
 - Do not automatically start worker runs merely because a workflow is opened.
+  Runs started through the existing CLI/client paths appear as their backend
+  state changes.
 
 ## App entry points and empty states
 

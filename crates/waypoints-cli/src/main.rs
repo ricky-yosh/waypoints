@@ -1,8 +1,12 @@
 //! Human- and agent-facing commands for the local Waypoints backend.
 
 use std::env;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::fs::{OpenOptions, create_dir_all};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -15,6 +19,7 @@ use waypoints_core::storage::{
 };
 use waypoints_core::workflow::{BaseSource, NodeParent};
 use waypoints_core::workspace::{NodeWorkspace, WorkspaceState};
+use waypoints_desktop_ipc::{OpenStatus, Request, Response};
 
 #[derive(Parser)]
 #[command(
@@ -74,6 +79,23 @@ enum Command {
     Run {
         #[command(subcommand)]
         command: RunCommand,
+    },
+    /// Open or focus the desktop visual companion without creating or running work.
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppCommand {
+    /// Reveal an existing project and optional workflow, reusing a running app when possible.
+    Open {
+        #[arg(long)]
+        project: PathBuf,
+        /// Exact saved workflow ID to select; it must belong to this project.
+        #[arg(long)]
+        workflow: Option<i64>,
     },
 }
 
@@ -689,6 +711,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
             };
             print_history(status, args.json)?;
         }
+        Command::App { command } => {
+            let AppCommand::Open { project, workflow } = command;
+            open_desktop(&config, project, workflow, args.json).await?;
+        }
         Command::Backend { command } => {
             let client = connect(&config, false).await?;
             match command {
@@ -1191,6 +1217,177 @@ async fn connect(config: &Config, start: bool) -> anyhow::Result<Client> {
     } else {
         Ok(Client::connect(config).await?)
     }
+}
+
+async fn open_desktop(
+    config: &Config,
+    project: PathBuf,
+    workflow: Option<i64>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let project = project
+        .canonicalize()
+        .with_context(|| format!("resolving project directory {}", project.display()))?;
+    anyhow::ensure!(
+        project.is_dir(),
+        "{} is not a directory; choose an existing project folder",
+        project.display()
+    );
+    if let Some(workflow_id) = workflow {
+        let client = connect(config, true).await?;
+        let saved = client.workflow(workflow_id).await.with_context(|| {
+            format!("workflow {workflow_id} does not exist; create or list workflows first")
+        })?;
+        anyhow::ensure!(
+            saved.project_path == project,
+            "workflow {workflow_id} belongs to {}, not {}",
+            saved.project_path.display(),
+            project.display()
+        );
+    }
+
+    let request = Request::open(project, workflow);
+    let socket = desktop_socket_path()?;
+    let response = match waypoints_desktop_ipc::send(&socket, &request) {
+        Ok(response) => response,
+        Err(error) if waypoints_desktop_ipc::is_unavailable(&error) => {
+            launch_desktop(&socket, &request)?
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("sending a request to the desktop control socket {socket:?}")
+            });
+        }
+    };
+    anyhow::ensure!(
+        response.ok,
+        "{}",
+        response
+            .error
+            .clone()
+            .unwrap_or_else(|| "the desktop app rejected the request".into())
+    );
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+    } else {
+        let status = response.status.map_or("opened", OpenStatus::label);
+        let project = response
+            .project
+            .as_ref()
+            .map_or_else(String::new, |path| path.display().to_string());
+        match response.workflow {
+            Some(workflow) => println!("Desktop app {status} · {project} · workflow {workflow}"),
+            None => println!("Desktop app {status} · {project}"),
+        }
+    }
+    Ok(())
+}
+
+fn desktop_socket_path() -> anyhow::Result<PathBuf> {
+    let state = default_state_directory()?;
+    Ok(waypoints_desktop_ipc::socket_path(&state)?)
+}
+
+fn launch_desktop(socket: &Path, request: &Request) -> anyhow::Result<Response> {
+    let executable = desktop_executable()?;
+    let log_path = socket.with_file_name("desktop.log");
+    if let Some(parent) = log_path.parent() {
+        create_dir_all(parent)
+            .with_context(|| format!("creating desktop state directory {}", parent.display()))?;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log_path)
+        .with_context(|| format!("opening desktop log {}", log_path.display()))?;
+    let mut command = ProcessCommand::new(&executable);
+    if let Some(project) = &request.project {
+        command.arg("--project").arg(project);
+    }
+    if let Some(workflow) = request.workflow {
+        command.arg("--workflow").arg(workflow.to_string());
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .current_dir("/")
+        .process_group(0);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("starting {} to open the visual", executable.display()))?;
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        match waypoints_desktop_ipc::send(socket, request) {
+            Ok(mut response) => {
+                response.status = Some(OpenStatus::Launched);
+                return Ok(response);
+            }
+            Err(error) if waypoints_desktop_ipc::is_unavailable(&error) => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("the started desktop app did not answer at {socket:?}")
+                });
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!(
+                "{} exited during startup ({status}); inspect {}",
+                executable.display(),
+                log_path.display()
+            );
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "{} did not become ready within 8 seconds; inspect {}",
+                executable.display(),
+                log_path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn desktop_executable() -> anyhow::Result<PathBuf> {
+    if let Some(path) = env::var_os("WAYPOINTS_APP_EXECUTABLE") {
+        let path = PathBuf::from(path);
+        anyhow::ensure!(
+            path.is_file(),
+            "WAYPOINTS_APP_EXECUTABLE does not name a file: {}",
+            path.display()
+        );
+        return Ok(path);
+    }
+    let current = env::current_exe()?;
+    let mut directories = Vec::new();
+    if let Some(parent) = current.parent() {
+        directories.push(parent.to_path_buf());
+        if parent.ends_with("deps")
+            && let Some(debug) = parent.parent()
+        {
+            directories.push(debug.to_path_buf());
+        }
+    }
+    for directory in directories {
+        let candidate = directory.join("waypoints-app");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    if let Some(path) = env::var_os("PATH") {
+        for directory in env::split_paths(&path) {
+            let candidate = directory.join("waypoints-app");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    anyhow::bail!(
+        "no desktop app is running and `waypoints-app` was not found; run `cargo run -p waypoints-app` or set WAYPOINTS_APP_EXECUTABLE"
+    )
 }
 
 fn print_history(status: HistoryStatus, json: bool) -> anyhow::Result<()> {

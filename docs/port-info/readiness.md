@@ -127,3 +127,6 @@ refresh scripts; moved the Rune crate to `crates/waypoints-app`; set it as the
 workspace default; renamed the package and binary to `waypoints-app`; updated
 `dev`, `renovate.json`, the README, and the documentation map; and regenerated
 `Cargo.lock`. No commit or push was performed as part of this cutover step.
+
+The subsequent agent-led workflow/onboarding work is recorded separately in
+[progress.md](progress.md) and milestone 6 of [milestones.md](milestones.md).

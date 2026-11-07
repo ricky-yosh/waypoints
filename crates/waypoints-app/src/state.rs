@@ -59,7 +59,10 @@ pub(crate) struct HistoryPanel {
     pub selected_run: Option<i64>,
     pub selected_revision: Option<String>,
     pub notice: Option<String>,
+    pub notice_error: bool,
     pub fresh: bool,
+    pub list_width: f32,
+    pub list_resize_start: Option<f32>,
 }
 
 impl Default for HistoryPanel {
@@ -76,7 +79,10 @@ impl Default for HistoryPanel {
             selected_run: None,
             selected_revision: None,
             notice: None,
+            notice_error: false,
             fresh: false,
+            list_width: 270.0,
+            list_resize_start: None,
         }
     }
 }
@@ -177,6 +183,14 @@ pub(crate) struct State {
     pub backend: Option<Backend>,
     pub backend_state: LoadState,
     pub backend_detail: String,
+    pub sync_error: Option<String>,
+    pub next_sync_at: f64,
+    pub project_open_error: Option<String>,
+    pub drop_hover: bool,
+    pub workflow_help_open: bool,
+    pub workflow_help_return: Option<String>,
+    pub prompt_notice: Option<String>,
+    pub copy_notice: Option<(String, f64)>,
     pub project_path: Option<PathBuf>,
     pub workflows: Vec<Workflow>,
     pub workflows_state: LoadState,
@@ -244,6 +258,14 @@ impl Default for State {
             backend: None,
             backend_state: LoadState::Idle,
             backend_detail: String::new(),
+            sync_error: None,
+            next_sync_at: 0.0,
+            project_open_error: None,
+            drop_hover: false,
+            workflow_help_open: false,
+            workflow_help_return: None,
+            prompt_notice: None,
+            copy_notice: None,
             project_path: None,
             workflows: Vec::new(),
             workflows_state: LoadState::Idle,
@@ -328,17 +350,107 @@ impl State {
     }
 
     pub fn load_workflows(&mut self) {
+        self.load_workflows_inner(false);
+    }
+
+    pub fn refresh_workflows_quietly(&mut self) {
+        self.load_workflows_inner(true);
+    }
+
+    fn load_workflows_inner(&mut self, quiet: bool) {
         let Some(project) = self.project_path.clone() else {
             return;
         };
         self.workflows_token += 1;
         let token = self.workflows_token;
-        self.workflows_state = LoadState::Loading;
+        if !quiet {
+            self.workflows_state = LoadState::Loading;
+        }
         if let Some(backend) = &self.backend {
-            backend.send(Command::ListWorkflows { token, project });
-        } else {
+            backend.send(Command::ListWorkflows {
+                token,
+                project,
+                quiet,
+            });
+        } else if !quiet {
             self.workflows_state = LoadState::Failed("Backend is not available".into());
         }
+    }
+
+    /// Requests an immediate non-blocking refresh of the visible state.
+    ///
+    /// This is the same path the app polls automatically; manual refresh remains
+    /// available and uses the explicit loading state.
+    pub fn sync_now(&mut self) {
+        if self.mode != Mode::Backend || self.project_path.is_none() || self.display_fixture {
+            return;
+        }
+        match self.backend_state {
+            LoadState::Failed(_) | LoadState::Idle => self.retry_backend(),
+            LoadState::Ready => {
+                self.refresh_workflows_quietly();
+                if self.selected_workflow.is_some() {
+                    self.load_graph_inner(true);
+                    self.load_workflow_runs_inner(true);
+                }
+            }
+            LoadState::Loading => {}
+        }
+    }
+
+    /// Applies an agent open request. Paths are validated by the control layer
+    /// and again here so direct callers cannot select a missing folder.
+    pub fn apply_open_request(&mut self, project: Option<PathBuf>, workflow: Option<i64>) {
+        self.settings_open = false;
+        self.workflow_help_open = false;
+        self.prompt_notice = None;
+        if let Some(project) = project {
+            let path = match std::fs::canonicalize(&project) {
+                Ok(path) if path.is_dir() => path,
+                Ok(_) => {
+                    self.project_open_error =
+                        Some(format!("{} is not a folder", project.display()));
+                    return;
+                }
+                Err(error) => {
+                    self.project_open_error = Some(format!(
+                        "Couldn’t open {}: {error}. Choose an existing folder.",
+                        project.display()
+                    ));
+                    return;
+                }
+            };
+            self.project_open_error = None;
+            let same_project = self.project_path.as_ref() == Some(&path);
+            self.set_sidebar_open(true);
+            if same_project {
+                if matches!(self.backend_state, LoadState::Failed(_) | LoadState::Idle) {
+                    self.retry_backend();
+                }
+                self.refresh_workflows_quietly();
+            } else {
+                self.add_project(path);
+            }
+            if let Some(workflow_id) = workflow {
+                if self.selected_workflow == Some(workflow_id) {
+                    self.load_graph_inner(true);
+                } else {
+                    self.select_workflow(workflow_id);
+                }
+            }
+        }
+        self.next_sync_at = 0.0;
+    }
+
+    pub fn open_workflow_help(&mut self, return_key: &str) {
+        self.workflow_help_open = true;
+        self.workflow_help_return = Some(return_key.to_owned());
+        self.prompt_notice = None;
+    }
+
+    pub fn close_workflow_help(&mut self) {
+        self.workflow_help_open = false;
+        self.prompt_notice = None;
     }
 
     pub fn select_workflow(&mut self, workflow_id: i64) {
@@ -351,6 +463,7 @@ impl State {
             self.stash_review();
             self.review = ReviewPanel::default();
             self.graph = Graph::default();
+            self.source_graph = None;
             self.selected = None;
             self.preview_node = None;
             self.workbench_open = false;
@@ -365,15 +478,25 @@ impl State {
     }
 
     pub fn load_graph(&mut self) {
+        self.load_graph_inner(false);
+    }
+
+    fn load_graph_inner(&mut self, quiet: bool) {
         let Some(workflow_id) = self.selected_workflow else {
             return;
         };
         self.graph_token += 1;
         let token = self.graph_token;
-        self.graph_state = LoadState::Loading;
+        if !quiet {
+            self.graph_state = LoadState::Loading;
+        }
         if let Some(backend) = &self.backend {
-            backend.send(Command::LoadGraph { token, workflow_id });
-        } else {
+            backend.send(Command::LoadGraph {
+                token,
+                workflow_id,
+                quiet,
+            });
+        } else if !quiet {
             self.graph_state = LoadState::Failed("Backend is not available".into());
         }
     }
@@ -477,6 +600,31 @@ impl State {
         }
     }
 
+    /// Shows short-lived confirmation beside copy actions.
+    pub fn note_copied(&mut self, message: impl Into<String>) {
+        self.copy_notice = Some((message.into(), self.now));
+    }
+
+    pub fn copy_notice(&self) -> Option<&str> {
+        self.copy_notice
+            .as_ref()
+            .filter(|(_, at)| self.now - at < 2.5)
+            .map(|(message, _)| message.as_str())
+    }
+
+    pub fn expire_copy_notice(&mut self, clock: f64) -> bool {
+        if self
+            .copy_notice
+            .as_ref()
+            .is_some_and(|(_, at)| clock - at >= 2.5)
+        {
+            self.copy_notice = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn flush_preferences(&mut self) {
         if self.geometry_dirty {
             self.save_preferences();
@@ -518,25 +666,60 @@ impl State {
     }
 
     pub fn add_project(&mut self, path: PathBuf) {
-        let path = match std::fs::canonicalize(&path) {
-            Ok(path) if path.is_dir() => path,
-            Ok(_) => {
-                self.preferences_error = Some(format!("{} is not a directory", path.display()));
-                return;
+        match self.open_project(path) {
+            Ok(()) => {
+                self.project_open_error = None;
+                self.preferences_error = None;
             }
             Err(error) => {
-                self.preferences_error = Some(format!("Couldn’t open {}: {error}", path.display()));
-                return;
+                self.project_open_error = Some(error);
+            }
+        }
+    }
+
+    /// Validates and opens one project folder. Shared by the dialog, folder drop,
+    /// and agent open requests; it never creates a workflow or initializes a repo.
+    pub fn open_project(&mut self, path: PathBuf) -> Result<(), String> {
+        let path = match std::fs::canonicalize(&path) {
+            Ok(path) if path.is_dir() => path,
+            Ok(_) => return Err(format!("{} is not a folder", path.display())),
+            Err(error) => {
+                return Err(format!(
+                    "Couldn’t open {}: {error}. Choose an existing folder.",
+                    path.display()
+                ));
             }
         };
+        let same_project = self.project_path.as_ref() == Some(&path);
         if !self.preferences.projects.contains(&path) {
             self.preferences.projects.push(path.clone());
         }
         self.preferences.selected_project = Some(path.clone());
         self.preferences.sidebar_open = true;
-        self.preferences.selected_workflow = None;
+        if !same_project {
+            self.preferences.selected_workflow = None;
+        }
         self.save_preferences();
         self.select_project(path);
+        Ok(())
+    }
+
+    /// Accepts exactly one dropped folder. Mixed or multiple drops are rejected
+    /// rather than choosing one silently.
+    pub fn drop_project(&mut self, files: &[PathBuf]) {
+        if files.len() != 1 {
+            let message = if files.is_empty() {
+                "Drop one project folder here".to_owned()
+            } else {
+                format!(
+                    "Drop one project folder at a time; {} items were dropped",
+                    files.len()
+                )
+            };
+            self.project_open_error = Some(message);
+            return;
+        }
+        self.add_project(files[0].clone());
     }
 
     pub fn remove_project(&mut self, path: &std::path::Path) {
@@ -562,7 +745,11 @@ impl State {
     }
 
     pub fn select_project(&mut self, path: PathBuf) {
+        self.project_open_error = None;
         if self.project_path.as_ref() == Some(&path) && self.mode == Mode::Backend {
+            self.preferences.selected_project = Some(path);
+            self.save_preferences();
+            self.refresh_workflows_quietly();
             return;
         }
         self.stash_review();
@@ -573,6 +760,7 @@ impl State {
         self.preferences.selected_workflow = None;
         self.save_preferences();
         self.graph = Graph::default();
+        self.source_graph = None;
         self.workflows.clear();
         self.workflows_state = LoadState::Idle;
         self.graph_state = LoadState::Idle;
@@ -590,10 +778,29 @@ impl State {
 
     pub fn retry_backend(&mut self) {
         self.backend_state = LoadState::Loading;
+        if self.backend.is_none() {
+            crate::startup::start_backend(self);
+        }
         if let Some(backend) = &self.backend {
             backend.send(Command::Connect);
         } else {
             self.backend_state = LoadState::Failed("Backend is not available".into());
+        }
+    }
+
+    /// A node switch drops in-flight replies for the old node. If the cached
+    /// panel was left in a loading state, issue fresh requests on return so it
+    /// cannot stay "Loading" forever.
+    fn resume_review_requests(&mut self) {
+        if self.review.state == LoadState::Loading {
+            let target = self.review.target.clone();
+            self.request_review(target);
+        }
+        if self.review.history.runs_state == LoadState::Loading {
+            self.load_history_runs(true);
+        }
+        if self.review.history.revisions_state == LoadState::Loading {
+            self.load_history_revisions(true);
         }
     }
 
@@ -612,12 +819,18 @@ impl State {
     }
 
     pub fn set_workbench_tab(&mut self, tab: WorkbenchTab) {
+        if self.review.tab != tab {
+            self.copy_notice = None;
+        }
         self.review.tab = tab;
         if tab == WorkbenchTab::Changes && self.review.state == LoadState::Idle {
             self.review_current();
         }
         if tab == WorkbenchTab::History && self.review.history.runs_state == LoadState::Idle {
             self.load_history_runs(true);
+        }
+        if tab == WorkbenchTab::Output {
+            self.load_run_transcript();
         }
     }
 
@@ -643,6 +856,10 @@ impl State {
     }
 
     pub fn set_history_kind(&mut self, kind: HistoryKind) {
+        if self.review.history.kind != kind {
+            self.review.history.notice = None;
+            self.review.history.notice_error = false;
+        }
         self.review.history.kind = kind;
         match kind {
             HistoryKind::Runs if self.review.history.runs_state == LoadState::Idle => {
@@ -666,13 +883,20 @@ impl State {
         history.token += 1;
         let token = history.token;
         let cursor = if reset {
-            history.runs.clear();
+            // Keep loaded rows and the selection visible while refreshing; a
+            // failed refresh must not destroy usable history.
             history.runs_cursor = None;
-            history.selected_run = None;
             history.runs_state = LoadState::Loading;
+            history.notice = if history.runs.is_empty() {
+                None
+            } else {
+                Some("Refreshing runs…".into())
+            };
+            history.notice_error = false;
             None
         } else {
             history.notice = Some("Loading older runs…".into());
+            history.notice_error = false;
             history.runs_cursor.clone()
         };
         if let Some(backend) = &self.backend {
@@ -683,8 +907,14 @@ impl State {
                 page_size: 30,
                 cursor,
             });
-        } else {
+        } else if history.runs.is_empty() {
             history.runs_state = LoadState::Failed("Backend is not available".into());
+            history.notice = None;
+            history.notice_error = false;
+        } else {
+            history.runs_state = LoadState::Ready;
+            history.notice = Some("Refresh failed · Backend is not available".into());
+            history.notice_error = true;
         }
     }
 
@@ -699,13 +929,18 @@ impl State {
         history.token += 1;
         let token = history.token;
         let cursor = if reset {
-            history.revisions.clear();
             history.revisions_cursor = None;
-            history.selected_revision = None;
             history.revisions_state = LoadState::Loading;
+            history.notice = if history.revisions.is_empty() {
+                None
+            } else {
+                Some("Refreshing native revisions…".into())
+            };
+            history.notice_error = false;
             None
         } else {
             history.notice = Some("Loading older revisions…".into());
+            history.notice_error = false;
             history.revisions_cursor.clone()
         };
         if let Some(backend) = &self.backend {
@@ -716,8 +951,14 @@ impl State {
                 page_size: 30,
                 cursor,
             });
-        } else {
+        } else if history.revisions.is_empty() {
             history.revisions_state = LoadState::Failed("Backend is not available".into());
+            history.notice = None;
+            history.notice_error = false;
+        } else {
+            history.revisions_state = LoadState::Ready;
+            history.notice = Some("Refresh failed · Backend is not available".into());
+            history.notice_error = true;
         }
     }
 
@@ -807,6 +1048,7 @@ impl State {
     pub fn select_remote_node(&mut self, node_id: i64) {
         if self.selected != Some(node_id) {
             self.stash_review();
+            self.copy_notice = None;
             self.run_log = ActivityLog::default();
             self.expanded_tools.clear();
             self.run_output_at_bottom = true;
@@ -817,6 +1059,7 @@ impl State {
             self.continuation = None;
             self.selected = Some(node_id);
             self.restore_review(node_id);
+            self.resume_review_requests();
         }
         self.selected = Some(node_id);
         self.preview_node = None;
@@ -827,9 +1070,12 @@ impl State {
         let run_id = run.run.id;
         let stopped = !crate::activity::run_is_active(run);
         let has_session = run.run.session_id.is_some();
-        if stopped && has_session {
-            self.request_continuation(run_id);
-        } else if !stopped {
+        if stopped {
+            if has_session {
+                self.request_continuation(run_id);
+            }
+            self.load_run_transcript();
+        } else {
             self.next_run_poll = 0.0;
             self.request_run_events();
         }
@@ -841,15 +1087,25 @@ impl State {
     }
 
     pub fn load_workflow_runs(&mut self) {
+        self.load_workflow_runs_inner(false);
+    }
+
+    fn load_workflow_runs_inner(&mut self, quiet: bool) {
         let Some(workflow_id) = self.selected_workflow else {
             return;
         };
         self.runs_token += 1;
         let token = self.runs_token;
-        self.runs_state = LoadState::Loading;
+        if !quiet {
+            self.runs_state = LoadState::Loading;
+        }
         if let Some(backend) = &self.backend {
-            backend.send(Command::WorkflowRuns { token, workflow_id });
-        } else {
+            backend.send(Command::WorkflowRuns {
+                token,
+                workflow_id,
+                quiet,
+            });
+        } else if !quiet {
             self.runs_state = LoadState::Failed("Backend is not available".into());
         }
     }
@@ -864,6 +1120,26 @@ impl State {
         if !crate::activity::run_is_active(run) {
             return;
         }
+        self.request_run_events_from(self.run_cursor);
+    }
+
+    /// Reload a stopped run's bounded transcript after switching away from and
+    /// back to its node, or when Output is opened on an existing run. This is
+    /// read-only and never starts or continues a run.
+    pub fn load_run_transcript(&mut self) {
+        if self.run_events_pending || !self.run_log.blocks().is_empty() {
+            return;
+        }
+        if self.selected_run().is_none() {
+            return;
+        }
+        self.request_run_events_from(0);
+    }
+
+    fn request_run_events_from(&mut self, after: u64) {
+        let Some(run) = self.selected_run() else {
+            return;
+        };
         let run_id = run.run.id;
         self.run_events_token += 1;
         let token = self.run_events_token;
@@ -872,7 +1148,7 @@ impl State {
             backend.send(Command::RunEvents {
                 token,
                 run_id,
-                after: self.run_cursor,
+                after,
             });
         } else {
             self.run_events_pending = false;
@@ -1032,7 +1308,24 @@ impl State {
         }
     }
 
-    fn reconcile_graph(&mut self, workflow_id: i64, graph: WorkflowGraph) {
+    fn reconcile_graph(&mut self, workflow_id: i64, graph: WorkflowGraph, quiet: bool) {
+        if self.source_graph.as_ref() == Some(&graph) {
+            self.graph_state = LoadState::Ready;
+            self.sync_error = None;
+            // The periodic sync already requested run statuses alongside the
+            // graph; an explicit graph refresh asks for them here.
+            if !quiet {
+                self.load_workflow_runs();
+            }
+            return;
+        }
+        let had_graph = self.source_graph.is_some();
+        let previous = self
+            .graph
+            .nodes
+            .iter()
+            .map(|node| (node.id, (node.x, node.y, node.status)))
+            .collect::<BTreeMap<_, _>>();
         for node in &graph.nodes {
             if let Some(draft) = self.drafts.get_mut(&(workflow_id, node.id)) {
                 if draft.pending.is_some() {
@@ -1048,9 +1341,20 @@ impl State {
                 }
             }
         }
-        self.graph = fixture::from_workflow(&graph);
+        let mut presented = fixture::from_workflow(&graph);
+        // External graph edits must not throw away presentation-only card moves or
+        // make already-known run statuses flicker to Unknown on every sync.
+        for node in &mut presented.nodes {
+            if let Some((x, y, status)) = previous.get(&node.id) {
+                node.x = *x;
+                node.y = *y;
+                node.status = *status;
+            }
+        }
+        self.graph = presented;
         self.source_graph = Some(graph);
         self.graph_state = LoadState::Ready;
+        self.sync_error = None;
         if self
             .selected
             .is_some_and(|node_id| self.graph.node(node_id).is_none())
@@ -1064,16 +1368,21 @@ impl State {
         if let Some(node_id) = self.selected {
             self.ensure_draft_for(node_id);
         }
-        self.runs.clear();
-        self.run_log = ActivityLog::default();
-        self.expanded_tools.clear();
-        self.run_output_at_bottom = true;
-        self.run_cursor = 0;
-        self.run_gap = false;
-        self.run_error = None;
-        self.run_notice = None;
-        self.continuation = None;
-        self.load_workflow_runs();
+        if !quiet || !had_graph {
+            self.runs.clear();
+            self.run_log = ActivityLog::default();
+            self.expanded_tools.clear();
+            self.run_output_at_bottom = true;
+            self.run_cursor = 0;
+            self.run_gap = false;
+            self.run_events_pending = false;
+            self.run_error = None;
+            self.run_notice = None;
+            self.continuation = None;
+            self.load_workflow_runs();
+        } else {
+            self.load_workflow_runs_inner(true);
+        }
     }
 
     pub(crate) fn apply_backend_update(&mut self, update: Update) {
@@ -1081,15 +1390,18 @@ impl State {
             Update::Connected { database } => {
                 self.backend_state = LoadState::Ready;
                 self.backend_detail = format!("Connected · {}", database.display());
+                self.sync_error = None;
                 self.load_workflows();
             }
             Update::Unavailable { message } => {
                 self.backend_state = LoadState::Failed(message.clone());
-                self.backend_detail = message;
+                self.backend_detail = message.clone();
+                self.sync_error = Some(message);
             }
             Update::Workflows {
                 token,
                 project,
+                quiet,
                 result,
             } => {
                 if token != self.workflows_token || self.project_path.as_ref() != Some(&project) {
@@ -1099,6 +1411,20 @@ impl State {
                     Ok(workflows) => {
                         self.workflows = workflows;
                         self.workflows_state = LoadState::Ready;
+                        self.sync_error = None;
+                        if quiet {
+                            // A new externally-created workflow is revealed when the
+                            // app had nothing selected; an existing selection is never
+                            // replaced by a background refresh.
+                            if self.selected_workflow.is_none()
+                                && let Some(first) =
+                                    self.workflows.first().map(|workflow| workflow.id)
+                            {
+                                self.selected_workflow = Some(first);
+                                self.load_graph();
+                            }
+                            return;
+                        }
                         let preferred = self
                             .selected_workflow
                             .filter(|id| self.workflows.iter().any(|workflow| workflow.id == *id))
@@ -1124,20 +1450,38 @@ impl State {
                             self.graph_state = LoadState::Idle;
                         }
                     }
-                    Err(error) => self.workflows_state = LoadState::Failed(error),
+                    Err(error) => {
+                        if quiet {
+                            self.sync_error =
+                                Some(format!("Live workflow refresh failed: {error}"));
+                            if matches!(self.workflows_state, LoadState::Idle | LoadState::Loading)
+                            {
+                                self.workflows_state = LoadState::Failed(error);
+                            }
+                        } else {
+                            self.workflows_state = LoadState::Failed(error);
+                        }
+                    }
                 }
             }
             Update::Graph {
                 token,
                 workflow_id,
+                quiet,
                 result,
             } => {
                 if token != self.graph_token || self.selected_workflow != Some(workflow_id) {
                     return;
                 }
                 match *result {
-                    Ok(graph) => self.reconcile_graph(workflow_id, graph),
-                    Err(error) => self.graph_state = LoadState::Failed(error),
+                    Ok(graph) => self.reconcile_graph(workflow_id, graph, quiet),
+                    Err(error) => {
+                        if quiet && matches!(self.graph_state, LoadState::Ready) {
+                            self.sync_error = Some(format!("Live graph refresh failed: {error}"));
+                        } else {
+                            self.graph_state = LoadState::Failed(error);
+                        }
+                    }
                 }
             }
             Update::AssignmentSaved {
@@ -1190,6 +1534,7 @@ impl State {
             Update::WorkflowRuns {
                 token,
                 workflow_id,
+                quiet,
                 result,
             } => {
                 if token != self.runs_token || self.selected_workflow != Some(workflow_id) {
@@ -1197,11 +1542,35 @@ impl State {
                 }
                 match *result {
                     Ok(nodes) => {
-                        self.runs_state = LoadState::Ready;
-                        self.runs = nodes
+                        let previous = self
+                            .selected
+                            .and_then(|node_id| self.runs.get(&node_id))
+                            .map(|run| run.run.id);
+                        let runs: BTreeMap<_, _> = nodes
                             .into_iter()
                             .filter_map(|node| node.latest.map(|run| (node.node_id, run)))
                             .collect();
+                        let next = self
+                            .selected
+                            .and_then(|node_id| runs.get(&node_id))
+                            .map(|run| run.run.id);
+                        if next.is_some() && next != previous {
+                            // An externally started run replaced the selected node's
+                            // prior run: replay its events from the beginning instead
+                            // of mixing them into the old transcript.
+                            self.run_log = ActivityLog::default();
+                            self.expanded_tools.clear();
+                            self.run_output_at_bottom = true;
+                            self.run_cursor = 0;
+                            self.run_gap = false;
+                            self.run_events_pending = false;
+                            self.run_error = None;
+                            self.run_notice = None;
+                            self.continuation = None;
+                        }
+                        self.runs_state = LoadState::Ready;
+                        self.runs = runs;
+                        self.sync_error = None;
                         self.sync_node_statuses();
                         if let Some(run) = self.selected_run() {
                             let run_id = run.run.id;
@@ -1212,7 +1581,13 @@ impl State {
                             }
                         }
                     }
-                    Err(error) => self.runs_state = LoadState::Failed(error),
+                    Err(error) => {
+                        if quiet && matches!(self.runs_state, LoadState::Ready) {
+                            self.sync_error = Some(format!("Live run refresh failed: {error}"));
+                        } else {
+                            self.runs_state = LoadState::Failed(error);
+                        }
+                    }
                 }
             }
             Update::RunStatus { token, result } => {
@@ -1355,20 +1730,30 @@ impl State {
                         history.runs_cursor = page.next_cursor;
                         history.runs_state = LoadState::Ready;
                         history.notice = None;
+                        history.notice_error = false;
                         if !append {
                             history.fresh = false;
-                        }
-                        if history.selected_run.is_none() {
-                            history.selected_run = history.runs.first().map(|run| run.run.id);
+                            if !history
+                                .runs
+                                .iter()
+                                .any(|run| Some(run.run.id) == history.selected_run)
+                            {
+                                history.selected_run = history.runs.first().map(|run| run.run.id);
+                            }
                         }
                     }
                     Err(error) => {
                         if append {
-                            history.notice = Some(error);
-                        } else {
-                            history.runs.clear();
+                            history.notice = Some(format!("Couldn’t load older runs · {error}"));
+                            history.notice_error = true;
+                        } else if history.runs.is_empty() {
                             history.runs_cursor = None;
                             history.runs_state = LoadState::Failed(error);
+                            history.notice_error = false;
+                        } else {
+                            history.runs_state = LoadState::Ready;
+                            history.notice = Some(format!("Refresh failed · {error}"));
+                            history.notice_error = true;
                         }
                     }
                 }
@@ -1397,23 +1782,33 @@ impl State {
                         history.revisions_cursor = page.next_cursor;
                         history.revisions_state = LoadState::Ready;
                         history.notice = None;
+                        history.notice_error = false;
                         if !append {
                             history.fresh = false;
-                        }
-                        if history.selected_revision.is_none() {
-                            history.selected_revision = history
-                                .revisions
-                                .first()
-                                .map(|entry| entry.evolution.revision.commit_id.clone());
+                            if !history.revisions.iter().any(|entry| {
+                                Some(entry.evolution.revision.commit_id.as_str())
+                                    == history.selected_revision.as_deref()
+                            }) {
+                                history.selected_revision = history
+                                    .revisions
+                                    .first()
+                                    .map(|entry| entry.evolution.revision.commit_id.clone());
+                            }
                         }
                     }
                     Err(error) => {
                         if append {
-                            history.notice = Some(error);
-                        } else {
-                            history.revisions.clear();
+                            history.notice =
+                                Some(format!("Couldn’t load older revisions · {error}"));
+                            history.notice_error = true;
+                        } else if history.revisions.is_empty() {
                             history.revisions_cursor = None;
                             history.revisions_state = LoadState::Failed(error);
+                            history.notice_error = false;
+                        } else {
+                            history.revisions_state = LoadState::Ready;
+                            history.notice = Some(format!("Refresh failed · {error}"));
+                            history.notice_error = true;
                         }
                     }
                 }

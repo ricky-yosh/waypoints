@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use waypoints_desktop_ipc::{Request, Response};
 
 #[path = "backend/archive.rs"]
 mod archive;
@@ -1995,6 +1996,73 @@ fn run_start_validates_before_launch_and_setup_can_be_cancelled() -> anyhow::Res
         !switched.status.success(),
         "switched workspace must be refused"
     );
+    Ok(())
+}
+
+#[test]
+fn cli_coordinator_opens_the_exact_workflow_while_a_fake_worker_is_active() -> anyhow::Result<()> {
+    let (fixture, agent, _workspace) = run_fixture("permission")?;
+    let project = fixture.directory.path().join("project");
+    let project = fs::canonicalize(project)?;
+
+    let started = start_run(&fixture, &agent)?;
+    let run_id = started["run"]["id"].to_string();
+    let status = wait_run(&fixture, &run_id, "awaiting_permission")?;
+    assert!(
+        status["permission"].is_object(),
+        "the fake ACP worker reached a permission request: {status}"
+    );
+
+    let desktop = tempfile::Builder::new()
+        .prefix("wp-desktop-")
+        .tempdir_in("/tmp")?;
+    let socket = desktop.path().join("desktop.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let expected_project = project.clone();
+    let listener_thread = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept app open");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let request: Request = waypoints_desktop_ipc::read_request(&mut reader)
+            .expect("read app open request")
+            .expect("request");
+        assert_eq!(request.project.as_ref(), Some(&expected_project));
+        assert_eq!(request.workflow, Some(1));
+        let mut writer = stream;
+        waypoints_desktop_ipc::write_response(&mut writer, &Response::focused(&request))
+            .expect("write app open response");
+    });
+
+    let opened = fixture
+        .command()
+        .env("WAYPOINTS_APP_SOCKET", &socket)
+        .args([
+            "app",
+            "open",
+            "--project",
+            project.to_str().expect("project path"),
+            "--workflow",
+            "1",
+        ])
+        .output()?;
+    let opened = fixture.json_output(opened, "app open")?;
+    listener_thread.join().expect("listener thread");
+    assert_eq!(opened["status"], "focused");
+    assert_eq!(opened["workflow"], 1);
+
+    // Opening the visual is not creation: the coordinator still has one workflow
+    // and the external worker run remains the only run.
+    let workflows = fixture.success(&[
+        "workflow",
+        "list",
+        "--project",
+        project.to_str().expect("project path"),
+    ])?;
+    assert_eq!(workflows.as_array().map(Vec::len), Some(1));
+    let runs = fixture.success(&["run", "list", "--workflow", "1", "--node", "1"])?;
+    assert_eq!(runs.as_array().map(Vec::len), Some(1));
+
+    fixture.success(&["run", "cancel", "--run", &run_id])?;
+    wait_run(&fixture, &run_id, "cancelled")?;
     Ok(())
 }
 

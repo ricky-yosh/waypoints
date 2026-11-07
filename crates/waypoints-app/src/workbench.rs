@@ -49,8 +49,8 @@ pub fn view(s: &State, k: &Kit, window_width: f32, window_height: f32) -> El {
             .child(match s.review.tab {
                 WorkbenchTab::Assignment => assignment_backend(s, node, k),
                 WorkbenchTab::Output => backend_output(s, k),
-                WorkbenchTab::Changes => crate::diff_review::view(s, k),
-                WorkbenchTab::History => crate::history_view::view(s, k),
+                WorkbenchTab::Changes => crate::diff_review::view(s, k, width - 36.0),
+                WorkbenchTab::History => crate::history_view::view(s, k, width - 36.0),
             })
             .child(footer(s, k))
     } else {
@@ -146,7 +146,7 @@ fn header(s: &State, node: &Node, k: &Kit) -> El {
                 match s.graph_state {
                     LoadState::Loading => "Loading graph".to_owned(),
                     LoadState::Failed(_) => "Graph unavailable".to_owned(),
-                    _ => "Backend assignment".to_owned(),
+                    _ => "Backend workflow".to_owned(),
                 }
             } else if s.streaming {
                 "Streaming · presentation-only fixture".to_owned()

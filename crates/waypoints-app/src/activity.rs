@@ -13,6 +13,8 @@ use crate::state::{Mode, OutputLine, State};
 pub(crate) const OUTPUT_INTERVAL: Duration = Duration::from_millis(120);
 pub(crate) const MAX_OUTPUT_LINES: usize = 80;
 const RUN_POLL_INTERVAL: f64 = 0.25;
+/// External workflow/run changes appear within this interval without manual refresh.
+pub(crate) const SYNC_INTERVAL: f64 = 2.0;
 
 pub(crate) fn run_is_active(run: &RunStatus) -> bool {
     matches!(
@@ -57,11 +59,22 @@ pub(crate) fn seed_output(s: &mut State, count: usize) {
 pub(crate) fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
     s.tick_preferences(clock);
     crate::sync_native_menus(s);
-    let mut changed = false;
+    let mut changed = s.expire_copy_notice(clock);
     let updates = s.backend.as_ref().map(Backend::drain).unwrap_or_default();
     for update in updates {
         s.apply_backend_update(update);
         changed = true;
+    }
+    if s.mode == Mode::Backend && !s.display_fixture && s.project_path.is_some() {
+        if s.next_sync_at <= 0.0 {
+            s.next_sync_at = clock + SYNC_INTERVAL;
+            tx.wake_after(Duration::from_secs_f64(SYNC_INTERVAL));
+        } else if clock + 1e-9 >= s.next_sync_at {
+            s.sync_now();
+            s.next_sync_at = clock + SYNC_INTERVAL;
+            tx.wake_after(Duration::from_secs_f64(SYNC_INTERVAL));
+            changed = true;
+        }
     }
     if s.mode == Mode::Backend
         && !s.run_events_pending

@@ -1,41 +1,24 @@
 //! Rune settings overlay: appearance and reduced motion.
 
-use rune::{Color, El, col, el, row, text};
+use rune::{Color, El, ScrollSpec, col, el, row, text};
 use rune_kit::{IconButton, Kit, SegmentedControl, Switch, glyphs};
 
 use crate::State;
 use crate::preferences::Appearance;
 
-pub fn view(s: &State, k: &Kit) -> El {
-    let panel = col()
-        .key("settings-panel")
-        .w(430.0)
-        .padding(18.0)
+pub fn view(s: &State, k: &Kit, size: [f32; 2]) -> El {
+    let max_height = (size[1] - 32.0).max(240.0);
+    let body_max = (max_height - 73.0).max(160.0);
+    let mut body = col()
+        .key("settings-scroll")
+        .w_full()
+        .max_h(body_max)
+        .min_h(0.0)
+        .shrink()
         .gap(13.0)
-        .radius(k.radius.xl)
-        .fill(k.c.bg_base)
-        .border(1.0, k.c.border_base)
-        .shadow(8.0, 32.0, Color::BLACK.alpha(0.28))
-        .on_press(|_: &mut State| {})
-        .on_wheel(|_: &mut State, _, _| true)
-        .role("dialog")
-        .label("Settings")
-        .focus_return("settings-open")
-        .child(
-            row()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .child(text("Settings").font(k.ty.ui_medium).color(k.c.text_base))
-                .child(
-                    IconButton::new(&glyphs::CLOSE)
-                        .variant(rune_kit::IconButtonVariant::GhostMuted)
-                        .label("Close settings")
-                        .on_press(|s: &mut State| s.settings_open = false)
-                        .build(k)
-                        .key("settings-close"),
-                ),
-        )
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
         .child(
             col()
                 .gap(6.0)
@@ -119,7 +102,7 @@ pub fn view(s: &State, k: &Kit) -> El {
     );
     for (keys, label) in [
         ("⌘,", "Open Settings"),
-        ("Esc", "Close panel or clear diff selection"),
+        ("Esc", "Close panel/workbench or clear diff selection"),
         ("Return", "Open the focused graph card"),
         ("⇧Return", "Toggle the focused graph card preview"),
         ("⌘1–4", "Workbench: Assignment, Output, Changes, History"),
@@ -140,10 +123,10 @@ pub fn view(s: &State, k: &Kit) -> El {
                 .child(text(label).font(k.ty.small).color(k.c.text_faint).grow(1.0)),
         );
     }
-    let panel = panel.child(shortcuts);
+    body = body.child(shortcuts);
 
     if let Some(error) = &s.preferences_error {
-        let panel = panel.child(
+        body = body.child(
             text(error.clone())
                 .key("settings-error")
                 .font(k.ty.small)
@@ -152,27 +135,56 @@ pub fn view(s: &State, k: &Kit) -> El {
                 .wrap()
                 .max_lines(4),
         );
-        return overlay(panel, k);
     }
+    body = body.child(
+        text(
+            s.preferences_path
+                .as_ref()
+                .map_or("Preferences path unavailable".to_owned(), |path| {
+                    format!("Saved to {}", path.display())
+                }),
+        )
+        .key("settings-path")
+        .font(k.ty.small)
+        .color(k.c.text_faint)
+        .w_full()
+        .wrap()
+        .max_lines(2),
+    );
 
-    overlay(
-        panel.child(
-            text(
-                s.preferences_path
-                    .as_ref()
-                    .map_or("Preferences path unavailable".to_owned(), |path| {
-                        format!("Saved to {}", path.display())
-                    }),
-            )
-            .key("settings-path")
-            .font(k.ty.small)
-            .color(k.c.text_faint)
-            .w_full()
-            .wrap()
-            .max_lines(2),
-        ),
-        k,
-    )
+    let panel = col()
+        .key("settings-panel")
+        .w(430.0)
+        .max_h(max_height)
+        .padding(18.0)
+        .gap(13.0)
+        .radius(k.radius.xl)
+        .fill(k.c.bg_base)
+        .border(1.0, k.c.border_base)
+        .shadow(8.0, 32.0, Color::BLACK.alpha(0.28))
+        .on_press(|_: &mut State| {})
+        .on_wheel(|_: &mut State, _, _| true)
+        .role("dialog")
+        .label("Settings")
+        .focus_return("settings-open")
+        .child(
+            row()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .child(text("Settings").font(k.ty.ui_medium).color(k.c.text_base))
+                .child(
+                    IconButton::new(&glyphs::CLOSE)
+                        .variant(rune_kit::IconButtonVariant::GhostMuted)
+                        .label("Close settings")
+                        .on_press(|s: &mut State| s.settings_open = false)
+                        .build(k)
+                        .key("settings-close"),
+                ),
+        )
+        .child(body);
+
+    overlay(panel, k)
 }
 
 fn zoom_index(s: &State) -> usize {

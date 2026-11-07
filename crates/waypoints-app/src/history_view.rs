@@ -1,13 +1,18 @@
 //! Run and native-revision history with pinned pagination and review handoff.
 
-use rune::{Color, El, ScrollSpec, col, el, row, text};
+use rune::{Color, Cursor, Drag, El, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, Kit, SegmentedControl};
 use waypoints_core::run::SnapshotState;
 
 use crate::state::HistoryKind;
 use crate::{LoadState, State};
 
-pub fn view(s: &State, k: &Kit) -> El {
+const LIST_MIN_WIDTH: f32 = 160.0;
+const LIST_MAX_WIDTH: f32 = 360.0;
+const DETAILS_MIN_WIDTH: f32 = 200.0;
+const PANE_GAP: f32 = 9.0;
+
+pub fn view(s: &State, k: &Kit, available_width: f32) -> El {
     let history = &s.review.history;
     let selected = match history.kind {
         HistoryKind::Runs => 0,
@@ -75,7 +80,12 @@ pub fn view(s: &State, k: &Kit) -> El {
             text(notice.clone())
                 .key("history-notice")
                 .font(k.ty.small)
-                .color(k.c.text_muted)
+                .color(if history.notice_error {
+                    k.c.danger.fg
+                } else {
+                    k.c.text_muted
+                })
+                .help(notice.clone())
                 .w_full()
                 .wrap()
                 .max_lines(2),
@@ -111,15 +121,17 @@ pub fn view(s: &State, k: &Kit) -> El {
     }
 
     match history.kind {
-        HistoryKind::Runs => column = column.child(runs_history(s, k)),
-        HistoryKind::Revisions => column = column.child(revisions_history(s, k)),
+        HistoryKind::Runs => column = column.child(runs_history(s, k, available_width)),
+        HistoryKind::Revisions => column = column.child(revisions_history(s, k, available_width)),
     }
     column
 }
 
-fn runs_history(s: &State, k: &Kit) -> El {
+fn runs_history(s: &State, k: &Kit, available_width: f32) -> El {
     let history = &s.review.history;
-    if let LoadState::Failed(error) = &history.runs_state {
+    if let LoadState::Failed(error) = &history.runs_state
+        && history.runs.is_empty()
+    {
         return error_state(
             "history-runs-error",
             error,
@@ -141,8 +153,6 @@ fn runs_history(s: &State, k: &Kit) -> El {
     let selected = history.selected_run;
     let list = col()
         .key("history-runs-list")
-        .w(270.0)
-        .grow(1.0)
         .min_h(0.0)
         .padding(5.0)
         .gap(2.0)
@@ -163,11 +173,13 @@ fn runs_history(s: &State, k: &Kit) -> El {
                 .radius(k.radius.sm)
                 .fill(if on { k.c.layer_02 } else { Color::TRANSPARENT })
                 .hover(k.c.hover)
+                .cursor(Cursor::Pointer)
                 .focusable(true)
                 .role("button")
                 .label(format!("Run #{run_id}, {label}"))
-                .on_press(move |s: &mut State| {
+                .on_press_tx(move |s: &mut State, tx| {
                     s.review.history.selected_run = Some(run_id);
+                    tx.scroll_to_instant("history-run-details", 0.0, 0.0);
                 })
                 .child(text(format!("#{run_id}")).font(k.ty.mono).color(if on {
                     k.c.text_base
@@ -191,27 +203,7 @@ fn runs_history(s: &State, k: &Kit) -> El {
                 .font(k.ty.small)
                 .color(k.c.text_faint)
         });
-    row()
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .gap(9.0)
-        .child(list)
-        .child(
-            col()
-                .key("history-run-details")
-                .grow(1.0)
-                .min_h(0.0)
-                .min_w(0.0)
-                .padding(8.0)
-                .radius(k.radius.md)
-                .fill(k.c.layer_01)
-                .border(1.0, k.c.border_base)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(details),
-        )
+    split(s, k, available_width, list, details, "history-run-details")
 }
 
 fn run_details(run: &waypoints_backend::RunStatus, k: &Kit) -> El {
@@ -232,6 +224,13 @@ fn run_details(run: &waypoints_backend::RunStatus, k: &Kit) -> El {
                 )
                 .child(text(label).font(k.ty.small).color(color)),
         )
+        .children(saved.then(|| {
+            Button::new("Review saved snapshot")
+                .variant(ButtonVariant::Contrast)
+                .on_press(|s: &mut State| s.review_history_run())
+                .build(k)
+                .key("history-review-run")
+        }))
         .child(
             text(format!("Prompt · {}", first_line(&run.run.prompt)))
                 .font(k.ty.small)
@@ -264,18 +263,13 @@ fn run_details(run: &waypoints_backend::RunStatus, k: &Kit) -> El {
                 .font(k.ty.small)
                 .color(k.c.text_faint)
         }))
-        .children(saved.then(|| {
-            Button::new("Review saved snapshot")
-                .variant(ButtonVariant::Contrast)
-                .on_press(|s: &mut State| s.review_history_run())
-                .build(k)
-                .key("history-review-run")
-        }))
 }
 
-fn revisions_history(s: &State, k: &Kit) -> El {
+fn revisions_history(s: &State, k: &Kit, available_width: f32) -> El {
     let history = &s.review.history;
-    if let LoadState::Failed(error) = &history.revisions_state {
+    if let LoadState::Failed(error) = &history.revisions_state
+        && history.revisions.is_empty()
+    {
         return error_state(
             "history-revisions-error",
             error,
@@ -297,8 +291,6 @@ fn revisions_history(s: &State, k: &Kit) -> El {
     let selected = history.selected_revision.as_deref();
     let list = col()
         .key("history-revisions-list")
-        .w(270.0)
-        .grow(1.0)
         .min_h(0.0)
         .padding(5.0)
         .gap(2.0)
@@ -319,6 +311,7 @@ fn revisions_history(s: &State, k: &Kit) -> El {
                 .radius(k.radius.sm)
                 .fill(if on { k.c.layer_02 } else { Color::TRANSPARENT })
                 .hover(k.c.hover)
+                .cursor(Cursor::Pointer)
                 .focusable(true)
                 .role("button")
                 .label(format!(
@@ -330,8 +323,9 @@ fn revisions_history(s: &State, k: &Kit) -> El {
                         ""
                     }
                 ))
-                .on_press(move |s: &mut State| {
+                .on_press_tx(move |s: &mut State, tx| {
                     s.review.history.selected_revision = Some(commit.clone());
+                    tx.scroll_to_instant("history-revision-details", 0.0, 0.0);
                 })
                 .child(
                     row()
@@ -366,24 +360,59 @@ fn revisions_history(s: &State, k: &Kit) -> El {
         .revisions
         .iter()
         .find(|entry| Some(entry.evolution.revision.commit_id.as_str()) == selected)
-        .map(|entry| revision_details(entry, k))
+        .map(|entry| revision_details(entry, k, s.copy_notice()))
         .unwrap_or_else(|| {
             text("Select a native revision to inspect its details.")
                 .font(k.ty.small)
                 .color(k.c.text_faint)
         });
+    split(
+        s,
+        k,
+        available_width,
+        list,
+        details,
+        "history-revision-details",
+    )
+}
+
+fn split(
+    s: &State,
+    k: &Kit,
+    available_width: f32,
+    list: El,
+    details: El,
+    details_key: &'static str,
+) -> El {
+    let (min, max) = crate::split::bounds(
+        available_width,
+        LIST_MIN_WIDTH,
+        LIST_MAX_WIDTH,
+        DETAILS_MIN_WIDTH,
+        PANE_GAP,
+    );
+    let width = s.review.history.list_width.clamp(min, max);
     row()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .gap(9.0)
-        .child(list)
+        .gap(PANE_GAP)
+        .child(list.w(width).h_full().min_h(0.0))
+        .child(crate::split::divider(
+            "history-resize",
+            "Resize history list",
+            "Drag to resize the history list",
+            min,
+            max,
+            resize_list,
+            k,
+        ))
         .child(
             col()
-                .key("history-revision-details")
+                .key(details_key)
                 .grow(1.0)
                 .min_h(0.0)
-                .min_w(0.0)
+                .min_w(DETAILS_MIN_WIDTH)
                 .padding(8.0)
                 .radius(k.radius.md)
                 .fill(k.c.layer_01)
@@ -395,8 +424,61 @@ fn revisions_history(s: &State, k: &Kit) -> El {
         )
 }
 
-fn revision_details(entry: &waypoints_core::storage::NodeRevisionEntry, k: &Kit) -> El {
+fn resize_list(s: &mut State, drag: &mut Drag, tx: &mut Tx, min: f32, max: f32) {
+    let current = s.review.history.list_width;
+    crate::split::resize(
+        drag,
+        &mut s.review.history.list_resize_start,
+        &mut s.review.history.list_width,
+        current,
+        min,
+        max,
+        tx,
+    );
+}
+
+fn revision_details(
+    entry: &waypoints_core::storage::NodeRevisionEntry,
+    k: &Kit,
+    copy_notice: Option<&str>,
+) -> El {
     let revision = &entry.evolution.revision;
+    let actions = row()
+        .w_full()
+        .gap(8.0)
+        .items_center()
+        .flex_wrap()
+        .child(
+            Button::new("Copy commit")
+                .variant(ButtonVariant::GhostMuted)
+                .help("Copy the full native commit ID")
+                .on_press_tx(|s: &mut State, tx| {
+                    if let Some(entry) = s.review.history.revisions.iter().find(|entry| {
+                        Some(entry.evolution.revision.commit_id.as_str())
+                            == s.review.history.selected_revision.as_deref()
+                    }) {
+                        tx.copy(entry.evolution.revision.commit_id.clone());
+                        s.note_copied("Copied commit");
+                        tx.wake_after(std::time::Duration::from_millis(2600));
+                    }
+                })
+                .build(k)
+                .key("history-copy-commit"),
+        )
+        .child(
+            Button::new("Review this revision")
+                .variant(ButtonVariant::Contrast)
+                .on_press(|s: &mut State| s.review_history_revision())
+                .build(k)
+                .key("history-review-revision"),
+        )
+        .children(copy_notice.map(|notice| {
+            text(notice)
+                .key("history-copy-status")
+                .font(k.ty.small)
+                .color(k.c.success.fg)
+                .role("status")
+        }));
     col()
         .key("history-revision-detail")
         .w_full()
@@ -421,6 +503,7 @@ fn revision_details(entry: &waypoints_core::storage::NodeRevisionEntry, k: &Kit)
                         .then(|| text("Conflicted").font(k.ty.small).color(k.c.danger.fg)),
                 ),
         )
+        .child(actions)
         .child(
             text(revision.description.clone())
                 .font(k.ty.small)
@@ -462,13 +545,6 @@ fn revision_details(entry: &waypoints_core::storage::NodeRevisionEntry, k: &Kit)
             .font(k.ty.small)
             .color(k.c.text_muted)
         }))
-        .child(
-            Button::new("Review this revision")
-                .variant(ButtonVariant::Contrast)
-                .on_press(|s: &mut State| s.review_history_revision())
-                .build(k)
-                .key("history-review-revision"),
-        )
 }
 
 fn error_state(
@@ -486,6 +562,7 @@ fn error_state(
             text(error.to_owned())
                 .font(k.ty.small)
                 .color(k.c.danger.fg)
+                .help(error.to_owned())
                 .w_full()
                 .wrap()
                 .max_lines(4),

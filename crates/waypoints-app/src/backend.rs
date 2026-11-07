@@ -26,10 +26,12 @@ pub enum Command {
     ListWorkflows {
         token: u64,
         project: PathBuf,
+        quiet: bool,
     },
     LoadGraph {
         token: u64,
         workflow_id: i64,
+        quiet: bool,
     },
     SaveAssignment {
         token: u64,
@@ -41,6 +43,7 @@ pub enum Command {
     WorkflowRuns {
         token: u64,
         workflow_id: i64,
+        quiet: bool,
     },
     StartRun {
         token: u64,
@@ -115,11 +118,13 @@ pub enum Update {
     Workflows {
         token: u64,
         project: PathBuf,
+        quiet: bool,
         result: Result<Vec<Workflow>, String>,
     },
     Graph {
         token: u64,
         workflow_id: i64,
+        quiet: bool,
         result: Box<Result<WorkflowGraph, String>>,
     },
     AssignmentSaved {
@@ -131,6 +136,7 @@ pub enum Update {
     WorkflowRuns {
         token: u64,
         workflow_id: i64,
+        quiet: bool,
         result: Box<Result<Vec<NodeRunStatus>, String>>,
     },
     RunStatus {
@@ -221,6 +227,12 @@ fn worker(config: Config, commands: Receiver<Command>, updates: Sender<Update>, 
 
     let mut client: Option<Client> = None;
     while let Ok(command) = commands.recv() {
+        // An explicit Connect is also the retry path: drop the cached identity and
+        // connect again, so a backend restart is noticed instead of silently reusing
+        // a client whose socket disappeared.
+        if matches!(command, Command::Connect) {
+            client = None;
+        }
         if client.is_none() {
             match runtime.block_on(Client::connect(&config)) {
                 Ok(connected) => {
@@ -245,23 +257,33 @@ fn worker(config: Config, commands: Receiver<Command>, updates: Sender<Update>, 
         };
         let update = match command {
             Command::Connect => continue,
-            Command::ListWorkflows { token, project } => {
+            Command::ListWorkflows {
+                token,
+                project,
+                quiet,
+            } => {
                 let result = runtime
                     .block_on(client.list_workflows(&project))
                     .map_err(|error| error.to_string());
                 Update::Workflows {
                     token,
                     project,
+                    quiet,
                     result,
                 }
             }
-            Command::LoadGraph { token, workflow_id } => {
+            Command::LoadGraph {
+                token,
+                workflow_id,
+                quiet,
+            } => {
                 let result = runtime
                     .block_on(client.workflow_graph(workflow_id))
                     .map_err(|error| error.to_string());
                 Update::Graph {
                     token,
                     workflow_id,
+                    quiet,
                     result: Box::new(result),
                 }
             }
@@ -287,7 +309,11 @@ fn worker(config: Config, commands: Receiver<Command>, updates: Sender<Update>, 
                     result,
                 }
             }
-            Command::WorkflowRuns { token, workflow_id } => {
+            Command::WorkflowRuns {
+                token,
+                workflow_id,
+                quiet,
+            } => {
                 let result = runtime
                     .block_on(client.workflow_run_page(workflow_id, 100, None))
                     .map(|page| page.nodes)
@@ -295,6 +321,7 @@ fn worker(config: Config, commands: Receiver<Command>, updates: Sender<Update>, 
                 Update::WorkflowRuns {
                     token,
                     workflow_id,
+                    quiet,
                     result: Box::new(result),
                 }
             }

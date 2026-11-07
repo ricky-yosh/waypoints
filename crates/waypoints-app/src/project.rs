@@ -1,20 +1,27 @@
 //! Screen-space project and workflow navigator for backend-connected runs.
 
-use rune::{Color, Cursor, El, FileDialogOptions, ScrollSpec, Tx, col, el, row, text};
-use rune_kit::{Button, ButtonVariant, Kit};
+use rune::{Color, Cursor, El, FileDialogOptions, Icon, ScrollSpec, Tx, col, el, row, text};
+use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, glyphs};
 
 use crate::{LoadState, Mode, State};
 
-pub fn view(s: &State, k: &Kit) -> El {
+static NEW_WORKFLOW: Icon = Icon {
+    name: "waypoints-new-workflow",
+    view: 16.0,
+    body: r#"<path d="M8 3V13M3 8H13" stroke="currentColor" stroke-linecap="round"/>"#,
+};
+
+pub fn view(s: &State, k: &Kit, size: [f32; 2]) -> El {
     if s.mode != Mode::Backend || !s.preferences.sidebar_open {
         return el();
     }
     let (status, status_color) = status(s, k);
+    let height = (size[1] - 96.0 - 18.0).clamp(240.0, 360.0);
     let mut panel = col()
         .key("project-panel")
         .absolute(18.0, 96.0)
         .w(240.0)
-        .h(360.0)
+        .h(height)
         .padding(12.0)
         .gap(8.0)
         .radius(k.radius.lg)
@@ -58,25 +65,68 @@ pub fn view(s: &State, k: &Kit) -> El {
         )
         .child(project_list(s, k));
 
-    if let LoadState::Failed(error) = &s.backend_state {
-        panel = panel.child(
-            text(error.clone())
-                .key("backend-error")
-                .font(k.ty.small)
-                .color(k.c.danger.fg)
-                .w_full()
-                .wrap()
-                .max_lines(3),
-        );
+    if s.project_path.is_some() {
+        if let Some(error) = &s.project_open_error {
+            panel = panel.child(
+                text(error.clone())
+                    .key("project-open-error")
+                    .font(k.ty.small)
+                    .color(k.c.danger.fg)
+                    .help(error.clone())
+                    .w_full()
+                    .wrap()
+                    .max_lines(2),
+            );
+        }
+        if let LoadState::Failed(error) = &s.backend_state {
+            panel = panel.child(
+                text(error.clone())
+                    .key("backend-error")
+                    .font(k.ty.small)
+                    .color(k.c.danger.fg)
+                    .w_full()
+                    .wrap()
+                    .max_lines(3),
+            );
+        }
+        if let Some(error) = &s.sync_error {
+            panel = panel.child(
+                col()
+                    .w_full()
+                    .gap(4.0)
+                    .child(
+                        text(error.clone())
+                            .key("sync-error")
+                            .font(k.ty.small)
+                            .color(k.c.warning.fg)
+                            .help(error.clone())
+                            .w_full()
+                            .wrap()
+                            .max_lines(2),
+                    )
+                    .child(
+                        Button::new("Retry now")
+                            .variant(ButtonVariant::GhostMuted)
+                            .help("Retry the background refresh now")
+                            .on_press(|s: &mut State| s.sync_now())
+                            .build(k)
+                            .key("sync-retry"),
+                    ),
+            );
+        }
+        if matches!(s.backend_state, LoadState::Failed(_) | LoadState::Idle) {
+            panel = panel.child(
+                Button::new("Retry connection")
+                    .variant(ButtonVariant::Outline)
+                    .on_press(|s: &mut State| s.retry_backend())
+                    .build(k)
+                    .key("backend-retry"),
+            );
+        }
     }
-    if matches!(s.backend_state, LoadState::Failed(_) | LoadState::Idle) {
-        panel = panel.child(
-            Button::new("Retry connection")
-                .variant(ButtonVariant::Outline)
-                .on_press(|s: &mut State| s.retry_backend())
-                .build(k)
-                .key("backend-retry"),
-        );
+
+    if s.project_path.is_none() {
+        return panel;
     }
 
     panel = panel.child(
@@ -99,6 +149,13 @@ pub fn view(s: &State, k: &Kit) -> El {
         })
         .build(k)
         .key("workflows-refresh");
+    let new_workflow = IconButton::new(&NEW_WORKFLOW)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("New workflow")
+        .help("Show the harness prompt for creating a workflow")
+        .on_press(|s: &mut State| s.open_workflow_help("new-workflow-sidebar"))
+        .build(k)
+        .key("new-workflow-sidebar");
     panel = panel.child(
         row()
             .w_full()
@@ -109,7 +166,13 @@ pub fn view(s: &State, k: &Kit) -> El {
                     .font(k.ty.small_medium)
                     .color(k.c.text_faint),
             )
-            .child(refresh),
+            .child(
+                row()
+                    .gap(2.0)
+                    .items_center()
+                    .child(new_workflow)
+                    .child(refresh),
+            ),
     );
 
     let body = match &s.workflows_state {
@@ -126,6 +189,7 @@ pub fn view(s: &State, k: &Kit) -> El {
                 text(error.clone())
                     .font(k.ty.small)
                     .color(k.c.danger.fg)
+                    .help(error.clone())
                     .w_full()
                     .wrap()
                     .max_lines(3),
@@ -138,7 +202,7 @@ pub fn view(s: &State, k: &Kit) -> El {
                     .key("workflows-retry"),
             ),
         _ if s.workflows.is_empty() => col().key("workflows-empty").padding(8.0).child(
-            text("No active workflows in this project")
+            text("No workflows yet · ask your agent to create one")
                 .font(k.ty.small)
                 .color(k.c.text_muted)
                 .wrap(),
@@ -210,6 +274,7 @@ pub fn view(s: &State, k: &Kit) -> El {
                     text(error.clone())
                         .font(k.ty.small)
                         .color(k.c.danger.fg)
+                        .help(error.clone())
                         .wrap()
                         .max_lines(3),
                 )
@@ -245,7 +310,7 @@ pub fn open_add_dialog(tx: &mut Tx) {
     tx.open_folder(options, |s: &mut State, result, _| match result {
         Ok(Some(path)) => s.add_project(path),
         Ok(None) => {}
-        Err(error) => s.preferences_error = Some(error.to_string()),
+        Err(error) => s.project_open_error = Some(error.to_string()),
     });
 }
 
@@ -253,7 +318,10 @@ fn project_list(s: &State, k: &Kit) -> El {
     let add = Button::new("Add")
         .variant(ButtonVariant::GhostMuted)
         .help("Add an existing project folder")
-        .on_press_tx(|_s: &mut State, tx| open_add_dialog(tx))
+        .on_press_tx(|s: &mut State, tx| {
+            s.project_open_error = None;
+            open_add_dialog(tx);
+        })
         .build(k)
         .key("project-add");
     let list_height = (s.preferences.projects.len().max(1) as f32 * 36.0).min(96.0);
@@ -319,9 +387,10 @@ fn project_list(s: &State, k: &Kit) -> El {
                             ),
                     )
                     .child(
-                        Button::new("×")
-                            .variant(ButtonVariant::GhostFaint)
-                            .help("Remove this project from the list")
+                        IconButton::new(&glyphs::CLOSE)
+                            .variant(IconButtonVariant::GhostMuted)
+                            .label("Remove project")
+                            .help("Remove this project from the list; files are not deleted")
                             .on_press(move |s: &mut State| s.remove_project(&remove_path))
                             .build(k)
                             .key(format!("project-remove-{index}")),
@@ -348,7 +417,11 @@ fn project_list(s: &State, k: &Kit) -> El {
 }
 
 fn status(s: &State, k: &Kit) -> (&'static str, Color) {
+    if s.project_path.is_none() {
+        return ("No project", k.c.text_faint);
+    }
     match &s.backend_state {
+        LoadState::Ready if s.sync_error.is_some() => ("Reconnecting", k.c.warning.fg),
         LoadState::Ready => ("Connected", k.c.success.fg),
         LoadState::Loading => ("Connecting", k.c.warning.fg),
         LoadState::Failed(_) => ("Unavailable", k.c.danger.fg),

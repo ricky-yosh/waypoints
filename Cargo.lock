@@ -4824,6 +4824,7 @@ dependencies = [
  "tokio",
  "waypoints-backend",
  "waypoints-core",
+ "waypoints-desktop-ipc",
 ]
 
 [[package]]
@@ -4850,6 +4851,7 @@ dependencies = [
  "turso",
  "waypoints-backend",
  "waypoints-core",
+ "waypoints-desktop-ipc",
 ]
 
 [[package]]
@@ -4862,6 +4864,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "turso",
+]
+
+[[package]]
+name = "waypoints-desktop-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

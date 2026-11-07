@@ -103,3 +103,41 @@ not currently exposed in the GUI are not implicit requirements for this port.
 
 Acceptance: normal documented commands launch Rune, required checks pass, and
 the remaining dependency graph matches the approved migration state.
+
+## 6. Agent-led workflows and the visual companion
+
+Goal: the user's harness is the primary conversation surface; the desktop app is
+an on-demand visual companion. Preserve the backend safety checks and do not add
+in-app chat, scheduling, implicit Git/jj initialization, native repair, or
+publication.
+
+- [x] Inspect the existing app/backend/CLI contracts and record the gaps for
+  agent open/focus, live synchronization, and distinct onboarding states
+  ([progress.md](progress.md#agent-led-workflow-goal)).
+- [x] Select and implement the open/focus contract:
+  `waypoints app open --project PATH [--workflow ID]` validates against the
+  backend client, reuses a running app through a private Unix control socket,
+  and otherwise launches `waypoints-app`.
+- [x] Refresh workflows, the selected graph, and node run statuses quietly while
+  the app is open. Preserve selection, presentation-only card positions, drafts,
+  and loaded history state; expose disconnection as **Reconnecting** with the
+  error, and keep manual Refresh.
+- [x] Replace the generic empty canvas with distinct no-project, loading,
+  disconnection/error, and no-workflow states. Share folder validation between
+  drop and **Open project…**, and share one copyable prompt between the empty
+  state and the persistent New workflow controls.
+- [x] Verify the end to end coordinator flow with isolated projects and the
+  deterministic fake ACP adapter: create a workflow externally, reveal the exact
+  graph, start an ACP worker outside the app, see permission/progress in the app,
+  reply, and preserve an unsaved draft across an external prompt edit.
+- [ ] Perform a real installed-model ACP run and Linux/Windows checks when those
+  environments are available. These are not implied by the fake-adapter tests.
+
+Acceptance: the documented open command reveals the requested workflow without
+duplicate work; external creation and run progress appear without repeated
+manual refresh; onboarding states are distinct and keyboard/drop accessible; and
+the automated coordinator flow passes against the real backend contracts.
+
+Optional decorative onboarding motion was intentionally deferred. Functional
+onboarding, focus, and copy feedback come first; if added, it must respect
+reduced motion, avoid fake run state, and stop when hidden.

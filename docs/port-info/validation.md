@@ -9,9 +9,15 @@ with a checked baseline, starts/continues/cancels runs, polls bounded ACP
 events, replies to single-use permissions, reviews exact current/run/revision
 patches through Rune Kit's diff view, browses pinned run/native history, and
 shows snapshot and continuation state. It does not open the database. Rune-only
-appearance/reduced-motion preferences live in a separate file. Native startup
-and 120-frame traces pass on the development host; the user confirmed the native
-macOS interaction, menu, IME/VoiceOver, close/reopen, and multi-display checks.
+appearance/reduced-motion preferences live in a separate file. The app also
+refreshes the workflow list, selected graph, and node run statuses quietly every
+two seconds, and exposes distinct no-project/no-workflow onboarding states.
+`waypoints app open --project PATH [--workflow ID]` validates through the backend
+client and reuses a running app through a private Unix control socket. Native
+startup and 120-frame traces pass on the development host; the user confirmed the
+native macOS interaction, menu, IME/VoiceOver, close/reopen, and multi-display
+checks. A native isolated control check focused an already-running app and
+persisted the requested project/workflow.
 
 Run commands from the repository root. Rune is the canonical `waypoints-app`
 package; the former GPUI validation commands were removed with the cutover.
@@ -31,6 +37,101 @@ cargo check --workspace --locked
 Workspace-wide `cargo fmt --all` and Clippy still encounter pre-existing
 backend/core formatting and MSRV findings; the canonical app's strict checks
 are the release gate.
+
+## Agent-led workflow checks
+
+```sh
+cargo test -p waypoints-desktop-ipc --locked
+cargo test -p waypoints-app --locked
+cargo test -p waypoints-cli --test app_open --locked
+```
+
+The app suite includes `poll_reveals_external_workflows_without_manual_refresh`
+(the runtime poll discovers a workflow created through the backend client) and
+`coordinator_creates_opens_and_runs_work_reflected_by_live_sync` (external
+workflow/node/change/workspace creation, exact agent open, externally started
+fake ACP run, permission reply, completion, external prompt edit preserving an
+unsaved draft, and a second workflow appearing without manual refresh).
+`onboarding_states_are_distinct_and_drop_shares_project_validation` covers the
+no-project drop target, multiple-drop rejection, no-workflow prompt/copy
+feedback, persistent New workflow controls, and a transient disconnect keeping
+the visible graph. The CLI tests exercise both control-socket reuse and the
+launcher fallback against a fake desktop. The backend CLI suite also includes
+`cli_coordinator_opens_the_exact_workflow_while_a_fake_worker_is_active`: real
+CLI commands create a workflow/node/change/workspace and start a fake-ACP run,
+then `app open` reveals that workflow while the run is awaiting permission, with
+the workflow and run counts unchanged.
+
+For an isolated native control check on macOS/Linux:
+
+```sh
+ROOT=$(mktemp -d /tmp/waypoints-agent-check.XXXXXX)
+mkdir -p "$ROOT/project"
+export XDG_STATE_HOME="$ROOT/state"
+export WAYPOINTS_RUNE_PREFERENCES_FILE="$ROOT/prefs.json"
+export WAYPOINTS_APP_SOCKET="$ROOT/desktop.sock"
+waypoints workflow create --project "$ROOT/project" --name "Agent workflow" --json
+waypoints-app --project "$ROOT/project" &
+waypoints app open --project "$ROOT/project" --workflow 1 --json
+```
+
+Expect `{"ok":true,"status":"focused",...}` from a running app and a
+`selected_workflow` value in the isolated preferences file. Stop the app and
+backend afterward. This checks focus and state selection; it is not a substitute
+for the person checks for visual appearance, IME, VoiceOver, or multi-display.
+
+## UI/UX audit checks
+
+```sh
+cargo test -p waypoints-app --locked
+cargo fmt -p waypoints-app -- --check
+cargo clippy -p waypoints-app --all-targets --all-features --locked --no-deps -- -D warnings
+```
+
+The app suite now covers the audit's observable behavior:
+
+- `history_uses_a_draggable_split_between_list_and_details` — History divider
+  exists for runs and native revisions, drags both ways, clamps at 160–360
+  points, leaves 200 points for details, and stays usable at 720×480/130%.
+- `diff_review_renders_targets_files_modes_and_staleness` — Changes keeps
+  140–360 point file-list bounds, leaves 220 points for the diff at
+  720×480/130%, and reports commit-copy feedback.
+- `settings_and_project_panels_fit_the_minimum_window_at_large_zoom` — both
+  panels stay inside 720×480 at 130%; Settings wheel scrolling reveals lower
+  content; Escape returns focus to Settings.
+- `workflow_graph_loading_and_failure_stay_visible_without_the_sidebar` —
+  central graph loading/error/retry states and HUD Reconnecting status.
+- `failed_history_refresh_keeps_rows_and_selection` — Refresh failures retain
+  loaded run/revision rows and selection.
+- `switching_nodes_restores_tab_selection_and_split_width` — node navigation
+  restores the workbench tab, History selection, and split width.
+- `returning_to_a_node_resumes_interrupted_requests` — review/history loads
+  interrupted by a node switch are retried and settle instead of staying
+  Loading forever.
+- `project_open_errors_use_the_project_surface_not_preferences` — folder errors
+  appear beside the project list rather than in prefs-only UI.
+- `coordinator_creates_opens_and_runs_work_reflected_by_live_sync` — a stopped
+  run's transcript reloads after switching away and back.
+
+Representative headless scenes (under `target/port-info/rune/`, not committed):
+`history-runs`, `history-native`, `history-runs-zoom`, `settings`,
+`settings-zoom`, `project-sidebar-zoom`, `assignment-zoom`,
+`diff-review-zoom`, `structured-output-zoom`, `onboarding-no-project`,
+`onboarding-no-workflows`, and `workflow-help`, in light and dark at
+1280×820 or 720×480. Inspect the PNGs and trees; screenshots alone are not
+interaction evidence.
+
+Native smoke evidence: isolated launches with
+`waypoints-app --native --trace --frames 120 --theme dark --project …`
+exited 0 with 0 failed acquires and no error/panic lines. One run presented
+119/120 frames (p50/p95 16.67/16.67 ms); a later run presented 117/120
+(p50/p95 16.67/33.33 ms), recorded as host/display-link variability. This is
+startup and rendering evidence only.
+
+Native person checks still required for this audit: drag both dividers with a
+mouse/trackpad, wheel/trackpad scroll the Settings body, use 130% zoom at the
+minimum window, and verify focus rings/focus return with VoiceOver. Headless
+tests do not prove native usability.
 
 ## Rune configuration and prerequisites
 

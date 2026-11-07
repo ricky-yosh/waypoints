@@ -7,13 +7,16 @@
 mod activity;
 mod backend;
 mod canvas;
+mod control;
 mod diff_review;
 mod fixture;
 mod history_view;
+mod onboarding;
 mod preferences;
 mod project;
 mod run_output;
 mod settings;
+mod split;
 mod startup;
 mod state;
 mod workbench;
@@ -40,6 +43,13 @@ fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return false;
     }
+    if s.workflow_help_open {
+        if matches!(event.key, Key::Escape) {
+            s.close_workflow_help();
+            return true;
+        }
+        return false;
+    }
     if s.workbench_open && s.review.tab == WorkbenchTab::Changes && s.review.diff.key(event, tx) {
         return true;
     }
@@ -57,6 +67,7 @@ fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         && !s.display_fixture
     {
         s.set_sidebar_open(true);
+        s.project_open_error = None;
         project::open_add_dialog(tx);
         return true;
     }
@@ -213,16 +224,29 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .w(content_size[0])
         .h(content_size[1])
         .origin(0.0, 0.0)
-        .scale(zoom)
-        .child(canvas::viewport(s, &kit, dark, content_size, insets));
-    if s.mode == Mode::Backend && !s.display_fixture {
-        content = content.child(project::view(s, &kit));
+        .scale(zoom);
+    let onboarding = onboarding::view(s, &kit, content_size, insets, dark);
+    let onboarding_active = onboarding.is_some();
+    content = match onboarding {
+        Some(onboarding) => content.child(onboarding),
+        None => content.child(canvas::viewport(s, &kit, dark, content_size, insets)),
+    };
+    // Narrow onboarding uses the full window; the fixed project panel would
+    // otherwise cover the primary action and prompt.
+    if s.mode == Mode::Backend
+        && !s.display_fixture
+        && (!onboarding_active || content_size[0] >= 1120.0)
+    {
+        content = content.child(project::view(s, &kit, content_size));
     }
     if s.workbench_open && s.selected.is_some() {
         content = content.child(workbench::view(s, &kit, content_size[0], content_size[1]));
     }
+    if s.workflow_help_open {
+        content = content.child(onboarding::workflow_help(s, &kit, content_size));
+    }
     if s.settings_open {
-        content = content.child(settings::view(s, &kit));
+        content = content.child(settings::view(s, &kit, content_size));
     }
     el().key("app-root")
         .w_full()
@@ -264,6 +288,76 @@ fn backend_display_scene(s: &mut State) {
     s.graph_state = LoadState::Idle;
 }
 
+fn scene_onboarding_no_project(s: &mut State) {
+    s.backend_enabled = false;
+    s.display_fixture = false;
+    s.mode = Mode::Backend;
+    s.project_path = None;
+    s.preferences.selected_project = None;
+    s.preferences.sidebar_open = true;
+    s.graph = fixture::Graph::default();
+    s.backend_state = LoadState::Idle;
+    s.workflows_state = LoadState::Idle;
+    s.graph_state = LoadState::Idle;
+}
+
+fn scene_workflow_help(s: &mut State) {
+    scene_onboarding_no_workflows(s);
+    s.open_workflow_help("new-workflow-sidebar");
+}
+
+fn scene_onboarding_no_project_zoom(s: &mut State) {
+    scene_onboarding_no_project(s);
+    s.preferences.interface_zoom = 1.3;
+}
+
+fn scene_settings_zoom(s: &mut State) {
+    scene_settings(s);
+    s.preferences.interface_zoom = 1.3;
+}
+
+fn scene_history_runs_zoom(s: &mut State) {
+    scene_history_runs(s);
+    s.preferences.interface_zoom = 1.3;
+}
+
+fn scene_assignment_zoom(s: &mut State) {
+    scene_assignment(s);
+    s.preferences.interface_zoom = 1.3;
+}
+
+fn scene_diff_review_zoom(s: &mut State) {
+    scene_diff_review(s);
+    s.preferences.interface_zoom = 1.3;
+}
+
+fn scene_structured_output_zoom(s: &mut State) {
+    scene_structured_output(s);
+    s.preferences.interface_zoom = 1.3;
+}
+
+fn scene_onboarding_no_workflows_zoom(s: &mut State) {
+    scene_onboarding_no_workflows(s);
+    s.preferences.interface_zoom = 1.3;
+}
+
+fn scene_onboarding_no_workflows(s: &mut State) {
+    s.backend_enabled = false;
+    s.display_fixture = false;
+    s.mode = Mode::Backend;
+    s.project_path = Some("/tmp/waypoints-app-fixture/empty-project".into());
+    s.preferences.projects = vec!["/tmp/waypoints-app-fixture/empty-project".into()];
+    s.preferences.selected_project = s.project_path.clone();
+    s.preferences.sidebar_open = true;
+    s.preferences.selected_workflow = None;
+    s.graph = fixture::Graph::default();
+    s.backend_state = LoadState::Ready;
+    s.workflows_state = LoadState::Ready;
+    s.workflows.clear();
+    s.selected_workflow = None;
+    s.graph_state = LoadState::Idle;
+}
+
 fn scene_graph_preview(s: &mut State) {
     fixture_scene(s);
     s.selected = Some(4);
@@ -278,6 +372,11 @@ fn scene_workbench(s: &mut State) {
     s.camera.set_pan([10.0, 12.0]);
     s.camera.zoom.set(1.12);
     seed_output(s, 9);
+}
+
+fn scene_project_sidebar_zoom(s: &mut State) {
+    scene_project_sidebar(s);
+    s.preferences.interface_zoom = 1.3;
 }
 
 fn scene_interface_zoom(s: &mut State) {
@@ -657,6 +756,7 @@ fn menu_open_settings(s: &mut State, _: &mut Tx) {
 
 fn menu_add_project(s: &mut State, tx: &mut Tx) {
     s.set_sidebar_open(true);
+    s.project_open_error = None;
     project::open_add_dialog(tx);
 }
 
@@ -802,6 +902,38 @@ fn restored_position(
 
 fn main() {
     let _ = startup();
+    let control_listener = if rune::is_headless() {
+        None
+    } else {
+        match control::socket_path() {
+            Ok(path) => {
+                let request = waypoints_desktop_ipc::Request {
+                    project: startup().project.clone(),
+                    workflow: startup().workflow,
+                };
+                if control::forward_if_running(&path, &request) {
+                    return;
+                }
+                match control::bind(&path) {
+                    Ok(listener) => Some(listener),
+                    Err(error) => {
+                        if control::forward_if_running(&path, &request) {
+                            return;
+                        }
+                        eprintln!(
+                            "waypoints-app: desktop control unavailable at {}: {error}",
+                            path.display()
+                        );
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("waypoints-app: {error}");
+                None
+            }
+        }
+    };
     let loaded = preferences::load();
     rune::run_windows_with(rune::RunOptions::default(), move |displays| {
         let geometry = loaded
@@ -825,13 +957,30 @@ fn main() {
                     "structured-output-expanded",
                     scene_structured_output_expanded,
                 ),
+                ("structured-output-zoom", scene_structured_output_zoom),
                 ("diff-review", scene_diff_review),
+                ("diff-review-zoom", scene_diff_review_zoom),
                 ("assignment", scene_assignment),
                 ("assignment-preview", scene_assignment_preview),
+                ("assignment-zoom", scene_assignment_zoom),
                 ("settings", scene_settings),
+                ("settings-zoom", scene_settings_zoom),
+                ("onboarding-no-project", scene_onboarding_no_project),
+                (
+                    "onboarding-no-project-zoom",
+                    scene_onboarding_no_project_zoom,
+                ),
+                ("onboarding-no-workflows", scene_onboarding_no_workflows),
+                (
+                    "onboarding-no-workflows-zoom",
+                    scene_onboarding_no_workflows_zoom,
+                ),
+                ("workflow-help", scene_workflow_help),
                 ("project-sidebar", scene_project_sidebar),
+                ("project-sidebar-zoom", scene_project_sidebar_zoom),
                 ("interface-zoom", scene_interface_zoom),
                 ("history-runs", scene_history_runs),
+                ("history-runs-zoom", scene_history_runs_zoom),
                 ("history-native", scene_history_native),
             ],
             setup: Some(setup),
@@ -850,6 +999,9 @@ fn main() {
             })
             .on_close(save_preferences_on_close);
         let handle = app.handle();
+        if let Some(listener) = control_listener {
+            control::serve(listener, handle.clone());
+        }
         MENU_HANDLE.with(|cell| *cell.borrow_mut() = Some(handle));
         vec![rune::WindowSpec::from_app("main", app)]
     });
@@ -876,6 +1028,35 @@ mod tests {
         runtime.check_live_only(false);
         runtime.frame(0.0);
         runtime
+    }
+
+    /// A backend canvas with one selected workflow, so onboarding does not
+    /// replace the normal HUD/canvas test surface.
+    fn backend_canvas_state() -> State {
+        let mut state = State {
+            mode: Mode::Backend,
+            backend_enabled: false,
+            project_path: Some("/tmp/waypoints-app-fixture/canvas-project".into()),
+            ..State::default()
+        };
+        state.display_fixture = false;
+        state.backend_state = LoadState::Ready;
+        state.workflows_state = LoadState::Ready;
+        state.workflows = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": 1,
+                "project_path": "/tmp/waypoints-app-fixture/canvas-project",
+                "name": "Canvas workflow",
+                "base": null,
+                "archived": false
+            }))
+            .expect("workflow fixture"),
+        ];
+        state.selected_workflow = Some(1);
+        state.graph = crate::fixture::small_graph();
+        state.graph_state = LoadState::Ready;
+        state.preferences.sidebar_open = true;
+        state
     }
 
     fn click(runtime: &mut Runtime<State>, x: f32, y: f32) {
@@ -1289,12 +1470,12 @@ mod tests {
         state.apply_backend_update(Update::Graph {
             token: old_token,
             workflow_id: workflow.id,
+            quiet: false,
             result: Box::new(Ok(old_graph)),
         });
-        assert_eq!(
-            state.source_graph.as_ref().map(|graph| graph.workflow.id),
-            Some(workflow.id),
-            "a stale graph reply does not replace the newly selected workflow"
+        assert!(
+            state.source_graph.is_none(),
+            "switching workflows clears the previous graph before the new one loads"
         );
         wait_for_state(&mut state, Duration::from_secs(10), |state| {
             state.graph_state == LoadState::Ready
@@ -1652,6 +1833,276 @@ mod tests {
     }
 
     #[test]
+    fn poll_reveals_external_workflows_without_manual_refresh() {
+        use rune::Env;
+
+        let server = spawn_test_server();
+        let tokio_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test client runtime");
+        let project = server._directory.path().join("sync-project");
+        std::fs::create_dir(&project).expect("project directory");
+        let state = State {
+            mode: Mode::Backend,
+            project_path: Some(project.clone()),
+            graph: Graph::default(),
+            backend: Some(Backend::spawn(
+                server.config.clone(),
+                std::sync::Arc::new(|| {}),
+            )),
+            backend_state: LoadState::Loading,
+            preferences_path: Some(server._directory.path().join("prefs.json")),
+            preferences_writable: true,
+            ..State::default()
+        };
+        state
+            .backend
+            .as_ref()
+            .expect("backend")
+            .send(Command::Connect);
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+        wait_for_runtime(&mut runtime, Duration::from_secs(10), |state| {
+            state.workflows_state == LoadState::Ready && state.workflows.is_empty()
+        });
+
+        let client = tokio_rt.block_on(connect_test_client(&server.config));
+        let workflow = tokio_rt
+            .block_on(client.create_workflow(&project, "External sync workflow"))
+            .expect("create workflow");
+        tokio_rt
+            .block_on(client.create_node(workflow.id, "External sync node"))
+            .expect("create node");
+
+        // No explicit Refresh or sync_now call: the runtime poll interval must
+        // discover the new workflow and its graph.
+        wait_for_runtime(&mut runtime, Duration::from_secs(10), |state| {
+            state.workflows.len() == 1
+                && state.selected_workflow == Some(workflow.id)
+                && state.graph_state == LoadState::Ready
+        });
+        assert_eq!(runtime.state.graph.nodes.len(), 1);
+        assert_eq!(runtime.state.graph.nodes[0].title, "External sync node");
+
+        drop(runtime);
+        let _ = tokio_rt.block_on(client.stop());
+        let _ = server.handle.join();
+    }
+
+    #[test]
+    fn coordinator_creates_opens_and_runs_work_reflected_by_live_sync() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let server = spawn_test_server();
+        let tokio_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test client runtime");
+        let project = server._directory.path().join("coordinator-project");
+        std::fs::create_dir(&project).expect("project directory");
+        git_jj(
+            server._directory.path(),
+            &["git", "init", "coordinator-project"],
+        );
+        std::fs::write(project.join("baseline.txt"), "baseline\n").expect("baseline");
+        git_jj(&project, &["describe", "-m", "Coordinator baseline"]);
+        let workspace = server._directory.path().join("coordinator-workspace");
+        let agent = server._directory.path().join("coordinator-acp");
+        std::fs::write(
+            &agent,
+            include_str!("../../waypoints-cli/tests/fixtures/acp_agent.py"),
+        )
+        .expect("fake ACP agent");
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))
+            .expect("agent permissions");
+
+        let client = tokio_rt.block_on(connect_test_client(&server.config));
+        let mut state = State {
+            mode: Mode::Backend,
+            project_path: Some(project.clone()),
+            graph: Graph::default(),
+            backend: Some(Backend::spawn(
+                server.config.clone(),
+                std::sync::Arc::new(|| {}),
+            )),
+            backend_state: LoadState::Loading,
+            preferences_path: Some(server._directory.path().join("prefs.json")),
+            preferences_writable: true,
+            ..State::default()
+        };
+        state
+            .backend
+            .as_ref()
+            .expect("backend")
+            .send(Command::Connect);
+        wait_for_state(&mut state, Duration::from_secs(10), |state| {
+            state.workflows_state == LoadState::Ready && state.workflows.is_empty()
+        });
+
+        // The coordinator acts through the supported client while the app is open:
+        // no manual Refresh and no in-app creation step.
+        let (workflow, node) = tokio_rt.block_on(async {
+            let workflow = client
+                .create_workflow(&project, "Coordinator workflow")
+                .await
+                .expect("create workflow");
+            let node = client
+                .create_node(workflow.id, "permission")
+                .await
+                .expect("create node");
+            client
+                .create_node_change(workflow.id, node.id, "root()")
+                .await
+                .expect("create node change");
+            client
+                .create_node_workspace(workflow.id, node.id, &workspace)
+                .await
+                .expect("create node workspace");
+            (workflow, node)
+        });
+        state.sync_now();
+        wait_for_state(&mut state, Duration::from_secs(10), |state| {
+            state.workflows.len() == 1
+                && state.selected_workflow == Some(workflow.id)
+                && state.graph_state == LoadState::Ready
+                && state.graph.node(node.id).is_some()
+        });
+
+        // Agent open targets the exact workflow and does not duplicate work.
+        state.apply_open_request(Some(project.clone()), Some(workflow.id));
+        wait_for_state(&mut state, Duration::from_secs(10), |state| {
+            state.selected_workflow == Some(workflow.id)
+                && state.graph_state == LoadState::Ready
+                && state.workflows.len() == 1
+        });
+        assert_eq!(
+            state.source_graph.as_ref().map(|graph| graph.workflow.id),
+            Some(workflow.id)
+        );
+
+        // The coordinator starts the ACP worker; the app notices it and replays
+        // the live transcript without starting a second run.
+        let run_id = tokio_rt
+            .block_on(client.start_run(workflow.id, node.id, &agent))
+            .expect("start run")
+            .run
+            .id;
+        state.select_remote_node(node.id);
+        state.sync_now();
+        wait_for_state(&mut state, Duration::from_secs(20), |state| {
+            state
+                .selected_run()
+                .is_some_and(|run| run.run.id == run_id && run.permission.is_some())
+        });
+        assert!(
+            state.run_log.blocks().iter().any(|block| {
+                matches!(
+                    &block.activity,
+                    Activity::Text(Stream::Assistant, text) if text == "event-0"
+                )
+            }),
+            "externally started run output reaches the app: {:?}",
+            state.run_log.blocks()
+        );
+
+        let (permission_id, option_id) = {
+            let permission = state
+                .selected_run()
+                .and_then(|run| run.permission.as_ref())
+                .expect("pending permission");
+            let option = permission
+                .options
+                .iter()
+                .find(|option| option.option_id == "allow")
+                .expect("allow once option");
+            (permission.id, option.option_id.clone())
+        };
+        state.reply_permission(permission_id, option_id);
+        wait_for_state(&mut state, Duration::from_secs(20), |state| {
+            state.selected_run().is_some_and(|run| {
+                run.run.id == run_id && matches!(run.run.state, RunState::Completed)
+            })
+        });
+
+        // Switching nodes and returning reloads the stopped run's transcript from
+        // the backend instead of showing an empty Output tab.
+        let second_node = tokio_rt
+            .block_on(client.create_node(workflow.id, "Inspect another node"))
+            .expect("create second node");
+        state.sync_now();
+        wait_for_state(&mut state, Duration::from_secs(10), |state| {
+            state
+                .source_graph
+                .as_ref()
+                .is_some_and(|graph| graph.nodes.iter().any(|node| node.id == second_node.id))
+        });
+        state.select_remote_node(second_node.id);
+        assert!(
+            state.run_log.blocks().is_empty(),
+            "the other node has no run transcript"
+        );
+        state.select_remote_node(node.id);
+        wait_for_state(&mut state, Duration::from_secs(10), |state| {
+            state.run_log.blocks().iter().any(|block| {
+                matches!(
+                    &block.activity,
+                    Activity::Text(Stream::Assistant, text) if text == "event-0"
+                )
+            })
+        });
+
+        // An external prompt edit is reconciled while an unsaved local draft stays safe.
+        state.select_remote_node(node.id);
+        state
+            .drafts
+            .get_mut(&(workflow.id, node.id))
+            .expect("draft")
+            .edit
+            .replace_text("local unsaved draft");
+        tokio_rt
+            .block_on(client.update_node(workflow.id, node.id, "permission updated"))
+            .expect("external prompt update");
+        state.sync_now();
+        wait_for_state(&mut state, Duration::from_secs(10), |state| {
+            state
+                .source_graph
+                .as_ref()
+                .and_then(|graph| graph.nodes.iter().find(|saved| saved.id == node.id))
+                .is_some_and(|saved| saved.prompt == "permission updated")
+        });
+        let draft = state.draft_for(node.id).expect("preserved draft");
+        assert_eq!(draft.edit.text, "local unsaved draft");
+        assert!(draft.dirty());
+        assert!(
+            draft
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("unsaved draft kept")),
+            "draft reconciliation is explicit: {:?}",
+            draft.notice
+        );
+
+        // A second workflow created externally appears without a manual refresh and
+        // does not replace the selected one.
+        let second = tokio_rt
+            .block_on(client.create_workflow(&project, "Second coordinator workflow"))
+            .expect("create second workflow");
+        state.sync_now();
+        wait_for_state(&mut state, Duration::from_secs(10), |state| {
+            state.workflows.len() == 2 && state.workflows.iter().any(|saved| saved.id == second.id)
+        });
+        assert_eq!(state.selected_workflow, Some(workflow.id));
+
+        drop(state);
+        let _ = tokio_rt.block_on(client.stop());
+        let _ = server.handle.join();
+    }
+
+    #[test]
     fn backend_failure_empty_and_retry_states_render() {
         let mut state = State {
             mode: Mode::Backend,
@@ -1862,6 +2313,69 @@ mod tests {
         });
         runtime.frame(0.0);
         assert!(runtime.find("review-conflicted").is_some());
+
+        let (copy_x, copy_y) = runtime
+            .find("review-copy-commit")
+            .expect("copy commit action");
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        click(&mut runtime, copy_x, copy_y);
+        assert_eq!(runtime.state.copy_notice(), Some("Copied commit"));
+        assert!(
+            runtime.find("review-copy-status").is_some(),
+            "copying a commit reports success beside the action"
+        );
+
+        // The same divider clamps against the diff pane in a narrow, zoomed
+        // workbench instead of letting the diff collapse.
+        let mut state = State::default();
+        scene_diff_review(&mut state);
+        state.preferences.interface_zoom = 1.3;
+        let mut narrow = Runtime::new(state, view, (720.0, 480.0), Env::new(false, 1.0));
+        narrow.poll = Some(poll);
+        narrow.on_key = Some(on_key);
+        narrow.check_live_only(false);
+        narrow.frame(0.0);
+        let zoom = narrow.state.preferences.interface_zoom;
+        let (surface, _) = narrow
+            .presented("review-diff-surface")
+            .expect("narrow diff surface");
+        assert!(
+            surface[2] / zoom >= 219.0,
+            "the diff keeps its minimum width at 130% zoom: {surface:?}"
+        );
+        let (grip_x, grip_y) = narrow
+            .find("review-file-resize")
+            .expect("narrow file resize grip");
+        narrow.pointer_down(grip_x, grip_y);
+        narrow.pointer_move(grip_x + 500.0, grip_y);
+        narrow.pointer_up(grip_x + 500.0, grip_y);
+        narrow.frame(0.0);
+        let (surface, _) = narrow
+            .presented("review-diff-surface")
+            .expect("narrow diff surface after resize");
+        assert!(
+            surface[2] / zoom >= 219.0,
+            "dragging the divider cannot collapse the narrow diff pane: {surface:?}"
+        );
+        assert!(
+            narrow.state.review.file_list_width <= 253.0,
+            "the file list is capped by the available width: {}",
+            narrow.state.review.file_list_width
+        );
+        let (grip_x, grip_y) = narrow
+            .find("review-file-resize")
+            .expect("narrow file resize grip");
+        narrow.pointer_down(grip_x, grip_y);
+        narrow.pointer_move(grip_x - 500.0, grip_y);
+        narrow.pointer_up(grip_x - 500.0, grip_y);
+        narrow.frame(0.0);
+        assert!(
+            (narrow.state.review.file_list_width - 140.0).abs() < 1.0,
+            "the file list keeps its readable minimum: {}",
+            narrow.state.review.file_list_width
+        );
     }
 
     #[test]
@@ -1909,7 +2423,7 @@ mod tests {
         assert_eq!(runtime.state.review.history.runs.len(), 2);
         assert_eq!(
             runtime.state.review.history.notice.as_deref(),
-            Some("older run page failed")
+            Some("Couldn’t load older runs · older run page failed")
         );
         assert!(runtime.find("history-notice").is_some());
 
@@ -1922,6 +2436,17 @@ mod tests {
         runtime.frame(0.0);
         assert!(runtime.find("history-revision-bc1ff243d16d").is_some());
         assert!(runtime.find("history-review-revision").is_some());
+        let (copy_x, copy_y) = runtime
+            .find("history-copy-commit")
+            .expect("history copy commit action");
+        runtime.pointer_move(copy_x, copy_y);
+        runtime.frame(0.0);
+        click(&mut runtime, copy_x, copy_y);
+        assert_eq!(runtime.state.copy_notice(), Some("Copied commit"));
+        assert!(
+            runtime.find("history-copy-status").is_some(),
+            "native history reports copy success beside the action"
+        );
         runtime.update(|state, _| state.review.history.fresh = true);
         runtime.frame(0.0);
         assert!(runtime.find("history-freshness").is_some());
@@ -1941,7 +2466,395 @@ mod tests {
         assert_eq!(runtime.state.review.history.revisions.len(), 2);
         assert_eq!(
             runtime.state.review.history.notice.as_deref(),
-            Some("older revision page failed")
+            Some("Couldn’t load older revisions · older revision page failed")
+        );
+    }
+
+    #[test]
+    fn copy_confirmation_expires_without_staying_stale() {
+        let mut state = State::default();
+        state.note_copied("Copied commit");
+        assert_eq!(state.copy_notice(), Some("Copied commit"));
+        assert!(!state.expire_copy_notice(1.0));
+        assert_eq!(state.copy_notice(), Some("Copied commit"));
+        assert!(state.expire_copy_notice(3.0));
+        assert_eq!(state.copy_notice(), None);
+    }
+
+    #[test]
+    fn project_open_errors_use_the_project_surface_not_preferences() {
+        use rune::Env;
+
+        let mut state = backend_canvas_state();
+        state.add_project(std::path::PathBuf::from(
+            "/definitely/missing-waypoints-project",
+        ));
+        let error = state
+            .project_open_error
+            .as_deref()
+            .expect("missing folder is reported on the project surface");
+        assert!(error.contains("Choose an existing folder"));
+        assert!(
+            state.preferences_error.is_none(),
+            "a folder error is not reported as a preferences failure"
+        );
+        assert_eq!(
+            state.project_path.as_deref(),
+            Some(std::path::Path::new(
+                "/tmp/waypoints-app-fixture/canvas-project"
+            )),
+            "a failed add keeps the current project"
+        );
+
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+        assert!(
+            runtime.find("project-open-error").is_some(),
+            "the project panel shows the folder error beside the project list"
+        );
+    }
+
+    #[test]
+    fn switching_nodes_restores_tab_selection_and_split_width() {
+        let mut state = State::default();
+        scene_history_runs(&mut state);
+        state.review.history.list_width = 310.0;
+        state.select_remote_node(3);
+        assert_eq!(state.review.tab, WorkbenchTab::Assignment);
+        assert!(state.review.history.runs.is_empty());
+
+        state.select_remote_node(4);
+        assert_eq!(
+            state.review.tab,
+            WorkbenchTab::History,
+            "returning to a node restores its workbench tab"
+        );
+        assert_eq!(state.review.history.selected_run, Some(11));
+        assert_eq!(state.review.history.list_width, 310.0);
+        assert_eq!(state.review.history.runs.len(), 2);
+    }
+
+    #[test]
+    fn returning_to_a_node_resumes_interrupted_requests() {
+        let mut state = State::default();
+        scene_history_runs(&mut state);
+        state.review.history.runs_state = LoadState::Loading;
+        state.review.state = LoadState::Loading;
+        state.select_remote_node(3);
+        state.select_remote_node(4);
+        assert_eq!(
+            state.review.history.runs_state,
+            LoadState::Ready,
+            "a history request interrupted by a node switch is retried"
+        );
+        assert!(
+            state
+                .review
+                .history
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Backend is not available")),
+            "the retry reports the backend state honestly: {:?}",
+            state.review.history.notice
+        );
+        assert_ne!(
+            state.review.state,
+            LoadState::Loading,
+            "an interrupted review request cannot remain Loading forever"
+        );
+        assert_eq!(state.review.history.runs.len(), 2);
+    }
+
+    #[test]
+    fn failed_history_refresh_keeps_rows_and_selection() {
+        use rune::Env;
+
+        let mut state = State::default();
+        scene_history_runs(&mut state);
+        state.review.history.runs_state = LoadState::Loading;
+        let token = state.review.history.token;
+        state.apply_backend_update(Update::RunsPage {
+            token,
+            workflow_id: 1,
+            node_id: 4,
+            append: false,
+            result: Box::new(Err("refresh failed".into())),
+        });
+        assert_eq!(state.review.history.runs.len(), 2);
+        assert_eq!(state.review.history.selected_run, Some(11));
+        assert!(state.review.history.notice_error);
+        assert_eq!(
+            state.review.history.notice.as_deref(),
+            Some("Refresh failed · refresh failed")
+        );
+
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+        assert!(
+            runtime.find("history-run-11").is_some(),
+            "failed refresh keeps the loaded runs visible"
+        );
+        assert!(runtime.find("history-notice").is_some());
+
+        let mut state = State::default();
+        scene_history_native(&mut state);
+        state.review.history.revisions_state = LoadState::Loading;
+        let token = state.review.history.token;
+        state.apply_backend_update(Update::RevisionsPage {
+            token,
+            workflow_id: 1,
+            node_id: 4,
+            append: false,
+            result: Box::new(Err("refresh failed".into())),
+        });
+        assert_eq!(state.review.history.revisions.len(), 2);
+        assert_eq!(
+            state.review.history.selected_revision.as_deref(),
+            Some("bc1ff243d16d5db056ae1cf33564e10bba6be91c")
+        );
+        assert!(state.review.history.notice_error);
+    }
+
+    #[test]
+    fn history_uses_a_draggable_split_between_list_and_details() {
+        use rune::Env;
+
+        fn open_runs(state: State, size: (f32, f32)) -> Runtime<State> {
+            let mut runtime = Runtime::new(state, view, size, Env::new(false, 1.0));
+            runtime.poll = Some(poll);
+            runtime.on_key = Some(on_key);
+            runtime.check_live_only(false);
+            runtime.frame(0.0);
+            runtime
+        }
+
+        let mut state = State::default();
+        scene_history_runs(&mut state);
+        let mut runtime = open_runs(state, WINDOW_SIZE);
+        assert!(runtime.find("history-runs-list").is_some());
+        assert!(runtime.find("history-run-details").is_some());
+        let (list, _) = runtime.presented("history-runs-list").expect("runs list");
+        assert!(
+            (list[2] - 270.0).abs() < 1.0,
+            "the history list starts at its readable default: {list:?}"
+        );
+        let (details, _) = runtime
+            .presented("history-run-details")
+            .expect("run details");
+        assert!(details[2] > 300.0, "details take the remaining width");
+
+        let (grip_x, grip_y) = runtime.find("history-resize").expect("history resize grip");
+        runtime.pointer_move(grip_x, grip_y);
+        runtime.frame(0.0);
+        runtime.pointer_down(grip_x, grip_y);
+        runtime.pointer_move(grip_x + 60.0, grip_y);
+        runtime.pointer_up(grip_x + 60.0, grip_y);
+        runtime.frame(0.0);
+        assert!(
+            (runtime.state.review.history.list_width - 330.0).abs() < 5.0,
+            "dragging the divider resizes the history list: {}",
+            runtime.state.review.history.list_width
+        );
+        assert!(runtime.state.review.history.list_resize_start.is_none());
+        let (details, _) = runtime
+            .presented("history-run-details")
+            .expect("resized run details");
+        let (list, _) = runtime
+            .presented("history-runs-list")
+            .expect("resized runs list");
+        assert!(
+            details[2] > 200.0,
+            "details keep a usable width: {details:?}"
+        );
+        assert!((list[0] + list[2] + 9.0 + 7.0 + 9.0 - details[0]).abs() < 1.0);
+
+        // Dragging far left stops at the readable minimum instead of collapsing.
+        let (grip_x, grip_y) = runtime.find("history-resize").expect("history resize grip");
+        runtime.pointer_down(grip_x, grip_y);
+        runtime.pointer_move(grip_x - 500.0, grip_y);
+        runtime.pointer_up(grip_x - 500.0, grip_y);
+        runtime.frame(0.0);
+        assert!((runtime.state.review.history.list_width - 160.0).abs() < 1.0);
+        let (details, _) = runtime
+            .presented("history-run-details")
+            .expect("wide run details");
+        assert!(details[2] > 400.0, "details take the freed width");
+
+        // Minimum window at 130% interface zoom: the requested width is clamped
+        // so both panes stay readable.
+        let mut state = State::default();
+        scene_history_runs(&mut state);
+        state.preferences.interface_zoom = 1.3;
+        let mut narrow = open_runs(state, (720.0, 480.0));
+        let (list, _) = narrow
+            .presented("history-runs-list")
+            .expect("narrow history list");
+        let (details, _) = narrow
+            .presented("history-run-details")
+            .expect("narrow history details");
+        let zoom = narrow.state.preferences.interface_zoom;
+        assert!(
+            list[2] / zoom <= 270.0,
+            "the list shrinks with the workbench instead of covering details: {list:?}"
+        );
+        assert!(
+            details[2] / zoom >= 199.0,
+            "details keep their minimum width in a narrow workbench: {details:?}"
+        );
+        let (review, _) = narrow
+            .presented("history-review-run")
+            .expect("primary history action");
+        assert!(
+            review[1] + review[3] <= details[1] + details[3] + 0.5,
+            "the primary review action stays visible before scrolling in a short pane: {review:?}"
+        );
+        let (grip_x, grip_y) = narrow.find("history-resize").expect("narrow resize grip");
+        narrow.pointer_down(grip_x, grip_y);
+        narrow.pointer_move(grip_x + 200.0, grip_y);
+        narrow.pointer_up(grip_x + 200.0, grip_y);
+        narrow.frame(0.0);
+        let (details, _) = narrow
+            .presented("history-run-details")
+            .expect("narrow details after resize");
+        assert!(
+            details[2] / zoom >= 199.0,
+            "the narrow clamp keeps details usable after a drag: {details:?}"
+        );
+
+        // Native revisions use the same split and retain the chosen width.
+        let mut state = State::default();
+        scene_history_native(&mut state);
+        state.review.history.list_width = 310.0;
+        let native = open_runs(state, WINDOW_SIZE);
+        assert!(native.find("history-revisions-list").is_some());
+        assert!(native.find("history-revision-details").is_some());
+        let (list, _) = native
+            .presented("history-revisions-list")
+            .expect("native revision list");
+        assert!(
+            (list[2] - 310.0).abs() < 1.0,
+            "native revisions share the resizable split: {list:?}"
+        );
+        assert!(native.find("history-resize").is_some());
+    }
+
+    #[test]
+    fn workflow_graph_loading_and_failure_stay_visible_without_the_sidebar() {
+        use rune::Env;
+
+        let mut state = backend_canvas_state();
+        state.preferences.sidebar_open = false;
+        state.graph = Graph::default();
+        state.source_graph = None;
+        state.selected = None;
+        state.workbench_open = false;
+        state.graph_state = LoadState::Loading;
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+        assert!(runtime.find("project-panel").is_none());
+        assert!(
+            runtime.find("onboarding-graph-loading").is_some(),
+            "switching workflows shows a central loading state without the sidebar"
+        );
+
+        runtime.update(|state, _| {
+            state.graph_state = LoadState::Failed("graph request failed".into());
+        });
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.find("onboarding-graph-error").is_some());
+        assert!(runtime.find("onboarding-graph-retry").is_some());
+
+        runtime.update(|state, _| {
+            state.graph_state = LoadState::Ready;
+            state.graph = crate::fixture::small_graph();
+        });
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.find("onboarding-graph-error").is_none());
+        assert!(runtime.find("canvas-hud").is_some());
+
+        runtime.update(|state, _| {
+            state.sync_error = Some("Live workflow refresh failed: backend offline".into());
+        });
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(
+            runtime.find("canvas-sync-status").is_some(),
+            "reconnection status is visible even with the project panel hidden"
+        );
+        assert!(runtime.find("canvas-node-count").is_none());
+    }
+
+    #[test]
+    fn settings_and_project_panels_fit_the_minimum_window_at_large_zoom() {
+        use rune::{Env, Key, KeyEvent, Mods};
+
+        let directory = tempfile::tempdir().expect("preferences dir");
+        let mut state = backend_canvas_state();
+        state.preferences_path = Some(directory.path().join("prefs.json"));
+        state.preferences_writable = true;
+        state.preferences.interface_zoom = 1.3;
+        state.settings_open = true;
+        let mut runtime = Runtime::new(state, view, (720.0, 480.0), Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+
+        let (panel, _) = runtime.presented("settings-panel").expect("settings panel");
+        assert!(
+            panel[1] >= 0.0 && panel[1] + panel[3] <= 480.0,
+            "settings stay inside a 720x480 window at 130% zoom: {panel:?}"
+        );
+        assert!(runtime.find("settings-close").is_some());
+        assert!(
+            runtime.find("settings-scroll").is_some(),
+            "overflowing settings content is scrollable, not clipped"
+        );
+        let (scroll_x, scroll_y) = runtime.find("settings-scroll").expect("settings scroll");
+        let (path, _) = runtime.presented("settings-path").expect("settings path");
+        runtime.pointer_move(scroll_x, scroll_y);
+        runtime.frame(0.0);
+        runtime.wheel_event(WheelEvent::new(0.0, -160.0).at(scroll_x, scroll_y));
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        let (scrolled_path, _) = runtime
+            .presented("settings-path")
+            .expect("settings path after scrolling");
+        assert!(
+            scrolled_path[1] < path[1],
+            "the settings body scrolls to reach lower content: before {path:?}, after {scrolled_path:?}"
+        );
+
+        runtime.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        runtime.frame(0.0);
+        assert!(!runtime.state.settings_open);
+        let (panel, _) = runtime.presented("project-panel").expect("project panel");
+        assert!(
+            panel[1] >= 0.0 && panel[1] + panel[3] <= 480.0,
+            "the project panel fits a 720x480 window at 130% zoom: {panel:?}"
+        );
+        assert!(runtime.find("workflow-list").is_some());
+        assert!(
+            runtime.find("graph-count").is_some(),
+            "the graph summary stays reachable instead of falling off-screen"
         );
     }
 
@@ -2096,6 +3009,178 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_states_are_distinct_and_drop_shares_project_validation() {
+        use rune::{Env, Key, KeyEvent, Mods};
+
+        let directory = tempfile::tempdir().expect("onboarding dir");
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).expect("project dir");
+        let other = directory.path().join("other");
+        std::fs::create_dir(&other).expect("other dir");
+
+        let mut state = State {
+            mode: Mode::Backend,
+            backend_enabled: false,
+            ..State::default()
+        };
+        state.display_fixture = false;
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+
+        assert!(runtime.find("onboarding-no-project").is_some());
+        assert!(runtime.find("project-drop-target").is_some());
+        assert!(runtime.find("onboarding-open-project").is_some());
+        assert!(runtime.find("canvas-hud").is_none());
+        assert!(runtime.find("workflows-empty").is_none());
+
+        let (x, y) = runtime.find("project-drop-target").expect("drop target");
+        runtime.drop_files(
+            vec![project.clone(), other.clone()],
+            Some((x + 10.0, y + 10.0)),
+        );
+        runtime.frame(0.0);
+        assert!(
+            runtime
+                .state
+                .project_open_error
+                .as_deref()
+                .is_some_and(|error| error.contains("one project folder")),
+            "multiple drops are rejected: {:?}",
+            runtime.state.project_open_error
+        );
+        assert!(runtime.find("project-drop-error").is_some());
+        assert!(runtime.find("onboarding-no-project").is_some());
+
+        let (x, y) = runtime.find("project-drop-target").expect("drop target");
+        runtime.drop_files(vec![project.clone()], Some((x + 10.0, y + 10.0)));
+        for _ in 0..3 {
+            runtime.frame(1.0 / 60.0);
+        }
+        let canonical = std::fs::canonicalize(&project).expect("canonical project");
+        assert_eq!(runtime.state.project_path.as_ref(), Some(&canonical));
+        assert!(runtime.state.project_open_error.is_none());
+        assert!(runtime.find("onboarding-no-project").is_none());
+
+        runtime.update(|state, _| {
+            state.backend_state = LoadState::Ready;
+            state.workflows_state = LoadState::Ready;
+            state.workflows.clear();
+            state.selected_workflow = None;
+        });
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.find("onboarding-no-workflows").is_some());
+        let prompt = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("workflow-prompt"))
+            .expect("visible prompt");
+        assert_eq!(
+            prompt.text.as_deref(),
+            Some(crate::onboarding::WORKFLOW_PROMPT)
+        );
+        assert!(runtime.find("copy-workflow-prompt").is_some());
+
+        let (x, y) = runtime.find("copy-workflow-prompt").expect("copy prompt");
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        assert_eq!(
+            runtime.state.prompt_notice.as_deref(),
+            Some("Prompt copied to clipboard")
+        );
+        assert!(runtime.find("workflow-prompt-copy-status").is_some());
+
+        runtime.update(|state, _| {
+            state.workflows = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": 9,
+                    "project_path": "/tmp/waypoints-app-fixture/canvas-project",
+                    "name": "Agent-created workflow",
+                    "base": null,
+                    "archived": false
+                }))
+                .expect("workflow fixture"),
+            ];
+            state.selected_workflow = Some(9);
+            state.graph = crate::fixture::small_graph();
+            state.graph_state = LoadState::Ready;
+            state
+                .drafts
+                .insert((9, 4), NodeDraft::new("draft survives instructions".into()));
+        });
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.find("onboarding-no-workflows").is_none());
+        assert!(runtime.find("new-workflow-hud").is_some());
+        assert!(runtime.find("new-workflow-sidebar").is_some());
+
+        let (x, y) = runtime.find("new-workflow-hud").expect("new workflow HUD");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        assert!(runtime.find("workflow-help").is_some());
+        assert!(runtime.find("workflow-prompt").is_some());
+        assert_eq!(runtime.state.selected_workflow, Some(9));
+        runtime.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        runtime.frame(0.0);
+        assert!(!runtime.state.workflow_help_open);
+        for _ in 0..10 {
+            runtime.frame(1.0 / 60.0);
+        }
+        let focused = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.focused)
+            .and_then(|element| element.key);
+        assert_eq!(
+            focused.as_deref(),
+            Some("new-workflow-hud"),
+            "dismissing instructions returns focus to its opener"
+        );
+        assert_eq!(
+            runtime.state.selected_workflow,
+            Some(9),
+            "dismissing instructions preserves the current workflow"
+        );
+        assert_eq!(
+            runtime
+                .state
+                .drafts
+                .get(&(9, 4))
+                .map(|draft| draft.edit.text.as_str()),
+            Some("draft survives instructions"),
+            "dismissing instructions preserves the draft"
+        );
+
+        runtime.update(|state, _| {
+            state.backend_state = LoadState::Failed("connection lost".into());
+            state.sync_error = Some("Live workflow refresh failed: connection lost".into());
+        });
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(
+            runtime.find("onboarding-error").is_none(),
+            "a transient disconnect keeps the visible graph"
+        );
+        assert!(runtime.find("canvas-hud").is_some());
+        assert!(runtime.find("sync-error").is_some());
+        assert_eq!(runtime.state.selected_workflow, Some(9));
+    }
+
+    #[test]
     fn assignment_edit_and_preview_render_draft_and_notice() {
         use rune::Env;
 
@@ -2160,11 +3245,7 @@ mod tests {
     fn hud_icons_keep_accessible_labels() {
         use rune::Env;
 
-        let state = State {
-            mode: Mode::Backend,
-            backend_enabled: false,
-            ..State::default()
-        };
+        let state = backend_canvas_state();
         let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
         runtime.poll = Some(poll);
         runtime.on_key = Some(on_key);
@@ -2259,13 +3340,9 @@ mod tests {
 
         let directory = tempfile::tempdir().expect("preferences dir");
         let preferences_path = directory.path().join("prefs.json");
-        let mut state = State {
-            mode: Mode::Backend,
-            preferences_path: Some(preferences_path),
-            preferences_writable: true,
-            ..State::default()
-        };
-        state.display_fixture = false;
+        let mut state = backend_canvas_state();
+        state.preferences_path = Some(preferences_path);
+        state.preferences_writable = true;
         let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
         runtime.poll = Some(poll);
         runtime.on_key = Some(on_key);

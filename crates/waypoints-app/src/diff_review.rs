@@ -1,13 +1,18 @@
 //! Exact-target diff review for a node's current revision or saved run snapshot.
 
-use rune::{Color, Cursor, Drag, El, Phase, ScrollSpec, Tx, col, el, row, text};
+use rune::{Color, Cursor, Drag, El, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::diff::{DiffMode, DiffState, DiffView, FileStatus};
 use rune_kit::{Button, ButtonVariant, Kit};
 
 use crate::backend::ReviewTarget;
 use crate::{LoadState, State};
 
-pub fn view(s: &State, k: &Kit) -> El {
+const FILE_LIST_MIN_WIDTH: f32 = 140.0;
+const FILE_LIST_MAX_WIDTH: f32 = 360.0;
+const DIFF_MIN_WIDTH: f32 = 220.0;
+const PANE_GAP: f32 = 6.0;
+
+pub fn view(s: &State, k: &Kit, available_width: f32) -> El {
     let run_snapshot = s.selected_run().and_then(|run| {
         matches!(
             run.run.snapshot,
@@ -134,6 +139,7 @@ pub fn view(s: &State, k: &Kit) -> El {
                         text(error.clone())
                             .font(k.ty.small)
                             .color(k.c.danger.fg)
+                            .help(error.clone())
                             .w_full()
                             .wrap()
                             .max_lines(3),
@@ -215,16 +221,34 @@ pub fn view(s: &State, k: &Kit) -> El {
                 .child(
                     Button::new("Copy commit")
                         .variant(ButtonVariant::GhostMuted)
+                        .help("Copy the full commit ID")
                         .on_press_tx(|s: &mut State, tx| {
                             if let Some(review) = &s.review.review {
                                 tx.copy(review.revision.commit_id.clone());
+                                s.note_copied("Copied commit");
+                                tx.wake_after(std::time::Duration::from_millis(2600));
                             }
                         })
                         .build(k)
                         .key("review-copy-commit"),
-                ),
+                )
+                .children(s.copy_notice().map(|notice| {
+                    text(notice)
+                        .key("review-copy-status")
+                        .font(k.ty.small)
+                        .color(k.c.success.fg)
+                        .role("status")
+                })),
         );
 
+        let (min, max) = crate::split::bounds(
+            available_width,
+            FILE_LIST_MIN_WIDTH,
+            FILE_LIST_MAX_WIDTH,
+            DIFF_MIN_WIDTH,
+            PANE_GAP,
+        );
+        let width = s.review.file_list_width.clamp(min, max);
         if files.is_empty() {
             column = column.child(
                 text("This exact target has no changed files.")
@@ -238,24 +262,21 @@ pub fn view(s: &State, k: &Kit) -> El {
                     .w_full()
                     .grow(1.0)
                     .min_h(0.0)
-                    .gap(6.0)
-                    .child(file_list(s, k))
-                    .child(
-                        el().key("review-file-resize")
-                            .w(7.0)
-                            .h_full()
-                            .cursor(Cursor::ResizeColumn)
-                            .hover(k.c.hover)
-                            .role("separator")
-                            .label("Resize changed files")
-                            .help("Drag to resize changed files")
-                            .on_drag(resize_files)
-                            .child(el().w(1.0).h_full().self_center().fill(k.c.border_base)),
-                    )
+                    .gap(PANE_GAP)
+                    .child(file_list(s, k, width))
+                    .child(crate::split::divider(
+                        "review-file-resize",
+                        "Resize changed files",
+                        "Drag to resize changed files",
+                        min,
+                        max,
+                        resize_files,
+                        k,
+                    ))
                     .child(
                         col()
                             .grow(1.0)
-                            .min_w(0.0)
+                            .min_w(DIFF_MIN_WIDTH)
                             .min_h(0.0)
                             .key("review-diff-surface")
                             .child(
@@ -284,26 +305,24 @@ pub fn view(s: &State, k: &Kit) -> El {
     column
 }
 
-fn resize_files(s: &mut State, drag: &mut Drag, tx: &mut Tx) {
-    match drag.phase {
-        Phase::Down => s.review.file_resize_start = Some(s.review.file_list_width),
-        Phase::Move | Phase::Up => {
-            if let Some(start) = s.review.file_resize_start {
-                s.review.file_list_width = (start + drag.dx).clamp(140.0, 360.0);
-                tx.instant();
-            }
-            if drag.phase == Phase::Up {
-                s.review.file_resize_start = None;
-            }
-        }
-    }
+fn resize_files(s: &mut State, drag: &mut Drag, tx: &mut Tx, min: f32, max: f32) {
+    let current = s.review.file_list_width;
+    crate::split::resize(
+        drag,
+        &mut s.review.file_resize_start,
+        &mut s.review.file_list_width,
+        current,
+        min,
+        max,
+        tx,
+    );
 }
 
-fn file_list(s: &State, k: &Kit) -> El {
+fn file_list(s: &State, k: &Kit, width: f32) -> El {
     let files = s.review.diff.files();
     col()
         .key("review-files")
-        .w(s.review.file_list_width)
+        .w(width)
         .h_full()
         .min_h(0.0)
         .padding(5.0)
@@ -334,6 +353,7 @@ fn file_list(s: &State, k: &Kit) -> El {
                     Color::TRANSPARENT
                 })
                 .hover(k.c.hover)
+                .cursor(Cursor::Pointer)
                 .focusable(true)
                 .role("button")
                 .label(format!(

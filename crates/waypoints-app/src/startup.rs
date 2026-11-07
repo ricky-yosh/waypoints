@@ -92,6 +92,13 @@ pub(crate) fn init_state() -> State {
         state.graph = Graph::default();
         state.camera.set_pan([286.0, 44.0]);
         state.save_preferences();
+    } else if !rune::is_headless() {
+        // A native launch with no project is a real onboarding state, not the
+        // fixture canvas. Headless runs keep the fixture for deterministic scenes.
+        state.mode = Mode::Backend;
+        state.display_fixture = false;
+        state.graph = Graph::default();
+        state.camera.set_pan([286.0, 44.0]);
     }
     state
 }

@@ -32,16 +32,16 @@ coordinates ACP workers. The desktop canvas is the visual companion for seeing
 the feature grow from skeleton to implementation and reviewing jj-backed code
 history; the harness remains the primary conversation surface.
 
-Users can also open projects directly. Planned onboarding directs workflow
-creation back to the harness with this copyable prompt:
+Users can also open projects directly. Onboarding directs workflow creation back
+to the harness with this copyable prompt:
 
 ```text
 Use waypoints to make a workflow and create this feature
 ```
 
 Add the feature description before sending. Targeted app opening, live external
-synchronization, and the new empty states are product requirements, not all
-implemented capabilities. See [agent-led workflows and onboarding](docs/28-agent-led-workflows.md).
+synchronization, and the distinct empty states are implemented. See
+[agent-led workflows and onboarding](docs/28-agent-led-workflows.md).
 
 ## Try the CLI
 
@@ -77,6 +77,20 @@ canonical Rune desktop app:
 ```sh
 cargo run -p waypoints-app
 ```
+
+The first launch shows a folder drop target and **Open project…** instead of a
+fake graph. A project with no workflows shows the exact copyable harness prompt;
+the HUD and Projects panel keep a **New workflow** control for the same
+instructions. Ask your harness agent to create work through the CLI/client, then
+have it reveal the saved workflow:
+
+```sh
+waypoints app open --project . --workflow 1
+```
+
+This focuses a running app or starts one, without creating or running anything.
+The app refreshes externally created workflows and run progress every two
+seconds and reports **Reconnecting** if a background refresh fails.
 
 Use **Add** in the Projects panel to choose a project folder. The panel keeps a
 Rune-only project list and the selected project/workflow; remove an entry with

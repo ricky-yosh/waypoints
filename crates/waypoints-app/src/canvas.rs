@@ -500,12 +500,19 @@ fn hud(s: &State, k: &Kit, size: [f32; 2], insets: [f32; 2]) -> El {
     let reset = IconButton::new(&RESET)
         .variant(IconButtonVariant::GhostMuted)
         .label("Reset")
-        .help("Reset the fixture camera")
+        .help("Reset the canvas view")
         .on_press(|s: &mut State| {
             s.camera.reset();
         })
         .build(k)
         .key("zoom-reset");
+    let new_workflow = IconButton::new(&PLUS)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("New workflow")
+        .help("Show the harness prompt for creating a workflow")
+        .on_press(|s: &mut State| s.open_workflow_help("new-workflow-hud"))
+        .build(k)
+        .key("new-workflow-hud");
 
     let mut controls = row()
         .key("canvas-hud")
@@ -541,17 +548,34 @@ fn hud(s: &State, k: &Kit, size: [f32; 2], insets: [f32; 2]) -> El {
         .child(reset);
     if s.mode == Mode::Backend && !s.display_fixture {
         controls = controls.child(projects);
+        if s.project_path.is_some() {
+            controls = controls.child(new_workflow);
+        }
     }
     controls = controls.child(settings);
-    controls = controls.child(
-        text(format!(
-            "{} nodes · {} edges",
-            s.graph.nodes.len(),
-            s.graph.edges.len()
-        ))
-        .font(k.ty.small)
-        .color(k.c.text_muted),
-    );
+    controls = if let Some(error) = &s.sync_error {
+        // Background refresh failures must stay visible when the project
+        // navigator is hidden.
+        controls.child(
+            text("Reconnecting")
+                .key("canvas-sync-status")
+                .font(k.ty.small)
+                .color(k.c.warning.fg)
+                .help(error.clone())
+                .role("status"),
+        )
+    } else {
+        controls.child(
+            text(format!(
+                "{} nodes · {} edges",
+                s.graph.nodes.len(),
+                s.graph.edges.len()
+            ))
+            .key("canvas-node-count")
+            .font(k.ty.small)
+            .color(k.c.text_muted),
+        )
+    };
 
     let hint =
         text("Drag to pan · pinch or ⌘scroll to zoom · hover or ⇧Return to preview · double-click or Return to open")

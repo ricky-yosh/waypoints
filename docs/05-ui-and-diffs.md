@@ -1,16 +1,22 @@
 # Working in the desktop app
 
 Product direction: workflows are created by the user's harness agent, which
-coordinates ACP workers; the app is the visual companion. Planned onboarding
-includes a project-folder drop target, a separate no-workflows state, and a
-persistent New workflow action that shows a copyable harness prompt rather
-than creating work directly. Targeted agent-open and automatic synchronization
-are specified in [agent-led workflows and onboarding](28-agent-led-workflows.md);
-the usage below describes current behavior, not completion of those additions.
+coordinates ACP workers; the app is the visual companion. The canvas has three
+distinct entry states: no project (folder drop target and **Open project…**),
+project with no workflows (the exact copyable harness prompt), and the normal
+graph. A persistent **New workflow** control in the HUD and Projects panel shows
+the same instructions even when workflows already exist; it never creates work
+directly.
 
 The canonical desktop frontend is the Rune canvas in `crates/waypoints-app`.
-Open a project and select a workflow in the Projects panel. The graph shows
-saved dependencies, with arrows pointing downstream. Click a card to select it;
+Open a project and select a workflow in the Projects panel, or let an agent run
+`waypoints app open --project PATH --workflow ID` to reuse/focus this window.
+The project list, selected graph, and run statuses refresh quietly every two
+seconds, so externally created workflows and ACP progress appear without manual
+Refresh. A failed background refresh shows **Reconnecting** and keeps the loaded
+canvas and unsaved drafts visible.
+
+The graph shows saved dependencies, with arrows pointing downstream. Click a card to select it;
 double-click it or press Return while focused to open the floating workbench.
 Drag the canvas to pan, pinch or ⌘-scroll to zoom, and drag a card to change its
 presentation position without editing dependencies. **Expand** fills the
@@ -59,17 +65,17 @@ assignment and status. A node whose run status has not been checked shows
   patches, and errors are shown honestly. Syntax rendering uses Rune Kit's
   fallback.
 - **History** separates run records from native revisions. Select an entry to
-  inspect details beside the list. Runs show lifecycle state, timestamps,
-  continued-from references, and snapshot state. Native revisions show the
-  native operation description, current-head/conflict indicators, associated
-  runs, and a short revision ID. **Load older** uses the backend's opaque pinned
-  cursor; loaded rows stay if a later page fails. Saved runs and revisions hand
-  off to Changes. If newer history is recorded, the toolbar announces it and
-  **Load newest** refreshes.
-
-  **Refresh limitation:** a full History refresh replaces the loaded view with a
-  loading state. If its request fails, the tab shows an error instead of
-  retaining the previous rows. Retry when the backend is available.
+  inspect details beside the list; the list has the same draggable divider as
+  Changes (160–360 points) and keeps at least 200 points for details. Both run
+  and native lists share the chosen width. Runs show lifecycle state,
+  timestamps, continued-from references, and snapshot state. Native revisions
+  show the native operation description, current-head/conflict indicators,
+  associated runs, and the full commit ID with **Copy commit**. **Load older**
+  uses the backend's opaque pinned cursor; loaded rows stay if a later page
+  fails. A full Refresh also keeps loaded rows and the selection if its request
+  fails, showing the error inline; successful refreshes validate the selection.
+  Saved runs and revisions hand off to Changes. If newer history is recorded,
+  the toolbar announces it and **Load newest** refreshes.
 
 Closing the workbench does not cancel its run. The app never opens the store,
 runs jj for review, or restores code from history; those remain backend/CLI
@@ -86,6 +92,8 @@ native menus are installed by the app; Linux/Windows use the in-app controls.
 ## Validation
 
 The repeatable checks and headless scenes are documented in
-[Rune validation](port-info/validation.md). Native menus, IME, VoiceOver,
-close/reopen, and multi-display behavior require a person; the current evidence
-and limitations are in [cutover readiness](port-info/readiness.md).
+[Rune validation](port-info/validation.md). The prioritized UI/UX findings,
+fixed batches, and deferred product decisions are in the
+[UI/UX audit](ui-ux-audit.md). Native menus, IME, VoiceOver, close/reopen, and
+multi-display behavior require a person; the current evidence and limitations
+are in [cutover readiness](port-info/readiness.md).

@@ -1,5 +1,28 @@
 # Rune migration progress
 
+## Agent-led workflow goal
+
+Status: the Rune cutover is complete and the next goal is implemented. The
+user's harness remains the conversation surface; the desktop app is an on-demand
+visual companion. Work is uncommitted unless the repository log says otherwise.
+
+Gap inventory recorded before implementation:
+
+- The app accepted `--project`/`--workflow` only at launch and had no way to
+  focus a running instance. There was no agent-facing open command or control
+  transport, so an agent could not reveal a newly created workflow reliably.
+- Workflows, graphs, and run statuses loaded only on selection or manual
+  Refresh. External CLI/client creation was invisible until the user refreshed;
+  disconnection had no background retry or honest "reconnecting" state.
+- A native launch with no project showed the fixture canvas, not an onboarding
+  state. The sidebar's empty message was generic, with no folder drop target,
+  copyable harness prompt, or persistent New workflow affordance.
+- The backend/CLI already had repository inspection, workflow creation, ACP run
+  control, and safety checks; no new backend contract was needed.
+
+Implemented contract and evidence are recorded under
+[Agent-led workflow implementation](#agent-led-workflow-implementation).
+
 ## Current status
 
 Milestones 1–3 have automated coverage in `crates/waypoints-app`, and
@@ -10,7 +33,7 @@ canvas keeps its offline mode, and `--project PATH` connects only through
 `waypoints_backend::Client`. Backend mode loads workflows/graphs, edits and
 checked-saves assignments with per-node drafts, starts/continues/cancels runs,
 replies to single-use permissions, and shows run versus snapshot state.
-Thirty Rust tests pass, including in-process real-backend tests with a
+Thirty-four Rune tests pass, including in-process real-backend tests with a
 deterministic ACP adapter. Headless PNGs/trees for structured output, diff
 review, history, settings, assignment edit/preview, pointer-hover/keyboard graph
 previews, project sidebar, and the earlier canvas/run flows were inspected. A real
@@ -32,17 +55,142 @@ the GPUI crate/vendor patches/scripts are removed, and `waypoints-app` is the
 workspace default. See [readiness.md](readiness.md) for evidence and remaining
 platform/agent limitations.
 
+## Agent-led workflow implementation
+
+- Added `crates/waypoints-desktop-ipc` with newline-delimited JSON request and
+  response framing over a private Unix socket (64 KiB cap, absolute
+  `WAYPOINTS_APP_SOCKET` override).
+- Added `waypoints app open --project PATH [--workflow ID] [--json]`. It
+  canonicalizes the folder; when a workflow is named, it connects through
+  `waypoints_backend::Client` and verifies the workflow belongs to the project.
+  It focuses a running app through `<state>/desktop.sock` or launches
+  `waypoints-app` (or `WAYPOINTS_APP_EXECUTABLE`) and waits up to eight seconds
+  for the control response. Opening never creates, runs, or initializes anything.
+- The app binds the control socket before the event loop, forwards a second
+  launch to the existing app, applies the selected project/workflow, and calls
+  `AppHandle::focus`. Stale socket files are cleared; control sockets are 0600.
+- Added quiet two-second synchronization for workflows, the selected graph, and
+  workflow node run statuses, scheduled with `Tx::wake_after` so an idle window
+  still refreshes. New external workflows auto-select only when nothing is
+  selected. Quiet failures keep the loaded canvas, set `sync_error`, and show
+  **Reconnecting** plus the error in the project panel. Manual Refresh remains
+  explicit and uses the loading state.
+- Reconciliation preserves presentation-only card positions, known node statuses,
+  selection, workbench state, loaded history, and unsaved drafts. A changed
+  external prompt updates a clean draft; a dirty draft is kept with an explicit
+  notice. A new selected run id resets the transcript before replaying events.
+- Added distinct onboarding: no project (folder drop target plus keyboard
+  **Open project…**), backend loading/error, workflow loading/error, and
+  no-workflow (exact prompt, copy feedback, and another-project action). Drop and
+  dialog share `State::open_project`; multiple/ambiguous drops are rejected.
+  The HUD and Projects panel keep New workflow controls that show the same
+  instructions in a dismissible sheet. One constant supplies the prompt.
+- Added headless scenes `onboarding-no-project`, `onboarding-no-workflows`, and
+  `workflow-help`, plus narrow/light/dark captures under
+  `target/port-info/rune/`. PNGs were visually inspected; trees contain the drop
+  target, prompt, copy control, and status/help keys. Below 1120 layout points,
+  onboarding uses the full window instead of drawing the fixed project panel over
+  the prompt/action; a 720×480 scene at 130% interface zoom keeps the prompt and
+  Copy prompt control visible. No decorative background animation was added.
+
+Evidence:
+
+- `cargo test -p waypoints-app --locked`: 34 passed.
+- `cargo test -p waypoints-desktop-ipc --locked`: 3 passed.
+- `cargo test -p waypoints-cli --test app_open --locked`: 2 passed (reuse and
+  launcher fallback), including a post-open workflow list assertion proving the
+  open request created no duplicate workflow.
+- `cargo test -p waypoints-cli --test backend
+  cli_coordinator_opens_the_exact_workflow_while_a_fake_worker_is_active
+  --locked`: passed. The test uses the real `waypoints` CLI to create a
+  workflow, node, native change, workspace, and fake-ACP run; waits for
+  `awaiting_permission`; opens `--workflow 1` through the desktop control
+  socket; and confirms the project still has one workflow and one run. Full CLI
+  suite remains green.
+- Native isolated check: an app started on the no-project onboarding state
+  against a throwaway state directory answered
+  `waypoints app open --project … --workflow 1 --json` with
+  `{"ok":true,"status":"focused",...}`; the preferences file then contained the
+  requested canonical project and workflow 1. The backend was stopped and the app
+  process terminated afterward.
+- Post-change native trace: 120 frames, 119 presented, 1 skipped, p50/p95
+  16.67/16.67 ms, clean exit, no menu/control errors.
+- `cargo fmt` and strict Clippy for the app, CLI, and IPC crate pass. App docs
+  build.
+
+Remaining limitations: a real installed-model ACP run and Linux/Windows hosts
+have not been exercised. Automated ACP coverage uses the deterministic fake
+adapter. The optional decorative onboarding animation was deferred so functional
+states and synchronization landed first.
+
+## UI/UX audit implementation
+
+Status: batch 1 is complete; the prioritized list and deferred decisions are in
+[ui-ux-audit.md](../ui-ux-audit.md).
+
+- Added `crates/waypoints-app/src/split.rs` to share divider rendering, cursor,
+  accessibility, drag state, and narrow-window bounds between Changes and
+  History. History's list/details split is draggable (160–360 points; details
+  at least 200) and Changes keeps at least 220 points for the diff.
+- Made Settings fit the window: the panel is height-capped and its body
+  scrolls, keeping the title and Close action fixed at 130% zoom in 720×480.
+  The project panel height now derives from available content height, keeping
+  the workflow list and graph summary reachable.
+- Preserved Output context across node switches by reloading a stopped run's
+  bounded transcript from the existing `run.events` client method. No backend
+  contract or run state changed. Returning to a cached node also retries any
+  review/history request left in `Loading` after a dropped stale reply, so a
+  node cannot remain permanently busy. Returning to a cached node also resumes any
+  review/history request left in `Loading`, so a dropped stale reply cannot
+  leave the panel permanently busy.
+- Cleared the old graph when switching workflows/projects and added central
+  graph loading/failure states with Retry, independent of the sidebar.
+- History refresh now keeps loaded rows and selection on failure, marks the
+  inline error, and revalidates selection after success. Older-page failures
+  use explicit wording and error color.
+- Commit copy actions now report “Copied commit” for 2.5 seconds; native
+  revision details gained Copy commit. History's primary review action moved
+  above metadata so it stays visible in a short pane. Reconnection is visible
+  in the HUD when the project panel is hidden. Folder-open errors now belong to the project
+  surface (including the project panel) instead of Preferences. Minor
+  consistency fixes: Reset help, workbench header label, project remove
+  control, pointer cursors, capped-error tooltips, and copy tooltips.
+- Settings overflow is scrollable: the headless wheel test moves lower content
+  into view at 130% zoom; the fixed title/close row stays visible.
+- Added regression tests listed in the audit. UI work stays within existing
+  backend/CLI contracts; no chat, scheduling, Git/jj initialization, native
+  repair, or publication was added.
+
+Evidence:
+
+- `cargo test -p waypoints-app --locked`: 42 passed.
+- `cargo fmt -p waypoints-app -- --check` and strict app Clippy pass.
+- Headless artifacts inspected under `target/port-info/rune/`: History split
+  light/dark/narrow, Settings normal and 130% zoom, project panel 130% zoom,
+  Assignment/Diff/Output at 130%, and onboarding at 130%. Verification used
+  headless interaction tests, not a claim of native usability.
+- Native smoke checks: isolated preferences/project/socket/state, dark theme,
+  120 frames, exit 0, 0 failed acquires, no error/panic lines. Runs presented
+  119/120 (p50/p95 16.67/16.67 ms) and 117/120 (p50/p95 16.67/33.33 ms);
+  recorded as display-link/host variability, not a performance claim. This
+  proves startup/rendering only.
+- Native verification of the new drag, wheel scrolling in Settings, and 130%
+  layouts is still pending a person at a display.
+
 ## Next task
 
-Cutover is complete. Remaining independent validation is Linux/Windows and a
-real ACP model/agent; native macOS checks are user-confirmed. No further package
-renames or GPUI changes are expected.
+The agent-led workflow goal and UI/UX audit batch 1 are implemented and
+verified with automated and headless checks. Remaining independent validation
+is a real installed-model ACP run, Linux/Windows hosts, and a person check of
+the new divider drags, Settings wheel scrolling, and 130% layouts on a native
+display. No commit or push was performed.
 The pending person check remains: launch
 `cargo run -p waypoints-app --locked`, pan/zoom with a trackpad and mouse,
 drag a card, press Return and Shift+Return on a focused card, Tab through the
-workbench, review a diff, switch history tabs with R/N and Cmd+1–4, toggle the
-sidebar with Cmd+B, add a project with Cmd+O, change appearance, select
-assignment text, and close/reopen the window.
+workbench, drag both Changes and History dividers, review a diff, switch
+history tabs with R/N and Cmd+1–4, toggle the sidebar with Cmd+B, add a project
+with Cmd+O, change appearance and zoom, scroll Settings with a trackpad,
+select assignment text, and close/reopen the window.
 
 ## Framework selection
 

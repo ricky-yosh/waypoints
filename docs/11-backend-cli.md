@@ -20,6 +20,31 @@ another bookmark or `--base-revision` if needed. Omitting both selectors creates
 a legacy unbased workflow and does not require jj; it does not implicitly use
 `main`.
 
+## Open the desktop visual companion
+
+Workflow creation stays agent-led. After creating or finding a workflow through
+the commands below, an agent can reveal it without creating or running anything:
+
+```sh
+waypoints app open --project . --workflow 1
+waypoints app open --project . --workflow 1 --json
+```
+
+The command validates the folder and, when `--workflow` is present, asks the
+backend whether that workflow exists and belongs to the project. It then sends a
+private control request to a running desktop app and focuses that window. If no
+app is listening, it starts `waypoints-app` (or `WAYPOINTS_APP_EXECUTABLE`) with
+the same selection and waits for it to accept. `WAYPOINTS_APP_SOCKET` overrides
+the control socket path; otherwise it lives beside the backend state as
+`desktop.sock`. Opening never creates a workflow, starts a run, or initializes a
+repository. If the desktop cannot start (for example on a headless host), the
+command reports the error and the backend work remains intact.
+
+The app quietly refreshes visible backend state every two seconds. Manual
+Refresh remains available, and a failed background refresh reports
+**Reconnecting** in the project panel without discarding the current graph or
+unsaved assignment drafts.
+
 `--json` prints a single JSON value on stdout. Errors go to stderr and exit
 nonzero; command syntax errors use Clap's exit status 2. A workflow name may be
 duplicated, but it must not be blank. Projects must be existing directories; both

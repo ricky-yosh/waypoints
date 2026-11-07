@@ -9,7 +9,10 @@ menus. The user confirmed the native macOS menu, diff divider, Tab/IME/
 VoiceOver, close/reopen, and multi-display checks. Backend tests use an
 in-process server and deterministic ACP adapter; no real model agent has run.
 Linux/Windows validation and real-agent execution remain unverified. See
-[readiness.md](readiness.md).
+[readiness.md](readiness.md). The subsequent agent-led workflow/onboarding goal
+and its evidence are recorded in [progress.md](progress.md) and milestone 6 of
+[milestones.md](milestones.md). The follow-up UI/UX audit and deferred
+decisions are in [ui-ux-audit.md](../ui-ux-audit.md).
 
 ## Goal and scope
 
@@ -34,6 +37,8 @@ historical and current verification record for the canonical Rune frontend.
 5. [Validation](validation.md): checks and evidence requirements.
 6. [Cutover readiness](readiness.md): completed cutover record, evidence, and
    remaining platform/agent limitations.
+7. [UI/UX audit](../ui-ux-audit.md): prioritized findings, fixed batches, and
+   deferred product decisions.
 
 Read applicable repository instructions and Rust skills before implementation.
 Inspect Rune's actual source and examples before choosing APIs.
@@ -83,4 +88,4 @@ Use the [pinned hello example](https://github.com/anomalyco/rune/blob/a8ca769b94
 [core documentation](https://github.com/anomalyco/rune/blob/a8ca769b944598e179f33cc6843629b90e6ca831/crates/rune/README.md),
 and [Kit source](https://github.com/anomalyco/rune/blob/a8ca769b944598e179f33cc6843629b90e6ca831/crates/rune-kit/src/lib.rs)
 for implementation. See [validation](validation.md) for build configuration,
-platform requirements, commands, and the pending native gate.
+platform requirements, commands, and the native checks and remaining limits.

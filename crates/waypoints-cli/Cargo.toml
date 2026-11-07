@@ -15,6 +15,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt"] }
 waypoints-backend = { path = "../waypoints-backend" }
 waypoints-core = { path = "../waypoints-core" }
+waypoints-desktop-ipc = { path = "../waypoints-desktop-ipc" }
 
 [dev-dependencies]
 tempfile = "3"
