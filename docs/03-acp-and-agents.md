@@ -8,7 +8,14 @@ implemented behavior; protocol capabilities below are not all Waypoints features
 
 The Waypoints backend is the ACP **client** (the role editors like Zed play).
 It launches an agent as a subprocess and talks JSON-RPC 2.0 over stdin/stdout.
-Neither the CLI nor the future GUI hosts a separate agent loop.
+Neither the CLI nor the desktop GUI hosts a separate agent loop.
+
+In the [intended agent-led workflow](28-agent-led-workflows.md), the user talks
+to a coordinator in their existing harness. That coordinator calls Waypoints'
+CLI/tools to create workflows and manage work; the backend launches and controls
+the worker agents over ACP. The coordinator and ACP workers have distinct roles.
+Opening the visual does not itself start another worker or transfer the primary
+conversation into the app.
 
 ## Basic message flow
 

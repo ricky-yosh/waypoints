@@ -1,5 +1,13 @@
 # Working in the desktop app
 
+Product direction: workflows are created by the user's harness agent, which
+coordinates ACP workers; the app is the visual companion. Planned onboarding
+includes a project-folder drop target, a separate no-workflows state, and a
+persistent New workflow action that shows a copyable harness prompt rather
+than creating work directly. Targeted agent-open and automatic synchronization
+are specified in [agent-led workflows and onboarding](28-agent-led-workflows.md);
+the usage below describes current behavior, not completion of those additions.
+
 The canonical desktop frontend is the Rune canvas in `crates/waypoints-app`.
 Open a project and select a workflow in the Projects panel. The graph shows
 saved dependencies, with arrows pointing downstream. Click a card to select it;

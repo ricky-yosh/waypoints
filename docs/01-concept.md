@@ -11,6 +11,14 @@ Work with coding agents often means chaining prompts by hand: run one, wait and 
 
 The workflow is the main object you work with. Workflows are grouped by project folder in the desktop sidebar; the CLI supports explicit project/workflow selection without a GUI. A workflow is a branching graph, not a linear prompt queue.
 
+**Workflows are agent-led.** The user talks to a coordinating agent in their
+existing harness. That agent creates the workflow and coordinates ACP workers;
+the desktop app opens as a visual companion for following construction and
+reviewing code. Users can still open projects and intervene in the app, but
+workflow creation directs them back to their harness with a copyable prompt.
+See [agent-led workflows and onboarding](28-agent-led-workflows.md) for the
+intended flow, empty states, and boundaries; these UI additions are planned.
+
 - Each node represents a phase's prompt/assignment, which can be refined through multiple turns rather than requiring a new node for each turn.
 - A node is associated with an evolving native jj change. Its historical code revisions are native jj commits, not a separate Waypoints snapshot system.
 - Users move backward and forward between nodes and workflows, inspect historical revisions, and explicitly continue work from a chosen revision.

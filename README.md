@@ -24,6 +24,25 @@ restore-specific fresh-session safeguards remain in place. See the
 Start with the [current core/backend status and documentation map](docs/20-core-backend-status.md)
 for implemented boundaries, remaining discussion items, and links to detailed contracts.
 
+## Intended workflow: agent-led, visually reviewable
+
+Ask your agent in its existing harness to use Waypoints for a large, iterative
+feature. The agent creates a workflow, breaks work into scoped assignments, and
+coordinates ACP workers. The desktop canvas is the visual companion for seeing
+the feature grow from skeleton to implementation and reviewing jj-backed code
+history; the harness remains the primary conversation surface.
+
+Users can also open projects directly. Planned onboarding directs workflow
+creation back to the harness with this copyable prompt:
+
+```text
+Use waypoints to make a workflow and create this feature
+```
+
+Add the feature description before sending. Targeted app opening, live external
+synchronization, and the new empty states are product requirements, not all
+implemented capabilities. See [agent-led workflows and onboarding](docs/28-agent-led-workflows.md).
+
 ## Try the CLI
 
 For an existing jj project with a local `main` bookmark, explicitly save its base:
