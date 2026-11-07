@@ -4,6 +4,7 @@ members = [
     "crates/waypoints-backend",
     "crates/waypoints-cli",
     "crates/waypoints-core",
+    "crates/waypoints-rune",
 ]
 default-members = ["crates/waypoints-app"]
 exclude = ["vendor/*"]

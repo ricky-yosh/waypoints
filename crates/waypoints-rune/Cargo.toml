@@ -1,0 +1,9 @@
+[package]
+name = "waypoints-rune"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "a8ca769b944598e179f33cc6843629b90e6ca831", default-features = false, features = ["accessibility", "dbus", "embedded-fonts", "metal-backend"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a8ca769b944598e179f33cc6843629b90e6ca831" }
