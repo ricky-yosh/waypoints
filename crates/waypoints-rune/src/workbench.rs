@@ -201,7 +201,7 @@ fn assignment_backend(s: &State, node: &Node, k: &Kit) -> El {
         ("Saved", k.c.success.fg)
     };
 
-    let mut column = col().w_full().min_h(0.0).gap(6.0).child(
+    let mut column = col().w_full().grow(1.0).min_h(0.0).gap(6.0).child(
         row()
             .w_full()
             .items_center()
@@ -269,18 +269,28 @@ fn assignment_backend(s: &State, node: &Node, k: &Kit) -> El {
             );
         } else {
             column = column.child(
-                TextArea::new(&draft.edit)
-                    .label("Node assignment")
-                    .placeholder("Write the node assignment")
-                    .width(None)
-                    .rows(6)
-                    .on_edit(|s: &mut State| s.assignment_edit_mut())
-                    .on_submit(|s: &mut State, tx| {
-                        s.save_assignment();
-                        tx.instant();
+                col()
+                    .key("workbench-assignment-editor-scroll")
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
                     })
-                    .build(k)
-                    .key("workbench-assignment-editor"),
+                    .child(
+                        TextArea::new(&draft.edit)
+                            .label("Node assignment")
+                            .placeholder("Write the node assignment")
+                            .width(None)
+                            .rows(6)
+                            .on_edit(|s: &mut State| s.assignment_edit_mut())
+                            .on_submit(|s: &mut State, tx| {
+                                s.save_assignment();
+                                tx.instant();
+                            })
+                            .build(k)
+                            .key("workbench-assignment-editor"),
+                    ),
             );
         }
     } else {

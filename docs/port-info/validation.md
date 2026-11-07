@@ -98,7 +98,7 @@ target/debug/waypoints-rune \
 
 The PNGs were visually inspected. Trees were checked for camera-scaled card
 rects, the screen-space `workbench` dialog, seven streamed output lines after
-the scripted tour, and node/edge keys. Twenty-eight Rust tests cover the same
+the scripted tour, and node/edge keys. Thirty Rust tests cover the same
 interactions without needing a display, including real-backend and UI-state tests:
 
 ```sh
@@ -173,6 +173,28 @@ and marks `end` at 0.7 s, after the 260 ms hover delay. Its tree contains
 `graph-preview` and `graph-preview-summary`. Headless runs skip every preference
 write; compare the disposable preferences file before and after if needed.
 
+Assignment edit/preview scenes:
+
+```sh
+target/debug/waypoints-rune --snap target/port-info/rune/assignment-light.png \
+  --tree target/port-info/rune/assignment-light.json --theme light --scale 2 \
+  --size 1280x820 --scene assignment --at 0.8
+target/debug/waypoints-rune --snap target/port-info/rune/assignment-preview-light.png \
+  --tree target/port-info/rune/assignment-preview-light.json --theme light --scale 2 \
+  --size 1280x820 --scene assignment-preview --at 0.8
+target/debug/waypoints-rune --snap target/port-info/rune/canvas-traffic-light.png \
+  --tree target/port-info/rune/canvas-traffic-light.json --theme dark --scale 2 \
+  --size 1280x820 --at 0.5
+```
+
+The trees contain `workbench-assignment-editor`, `assignment-notice`, and the
+save/discard buttons, or `workbench-assignment-preview` clipped to its compact
+viewport. Expanding the workbench makes the preview viewport taller. The diff
+tree starts with a 190-point `review-files` pane and a `review-file-resize`
+grip. The traffic-light capture keeps the HUD at the normal left margin
+(x=18) and starts it below the lights (y≥24) when headless chrome reports the
+macOS traffic-light inset.
+
 Native menu dispatch scenes (the script `menu` event fire the same item lookup
 used by native menus):
 
@@ -233,7 +255,9 @@ WAYPOINTS_RUNE_PREFERENCES_FILE=$PWD/target/port-info/rune/native-geometry-final
 ```
 
 It completes with 120 frames, 118 presented, 2 skipped, interval p50/p95
-16.67/16.67 ms. No `native menu` errors are reported on stderr. After the run
+16.67/16.67 ms in the latest run; two intermediate runs reported 6–7 skipped
+with 0 failed acquires, so this host's pacing varies. No `native menu` errors are
+reported on stderr. After the run
 the disposable preferences file contains
 `"window_geometry": {"x": 80.0, "y": 44.0, "width": 1280.0, "height": 820.0,
 "scale": 2.0}`, and the trace header reports 1280×820 at scale 2.

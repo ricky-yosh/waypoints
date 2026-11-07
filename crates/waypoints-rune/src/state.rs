@@ -91,6 +91,8 @@ pub(crate) struct ReviewPanel {
     pub stale: bool,
     pub loaded_commit: Option<String>,
     pub selected_file: Option<usize>,
+    pub file_list_width: f32,
+    pub file_resize_start: Option<f32>,
     pub history: HistoryPanel,
 }
 
@@ -106,6 +108,8 @@ impl Default for ReviewPanel {
             stale: false,
             loaded_commit: None,
             selected_file: None,
+            file_list_width: 190.0,
+            file_resize_start: None,
             history: HistoryPanel::default(),
         }
     }

@@ -1,6 +1,6 @@
 //! Exact-target diff review for a node's current revision or saved run snapshot.
 
-use rune::{Color, El, ScrollSpec, col, el, row, text};
+use rune::{Color, Cursor, Drag, El, Phase, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::diff::{DiffMode, DiffState, DiffView, FileStatus};
 use rune_kit::{Button, ButtonVariant, Kit};
 
@@ -238,12 +238,24 @@ pub fn view(s: &State, k: &Kit) -> El {
                     .w_full()
                     .grow(1.0)
                     .min_h(0.0)
-                    .gap(9.0)
+                    .gap(6.0)
                     .child(file_list(s, k))
                     .child(
+                        el().key("review-file-resize")
+                            .w(7.0)
+                            .h_full()
+                            .cursor(Cursor::ResizeColumn)
+                            .hover(k.c.hover)
+                            .role("separator")
+                            .label("Resize changed files")
+                            .help("Drag to resize changed files")
+                            .on_drag(resize_files)
+                            .child(el().w(1.0).h_full().self_center().fill(k.c.border_base)),
+                    )
+                    .child(
                         col()
-                            .w_full()
                             .grow(1.0)
+                            .min_w(0.0)
                             .min_h(0.0)
                             .key("review-diff-surface")
                             .child(
@@ -272,13 +284,28 @@ pub fn view(s: &State, k: &Kit) -> El {
     column
 }
 
+fn resize_files(s: &mut State, drag: &mut Drag, tx: &mut Tx) {
+    match drag.phase {
+        Phase::Down => s.review.file_resize_start = Some(s.review.file_list_width),
+        Phase::Move | Phase::Up => {
+            if let Some(start) = s.review.file_resize_start {
+                s.review.file_list_width = (start + drag.dx).clamp(140.0, 360.0);
+                tx.instant();
+            }
+            if drag.phase == Phase::Up {
+                s.review.file_resize_start = None;
+            }
+        }
+    }
+}
+
 fn file_list(s: &State, k: &Kit) -> El {
     let files = s.review.diff.files();
     col()
         .key("review-files")
-        .w(190.0)
+        .w(s.review.file_list_width)
+        .h_full()
         .min_h(0.0)
-        .grow(1.0)
         .padding(5.0)
         .gap(2.0)
         .radius(k.radius.md)

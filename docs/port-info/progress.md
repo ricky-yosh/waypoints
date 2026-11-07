@@ -10,19 +10,20 @@ canvas keeps its offline mode, and `--project PATH` connects only through
 `waypoints_backend::Client`. Backend mode loads workflows/graphs, edits and
 checked-saves assignments with per-node drafts, starts/continues/cancels runs,
 replies to single-use permissions, and shows run versus snapshot state.
-Twenty-eight Rust tests pass, including in-process real-backend tests with a
+Thirty Rust tests pass, including in-process real-backend tests with a
 deterministic ACP adapter. Headless PNGs/trees for structured output, diff
-review, history, settings, pointer-hover/keyboard graph previews, project
-sidebar, and the earlier canvas/run flows were inspected. A real
+review, history, settings, assignment edit/preview, pointer-hover/keyboard graph
+previews, project sidebar, and the earlier canvas/run flows were inspected. A real
 model/installed ACP agent has not been run. Sidebar project add/remove with
 persisted project/workflow selection, automatic history freshness, the agreed
 keyboard shortcuts/focus return, pointer-hover previews, and persisted native
 window geometry now work; every behavior-map row has a source/test
-reconciliation. Native menu-bar items and display-aware geometry clamping are
-also implemented. Complete native interaction/lifecycle checks (Tab traversal,
+reconciliation. Native menu-bar items, display-aware geometry clamping,
+traffic-light clearance, labeled SVG HUD icons, a resizable changed-files pane,
+and compact assignment clipping are also implemented. Complete native interaction/lifecycle checks (Tab traversal,
 IME, accessibility, close/reopen), native menu appearance and multi-display
 verification, Windows/Linux validation, and real-agent execution remain. The
-latest post-geometry 120-frame native trace passed (118/120 presented, p50/p95 16.67/16.67 ms,
+latest post-geometry 120-frame native trace passed (118/120 presented, 2 skipped, p50/p95 16.67/16.67 ms,
 clean exit), with no native-menu errors reported; seeded 1100×700 and
 partially off-screen windows restored/clamped with matching trace headers. An
 earlier attempt hit the intermittent `display link creation failed: -6661`,
@@ -147,7 +148,7 @@ assignment text, and close/reopen the window.
   GPUI.
 - Native trace rerun: `target/debug/waypoints-rune --native --trace
   target/port-info/rune/native-canvas-120.jsonl --frames 120 --theme dark --size
-  1280x820` printed 120 frames, 119 presented, 1 skipped, interval p50/p95
+  1280x820` printed 120 frames, 118 presented, 2 skipped, interval p50/p95
   16.67/16.67 ms, max 33.33 ms, lag p50/p95 16.67/16.67 ms, and exited normally.
   A 30-frame light run also completed. The earlier automated display-link
   failure therefore did not recur on this host. Interactive pointer feel,
@@ -416,7 +417,7 @@ assignment text, and close/reopen the window.
   preference persistence because `cargo test` is not a headless render process.
 - Added fixture scripts `fixtures/menu-settings.json`,
   `fixtures/menu-sidebar.json`, and `fixtures/menu-refresh.json`.
-- `cargo test -p waypoints-rune --locked`: 28 passed, 0 failed.
+- `cargo test -p waypoints-rune --locked`: 28 passed, 0 failed (at this step).
   `cargo fmt -p waypoints-rune -- --check`,
   `cargo clippy -p waypoints-rune --all-targets --all-features --locked
   --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
@@ -439,6 +440,65 @@ assignment text, and close/reopen the window.
   equivalents still need a person; display clamping was verified on this host's
   single display, not a multi-display arrangement. Native Tab/IME/accessibility/
   close-reopen and real-agent/Linux/Windows checks remain.
+
+### Milestone 4: assignment preview evidence
+
+- Added `assignment` and `assignment-preview` display scenes with a dirty draft
+  and an external-saved notice.
+- Fixed the Markdown preview viewport: the assignment column now grows, so the
+  preview fills the workbench instead of collapsing to a one-line strip.
+- Added `assignment_edit_and_preview_render_draft_and_notice`, which checks the
+  editor, mode switch, external-saved notice, save/discard buttons, and a
+  preview viewport taller than 200 points.
+- `cargo test -p waypoints-rune --locked`: 29 passed, 0 failed (at this step).
+  `cargo fmt -p waypoints-rune -- --check`,
+  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+  --locked` pass.
+- Artifacts inspected: `assignment-light.png|json` (editor, unsaved state,
+  external-saved notice, save/discard) and `assignment-preview-light.png|json`
+  (rendered Markdown fills the viewport).
+- Corrected the behavior-map note: GPUI has no blocking unsaved-close dialog;
+  both frontends keep the draft and show an unsaved/status notice.
+
+### Milestone 4: native feedback polish
+
+- Cleared the macOS traffic-light area vertically: the HUD and canvas hint use
+  the normal left margin but start below the lights, and the project panel
+  starts below the hint. An earlier attempt pushed them too far right; the
+  final layout keeps the left alignment. Headless chrome reports the same macOS inset, so
+  artifacts match the native window.
+- Replaced the HUD text buttons with Rune `IconButton`s and custom SVG icons:
+  zoom out/in, reset, project sidebar, and settings. Accessible labels and
+  tooltips remain (`hud_icons_keep_accessible_labels`).
+- Fixed the changed-files pane in exact review: it is a fixed 190-point list
+  instead of growing to half the workbench, and a 7-point
+  `Cursor::ResizeColumn` grip resizes it between 140 and 360 points. The diff
+  surface receives the remaining width.
+- Fixed compact assignment overlap: the editor and Markdown preview are clipped
+  to a flexible scroll viewport above the save/discard row, so prompt text no
+  longer draws over the footer in the 328-point workbench. Expanded mode still
+  gives the preview the full available height.
+- Tests: `hud_icons_keep_accessible_labels`,
+  `assignment_edit_and_preview_render_draft_and_notice` (compact clipping,
+  expanded fill, footer clearance), and the diff-review test now checks the
+  fixed width and drag resize.
+- `cargo test -p waypoints-rune --locked`: 30 passed, 0 failed.
+  `cargo fmt -p waypoints-rune -- --check`,
+  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+  --locked` pass.
+- Artifacts inspected: `assignment-light.png|json` (compact editor clipped,
+  controls above footer), `assignment-preview-light.png|json`,
+  `diff-review-light.png|json` (190-point file list, wider diff),
+  `canvas-traffic-light.png|json` (icon HUD inset past the traffic lights).
+- Native trace variation: two intermediate 120-frame runs reported 6–7 skipped
+  with 0 failed acquires; a third reported 1 skipped (119 presented,
+  p50/p95 16.67/16.67 ms). Recorded as host/display-link variability, not a
+  clean-performance claim.
+- User visually confirmed the native traffic-light clearance and HUD placement
+  on macOS (informal confirmation, not the full native QA pass). The diff grip
+  is pointer-only; no keyboard resize.
 
 Append concise entries as work proceeds. Keep current status and next task above
 up to date; do not make the next agent reconstruct them from the full log.

@@ -205,13 +205,16 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .unwrap_or([WINDOW_SIZE.0, WINDOW_SIZE.1]);
     let zoom = s.preferences.interface_zoom;
     let content_size = [window_size[0] / zoom, window_size[1] / zoom];
+    let chrome = cx.chrome_insets();
+    let traffic_top = if chrome.leading > 0.0 { 28.0 } else { 0.0 };
+    let insets = [chrome.leading / zoom, traffic_top / zoom];
     let mut content = el()
         .key("ui-content")
         .w(content_size[0])
         .h(content_size[1])
         .origin(0.0, 0.0)
         .scale(zoom)
-        .child(canvas::viewport(s, &kit, dark, content_size));
+        .child(canvas::viewport(s, &kit, dark, content_size, insets));
     if s.mode == Mode::Backend && !s.display_fixture {
         content = content.child(project::view(s, &kit));
     }
@@ -356,6 +359,30 @@ fn scene_project_sidebar(s: &mut State) {
     s.graph_state = LoadState::Ready;
     s.selected = Some(4);
     s.camera.set_pan([286.0, 44.0]);
+}
+
+fn scene_assignment(s: &mut State) {
+    backend_display_scene(s);
+    s.selected_workflow = Some(1);
+    s.selected = Some(4);
+    s.workbench_open = true;
+    s.workbench_expanded = false;
+    s.review.tab = WorkbenchTab::Assignment;
+    s.camera.set_pan([286.0, 44.0]);
+    let mut draft =
+        NodeDraft::new("## Plan migration\n\nSplit the work into reversible milestones.".into());
+    draft.edit.replace_text(
+        "## Plan migration\n\nSplit the work into reversible milestones.\n\nThe saved assignment changed elsewhere; this draft is kept unsaved.",
+    );
+    draft.notice = Some("Saved assignment changed elsewhere; unsaved draft kept".into());
+    s.drafts.insert((1, 4), draft);
+}
+
+fn scene_assignment_preview(s: &mut State) {
+    scene_assignment(s);
+    if let Some(draft) = s.drafts.get_mut(&(1, 4)) {
+        draft.preview = true;
+    }
 }
 
 fn scene_settings(s: &mut State) {
@@ -799,6 +826,8 @@ fn main() {
                     scene_structured_output_expanded,
                 ),
                 ("diff-review", scene_diff_review),
+                ("assignment", scene_assignment),
+                ("assignment-preview", scene_assignment_preview),
                 ("settings", scene_settings),
                 ("project-sidebar", scene_project_sidebar),
                 ("interface-zoom", scene_interface_zoom),
@@ -1783,6 +1812,25 @@ mod tests {
         assert!(runtime.find("review-file-1").is_some());
         assert!(runtime.find("review-commit").is_some());
         assert!(runtime.find("review-diff").is_some());
+        let (files, _) = runtime.presented("review-files").expect("file list");
+        assert!(
+            (files[2] - 190.0).abs() < 1.0,
+            "the changed-files pane starts fixed: {files:?}"
+        );
+        let (grip_x, grip_y) = runtime
+            .find("review-file-resize")
+            .expect("file resize grip");
+        runtime.pointer_move(grip_x, grip_y);
+        runtime.frame(0.0);
+        runtime.pointer_down(grip_x, grip_y);
+        runtime.pointer_move(grip_x + 60.0, grip_y);
+        runtime.pointer_up(grip_x + 60.0, grip_y);
+        runtime.frame(0.0);
+        assert!(
+            (runtime.state.review.file_list_width - 250.0).abs() < 5.0,
+            "dragging the grip resizes the file list: {}",
+            runtime.state.review.file_list_width
+        );
 
         let (x, y) = runtime.find("review-toggle-mode").expect("mode toggle");
         runtime.pointer_down(x, y);
@@ -2045,6 +2093,98 @@ mod tests {
         assert!(runtime.find("projects-empty").is_some());
         let saved = std::fs::read_to_string(&preferences_path).expect("saved preferences");
         assert!(!saved.contains(&canonical.display().to_string()));
+    }
+
+    #[test]
+    fn assignment_edit_and_preview_render_draft_and_notice() {
+        use rune::Env;
+
+        let mut state = State::default();
+        scene_assignment(&mut state);
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+        assert!(runtime.find("workbench-assignment-editor").is_some());
+        assert!(runtime.find("assignment-mode").is_some());
+        let notice = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("assignment-notice"))
+            .and_then(|element| element.text);
+        assert_eq!(
+            notice.as_deref(),
+            Some("Saved assignment changed elsewhere; unsaved draft kept")
+        );
+        assert!(runtime.find("workbench-save").is_some());
+        assert!(runtime.find("workbench-discard").is_some());
+        let (save, _) = runtime.presented("workbench-save").expect("save button");
+        let (close, _) = runtime
+            .presented("workbench-close-button")
+            .expect("footer close");
+        assert!(
+            save[1] + save[3] <= close[1],
+            "compact assignment controls stay above the footer: {save:?} vs {close:?}"
+        );
+
+        let mut state = State::default();
+        scene_assignment_preview(&mut state);
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+        assert!(runtime.find("workbench-assignment-preview").is_some());
+        let (rect, _) = runtime
+            .presented("workbench-assignment-preview-scroll")
+            .expect("preview viewport");
+        assert!(
+            rect[3] > 40.0 && rect[3] < 100.0,
+            "the compact preview is clipped to its viewport: {rect:?}"
+        );
+        runtime.update(|state, _| state.workbench_expanded = true);
+        for _ in 0..24 {
+            runtime.frame(1.0 / 60.0);
+        }
+        let (rect, _) = runtime
+            .presented("workbench-assignment-preview-scroll")
+            .expect("expanded preview viewport");
+        assert!(
+            rect[3] > 200.0,
+            "the expanded preview fills the workbench: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn hud_icons_keep_accessible_labels() {
+        use rune::Env;
+
+        let state = State {
+            mode: Mode::Backend,
+            backend_enabled: false,
+            ..State::default()
+        };
+        let mut runtime = Runtime::new(state, view, WINDOW_SIZE, Env::new(false, 1.0));
+        runtime.poll = Some(poll);
+        runtime.on_key = Some(on_key);
+        runtime.check_live_only(false);
+        runtime.frame(0.0);
+        for (key, label) in [
+            ("zoom-in", "Zoom in"),
+            ("zoom-out", "Zoom out"),
+            ("zoom-reset", "Reset"),
+            ("project-toggle", "Hide projects"),
+            ("settings-open", "Settings"),
+        ] {
+            let element = runtime
+                .elements()
+                .into_iter()
+                .find(|element| element.key.as_deref() == Some(key))
+                .expect("icon button");
+            assert_eq!(element.label.as_deref(), Some(label), "{key}");
+            assert_eq!(element.role, "button", "{key}");
+        }
     }
 
     #[test]

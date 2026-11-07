@@ -3,8 +3,10 @@
 use std::time::Duration;
 
 use rune::tok;
-use rune::{Color, Cursor, Drag, El, Live, Phase, PointerButton, Tx, canvas, col, el, row, text};
-use rune_kit::{Button, ButtonVariant, Kit};
+use rune::{
+    Color, Cursor, Drag, El, Icon, Live, Phase, PointerButton, Tx, canvas, col, el, row, text,
+};
+use rune_kit::{IconButton, IconButtonVariant, Kit};
 
 use crate::fixture::{self, CARD_HEIGHT, CARD_WIDTH, Node, WORLD_HEIGHT, WORLD_WIDTH};
 use crate::{Mode, State};
@@ -83,7 +85,33 @@ impl Camera {
     }
 }
 
-pub fn viewport(s: &State, k: &Kit, dark: bool, size: [f32; 2]) -> El {
+static PLUS: Icon = Icon {
+    name: "waypoints-plus",
+    view: 16.0,
+    body: r#"<path d="M8 3V13M3 8H13" stroke="currentColor" stroke-linecap="round"/>"#,
+};
+static MINUS: Icon = Icon {
+    name: "waypoints-minus",
+    view: 16.0,
+    body: r#"<path d="M3 8H13" stroke="currentColor" stroke-linecap="round"/>"#,
+};
+static RESET: Icon = Icon {
+    name: "waypoints-reset",
+    view: 16.0,
+    body: r#"<path d="M3.2 8a4.8 4.8 0 1 0 1.4-3.4M3.2 3.2v3.2h3.2" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+static PROJECTS: Icon = Icon {
+    name: "waypoints-projects",
+    view: 16.0,
+    body: r#"<rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor"/><path d="M6 2.5V13.5" stroke="currentColor"/>"#,
+};
+static SETTINGS: Icon = Icon {
+    name: "waypoints-settings",
+    view: 16.0,
+    body: r#"<path d="M3 4.5H13M3 11.5H13" stroke="currentColor" stroke-linecap="round"/><circle cx="6" cy="4.5" r="1.5" stroke="currentColor"/><circle cx="10" cy="11.5" r="1.5" stroke="currentColor"/>"#,
+};
+
+pub fn viewport(s: &State, k: &Kit, dark: bool, size: [f32; 2], insets: [f32; 2]) -> El {
     let theme = tok::theme(dark);
     let grid = k.c.border_base.alpha(if dark { 0.16 } else { 0.22 });
     let edges = k.c.text_faint.alpha(if dark { 0.7 } else { 0.65 });
@@ -130,7 +158,7 @@ pub fn viewport(s: &State, k: &Kit, dark: bool, size: [f32; 2]) -> El {
                 .and_then(|id| s.graph.node(id))
                 .map(|node| preview(node, s, k, size)),
         )
-        .child(hud(s, k, size))
+        .child(hud(s, k, size, insets))
 }
 
 fn wheel(s: &mut State, event: rune::WheelEvent, tx: &mut Tx) -> bool {
@@ -430,41 +458,48 @@ fn node_card(s: &State, node: &Node, k: &Kit) -> El {
     )
 }
 
-fn hud(s: &State, k: &Kit, size: [f32; 2]) -> El {
-    let zoom_in = Button::new("+")
-        .variant(ButtonVariant::Ghost)
+fn hud(s: &State, k: &Kit, size: [f32; 2], insets: [f32; 2]) -> El {
+    let x = 18.0;
+    let y = if insets[0] > 0.0 { insets[1] } else { 18.0 };
+    let zoom_in = IconButton::new(&PLUS)
+        .variant(IconButtonVariant::Ghost)
+        .label("Zoom in")
         .help("Zoom in")
         .on_press(move |s: &mut State| {
             s.camera.zoom_about(camera_center(size), 1.2);
         })
         .build(k)
         .key("zoom-in");
-    let zoom_out = Button::new("−")
-        .variant(ButtonVariant::Ghost)
+    let zoom_out = IconButton::new(&MINUS)
+        .variant(IconButtonVariant::Ghost)
+        .label("Zoom out")
         .help("Zoom out")
         .on_press(move |s: &mut State| {
             s.camera.zoom_about(camera_center(size), 1.0 / 1.2);
         })
         .build(k)
         .key("zoom-out");
-    let settings = Button::new("Settings")
-        .variant(ButtonVariant::GhostMuted)
+    let settings = IconButton::new(&SETTINGS)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Settings")
         .help("Appearance and motion settings")
         .on_press(|s: &mut State| s.settings_open = true)
         .build(k)
         .key("settings-open");
-    let projects = Button::new(if s.preferences.sidebar_open {
-        "Hide projects"
-    } else {
-        "Show projects"
-    })
-    .variant(ButtonVariant::GhostMuted)
-    .help("Show or hide the project navigator")
-    .on_press(|s: &mut State| s.toggle_sidebar())
-    .build(k)
-    .key("project-toggle");
-    let reset = Button::new("Reset")
-        .variant(ButtonVariant::GhostMuted)
+    let projects = IconButton::new(&PROJECTS)
+        .variant(IconButtonVariant::GhostMuted)
+        .label(if s.preferences.sidebar_open {
+            "Hide projects"
+        } else {
+            "Show projects"
+        })
+        .help("Show or hide the project navigator")
+        .on_press(|s: &mut State| s.toggle_sidebar())
+        .build(k)
+        .key("project-toggle");
+    let reset = IconButton::new(&RESET)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Reset")
         .help("Reset the fixture camera")
         .on_press(|s: &mut State| {
             s.camera.reset();
@@ -474,7 +509,7 @@ fn hud(s: &State, k: &Kit, size: [f32; 2]) -> El {
 
     let mut controls = row()
         .key("canvas-hud")
-        .absolute(18.0, 18.0)
+        .absolute(x, y)
         .padding(10.0)
         .gap(8.0)
         .items_center()
@@ -523,7 +558,7 @@ fn hud(s: &State, k: &Kit, size: [f32; 2]) -> El {
             .key("canvas-hint")
             .font(k.ty.small)
             .color(k.c.text_faint)
-            .absolute(18.0, 62.0);
+            .absolute(x, y + 44.0);
 
     el().child(controls).child(hint)
 }

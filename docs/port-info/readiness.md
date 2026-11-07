@@ -15,6 +15,9 @@ later user-approved cutover.
   `--project`, workflow list/graph loading, unavailable/empty/error/retry states,
   stale-reply token guards, checked assignment saves with per-node drafts, and
   draft preservation across workflow switches.
+- Assignment editing: per-node drafts retained across navigation, Edit/Preview,
+  checked saves with the saved baseline, external-saved warnings, save/discard,
+  and an unsaved-state indicator.
 - Run lifecycle: fresh start, continue, cancellation, bounded structured ACP
   events, single-use permission replies, separate run/snapshot state, and
   continuation eligibility.
@@ -54,6 +57,10 @@ later user-approved cutover.
   Projects Sidebar, and enabled Refresh Project, plus Rune's standard Edit and
   Window items. Menu actions share the in-app state methods; checked/enabled
   flags update as the sidebar/project state changes.
+- Native chrome and UI polish: the HUD keeps its normal left margin but starts
+  below the macOS traffic lights, HUD actions are labeled SVG icon buttons,
+  exact-review changed files use a fixed/resizable pane with a column-resize
+  grip, and compact assignment text clips to a scroll viewport above the footer.
 
 ## Automated evidence
 
@@ -67,21 +74,21 @@ cargo doc -p waypoints-rune --no-deps --locked
 cargo check -p waypoints-app --locked
 ```
 
-Current result: 28 Rune tests pass, including in-process real-backend tests
+Current result: 30 Rune tests pass, including in-process real-backend tests
 against temporary databases/sockets and the deterministic
 `crates/waypoints-cli/tests/fixtures/acp_agent.py` adapter. The GPUI app check
 passes with its pre-existing dependency warnings, and
 `cargo test -p waypoints-app --locked` passes 53 tests; no GPUI app code was
 changed by the Rune port. The latest 120-frame native trace passed (118/120
-presented, p50/p95 16.67/16.67 ms, clean exit), reported no native-menu errors,
+presented, 2 skipped, p50/p95 16.67/16.67 ms, clean exit), reported no native-menu errors,
 and saved/restored/clamped window geometry was verified with seeded
 preferences.
 
 Headless artifacts under `target/port-info/rune/` include the canvas, workbench,
 large-graph, scripted canvas tour, backend navigation/assignment, permission/
 completion/continuation/cancellation, structured-output, diff-review, history,
-settings, pointer-hover and keyboard graph previews, project sidebar, native
-window-geometry traces, and native trace captures. See [validation.md](validation.md) for
+settings, assignment edit/preview, pointer-hover and keyboard graph previews,
+project sidebar, native window-geometry traces, and native trace captures. See [validation.md](validation.md) for
 commands and [progress.md](progress.md) for exact results.
 
 ## Remaining gaps before parity can be claimed
@@ -95,6 +102,10 @@ commands and [progress.md](progress.md) for exact results.
 - Geometry clamping was verified with the current single-display host; a
   multi-display arrangement, display hot-plug, and mixed-scale positions still
   need a person.
+- The traffic-light clearance and HUD placement were visually confirmed by the
+  user on native macOS. The diff-pane grip's native resize feel, Tab/IME/
+  accessibility, close/reopen, and multi-display geometry still need a person.
+  The diff grip is pointer-only; keyboard resizing is not implemented.
 - Native interactive pointer feel, trackpad gestures, IME, clipboard,
   accessibility, minimize/close/reopen, and multi-window behavior still require
   a person on a desktop session. One earlier trace attempt failed with
@@ -128,14 +139,17 @@ Then check and record:
 4. Run a fixture/backend flow with the deterministic adapter, reply to a
    permission, cancel a run, expand a tool row, scroll away from and back to the
    output tail.
-5. Review current/run/revision diffs, switch unified/split and wrap, navigate
-   files, select/copy lines, refresh a stale current review, and open history.
+5. Review current/run/revision diffs, drag the changed-files divider, switch
+   unified/split and wrap, navigate files, select/copy lines, refresh a stale
+   current review, and open history.
 6. Use `Cmd+B` to hide/show the sidebar and `Cmd+O` to add a project with the
    native folder picker, remove a project, record a new run while History is
    open, confirm Load newest appears, then switch selected project/workflow.
 7. Use the native menu bar for Settings, Add Project, Show Projects Sidebar,
    Refresh Project, Close Window, Undo/Cut/Copy/Paste/Select All, and the
-   Window menu; confirm checked/enabled states and key equivalents.
+   Window menu; confirm checked/enabled states and key equivalents. Confirm the
+   HUD and project panel clear the traffic lights and the HUD icons have
+   tooltips.
 8. Move and resize the window, note the size/position, switch
    System/Light/Dark, interface zoom, and reduced motion, quit, relaunch, and
    confirm the separate Rune preference file restores all of them without
