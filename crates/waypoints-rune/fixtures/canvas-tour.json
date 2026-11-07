@@ -1,0 +1,10 @@
+{
+  "events": [
+    { "t": 0.10, "type": "wheel", "x": 600, "y": 330, "dx": 36, "dy": 18 },
+    { "t": 0.25, "type": "magnify", "x": 600, "y": 330, "delta": 0.08 },
+    { "t": 0.45, "type": "double-click", "key": "node-3" },
+    { "t": 0.80, "type": "tap", "key": "workbench-stream" },
+    { "t": 1.10, "type": "drag", "key": "node-5", "dx": -28, "dy": 20, "dur": 0.35 },
+    { "t": 1.70, "type": "mark", "name": "end" }
+  ]
+}

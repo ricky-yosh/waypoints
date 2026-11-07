@@ -1,8 +1,15 @@
 # Rune frontend migration
 
-Status: Rune bootstrap builds and passes headless checks; native startup is
-user-confirmed. Detailed native lifecycle validation remains pending.
-The GPUI frontend remains the active/default application.
+Status: the Rune frontend passes fixture-canvas checks and a real-backend
+vertical slice (project/workflow/graph loading, checked assignment saves,
+start/continue/cancel, structured events, permission replies, snapshot and
+continuation state, exact diff review, history, settings, keyboard shortcuts and
+focus return, pointer/keyboard previews, clamped native window geometry, and
+macOS native menu items). Backend tests use an in-process server and
+deterministic ACP adapter; no real model agent has run. Native menu appearance,
+interactive lifecycle checks, Windows/Linux validation, and menu support outside
+macOS remain. The GPUI frontend remains the active/default application; cutover
+is not approved. See [readiness.md](readiness.md).
 
 ## Goal and scope
 
@@ -24,6 +31,8 @@ publish anything, delete the old frontend, or add backend-only product features.
 3. [Milestones](milestones.md): ordered work and acceptance gates.
 4. [Behavior map](behavior-map.md): reference implementation and parity checklist.
 5. [Validation](validation.md): checks and evidence requirements.
+6. [Cutover readiness](readiness.md): current verdict, remaining gaps, and the
+   native person checks required before approval.
 
 Read applicable repository instructions and Rust skills before implementation.
 GPUI Kit guides apply to GPUI work; do not assume their APIs or dependency rules

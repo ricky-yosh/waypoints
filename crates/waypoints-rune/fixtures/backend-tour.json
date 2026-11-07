@@ -1,0 +1,10 @@
+{
+  "events": [
+    { "t": 0.20, "type": "double-click", "key": "node-2" },
+    { "t": 0.70, "type": "tap", "key": "workbench-assignment-editor" },
+    { "t": 0.85, "type": "key", "name": "a", "cmd": true },
+    { "t": 1.00, "type": "type", "text": "# Updated from headless" },
+    { "t": 2.10, "type": "tap", "key": "workbench-save" },
+    { "t": 2.90, "type": "mark", "name": "end" }
+  ]
+}
