@@ -160,7 +160,7 @@ pub fn small_graph() -> Graph {
         node(
             7,
             "Fix regressions",
-            "Keep the GPUI frontend working",
+            "Keep the desktop frontend working",
             Status::Ready,
             912.0,
             312.0,

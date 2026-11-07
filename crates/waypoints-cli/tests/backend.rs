@@ -1524,7 +1524,12 @@ fn continuation_preflight_rejects_invalid_sources_prompts_and_native_changes_bef
         ])
         .output()?;
     assert!(!redirected.status.success());
-    assert!(String::from_utf8(redirected.stderr)?.contains("will not switch adapters"));
+    let redirected_stderr = String::from_utf8(redirected.stderr)?;
+    assert!(
+        redirected_stderr
+            .contains("Saved ACP executable is missing or resolves to a different path"),
+        "stderr: {redirected_stderr}"
+    );
     fs::remove_file(&agent)?;
     fs::rename(&relocated_agent, &agent)?;
     let old = fixture
@@ -1962,7 +1967,13 @@ fn run_start_validates_before_launch_and_setup_can_be_cancelled() -> anyhow::Res
         .args(["run", "continue", "--run", &id, "--prompt", "complete"])
         .output()?;
     assert!(!continuation.status.success());
-    assert!(String::from_utf8(continuation.stderr)?.contains("no saved ACP session"));
+    let continuation_stderr = String::from_utf8(continuation.stderr)?;
+    assert!(
+        continuation_stderr
+            .to_ascii_lowercase()
+            .contains("no saved acp session"),
+        "stderr: {continuation_stderr}"
+    );
     assert_eq!(agent_requests(&agent)?.len(), before);
     let next = start_run(&fixture, &agent)?;
     wait_run(&fixture, &next["run"]["id"].to_string(), "completed")?;

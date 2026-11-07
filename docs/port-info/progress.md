@@ -2,7 +2,7 @@
 
 ## Current status
 
-Milestones 1–3 have automated coverage in `crates/waypoints-rune`, and
+Milestones 1–3 have automated coverage in `crates/waypoints-app`, and
 milestone 4 now covers structured output, exact-target diff review, run/native
 history, settings, theme, Rune-only preferences including window geometry, and
 pointer/keyboard graph previews. The fixture
@@ -20,25 +20,25 @@ keyboard shortcuts/focus return, pointer-hover previews, and persisted native
 window geometry now work; every behavior-map row has a source/test
 reconciliation. Native menu-bar items, display-aware geometry clamping,
 traffic-light clearance, labeled SVG HUD icons, a resizable changed-files pane,
-and compact assignment clipping are also implemented. Complete native interaction/lifecycle checks (Tab traversal,
-IME, accessibility, close/reopen), native menu appearance and multi-display
-verification, Windows/Linux validation, and real-agent execution remain. The
-latest post-geometry 120-frame native trace passed (118/120 presented, 2 skipped, p50/p95 16.67/16.67 ms,
+and compact assignment clipping are also implemented. The user confirmed the
+native macOS menu, diff divider, Tab/IME/VoiceOver, close/reopen, and
+multi-display checks. Windows/Linux validation and real-agent execution remain.
+The latest post-geometry 120-frame native trace passed (119/120 presented, 1 skipped, p50/p95 16.67/16.67 ms,
 clean exit), with no native-menu errors reported; seeded 1100×700 and
 partially off-screen windows restored/clamped with matching trace headers. An
 earlier attempt hit the intermittent `display link creation failed: -6661`,
-which immediate retries cleared. The existing GPUI frontend remains the
-active/default application. See
-[readiness.md](readiness.md) for the cutover assessment.
+which immediate retries cleared. The full cutover is complete: Rune is the canonical `waypoints-app` frontend,
+the GPUI crate/vendor patches/scripts are removed, and `waypoints-app` is the
+workspace default. See [readiness.md](readiness.md) for evidence and remaining
+platform/agent limitations.
 
 ## Next task
 
-Run the native person checks, then present the cutover decision for explicit
-approval. The remaining work is native-person verification (menu bar, Tab/IME,
-accessibility, close/reopen, multi-display geometry), Windows/Linux, and a real
-ACP model/agent; any parity issue those uncover still needs a follow-up.
+Cutover is complete. Remaining independent validation is Linux/Windows and a
+real ACP model/agent; native macOS checks are user-confirmed. No further package
+renames or GPUI changes are expected.
 The pending person check remains: launch
-`cargo run -p waypoints-rune --locked`, pan/zoom with a trackpad and mouse,
+`cargo run -p waypoints-app --locked`, pan/zoom with a trackpad and mouse,
 drag a card, press Return and Shift+Return on a focused card, Tab through the
 workbench, review a diff, switch history tabs with R/N and Cmd+1–4, toggle the
 sidebar with Cmd+B, add a project with Cmd+O, change appearance, select
@@ -71,10 +71,10 @@ assignment text, and close/reopen the window.
 
 - Reconciled the behavior map against source entry points, desktop documentation,
   and workspace tests. Keep baseline parity separate from backend-only features.
-- Added `crates/waypoints-rune`, a Kit button/counter fixture, a scripted tap,
+- Added `crates/waypoints-app`, a Kit button/counter fixture, a scripted tap,
   and a runtime test. Added the workspace member and Cargo lockfile dependencies
   without changing default members, launch scripts, or GPUI vendor patches.
-- `cargo check -p waypoints-rune` passed and resolved the lockfile.
+- `cargo check -p waypoints-app` passed and resolved the lockfile.
 - All six check/test/build/fmt/Clippy/doc commands under “Verified Rune commands”
   passed. Runtime test result: 1 passed, 0 failed.
 - Both documented headless commands passed. Artifacts are under
@@ -89,7 +89,7 @@ assignment text, and close/reopen the window.
 - Scoped diff whitespace checks passed. No performance conclusion is drawn from
   debug-build headless timing logs.
 - Follow-up: Ricky reported “It works” after being asked to launch
-  `cargo run -p waypoints-rune --locked` from the interactive desktop. Record
+  `cargo run -p waypoints-app --locked` from the interactive desktop. Record
   native startup as user-confirmed, not an automated trace pass. Shutdown,
   focus, IME, accessibility, and close/reopen are not implied by that report.
 
@@ -113,20 +113,20 @@ assignment text, and close/reopen the window.
 - Initial default camera is pan `[22, 44]`, zoom `0.88` so all nine fixture cards
   are visible at 1280 × 820. `workbench`, `large-workbench`, and `zoomed` scenes
   are available to headless runs.
-- Changed paths: `crates/waypoints-rune/src/{main,fixture,canvas,workbench}.rs`
-  and `crates/waypoints-rune/fixtures/canvas-tour.json`.
-- `cargo test -p waypoints-rune --locked`: 9 passed, 0 failed. Tests cover
+- Changed paths: `crates/waypoints-app/src/{main,fixture,canvas,workbench}.rs`
+  and `crates/waypoints-app/fixtures/canvas-tour.json`.
+- `cargo test -p waypoints-app --locked`: 9 passed, 0 failed. Tests cover
   pointer-anchored zoom with no view commit (`commit_generation` unchanged),
   hit testing after camera movement, presentation-only drag plus edge endpoint
   movement, workbench screen-space geometry under zoom, text selection under
   zoom, keyboard Tab/Space controls, Escape close, narrow-window sizing, and
   the bounded 24-node stream.
-- `cargo clippy -p waypoints-rune --all-targets --all-features --locked -- -D
-  warnings`, `cargo fmt -p waypoints-rune -- --check`, and
-  `cargo doc -p waypoints-rune --no-deps --locked` pass. `cargo check -p
-  waypoints-app --locked` passes with the pre-existing gpui-fast deprecation/
-  unused-variable and core dead-code warnings. `cargo test -p waypoints-app
-  --locked` passes: 53 passed, 0 failed.
+- `cargo clippy -p waypoints-app --all-targets --all-features --locked -- -D
+  warnings`, `cargo fmt -p waypoints-app -- --check`, and
+  `cargo doc -p waypoints-app --no-deps --locked` pass. `cargo check -p
+  waypoints-app --locked` passed with the former GPUI crate's pre-existing
+  gpui-fast and core warnings. At this pre-cutover step the former GPUI crate
+  passed 53 tests; the Rune tests were counted separately below.
 - Headless artifacts under `target/port-info/rune/`:
   `canvas-light.png|json`, `canvas-dark.png|json`, `workbench-dark.png|json`,
   `large-workbench-light.png|json`, `narrow-workbench-light.png|json`, and
@@ -134,8 +134,8 @@ assignment text, and close/reopen the window.
   show the camera-scaled card rects, screen-space 760 × 328 workbench, seven
   streamed lines after the scripted tour, and the `dialog` role.
 - Scripted command:
-  `target/debug/waypoints-rune --script
-  crates/waypoints-rune/fixtures/canvas-tour.json --snap
+  `target/debug/waypoints-app --script
+  crates/waypoints-app/fixtures/canvas-tour.json --snap
   target/port-info/rune/canvas-tour-light.png --tree
   target/port-info/rune/canvas-tour-light.json --trace
   target/port-info/rune/canvas-tour-light.jsonl --theme light --scale 2 --size
@@ -146,9 +146,9 @@ assignment text, and close/reopen the window.
   instances, 366 layout nodes, 77 animating frames at p50 5.4 ms / p95 9.3 ms
   CPU per frame. These are debug-build headless numbers, not a comparison with
   GPUI.
-- Native trace rerun: `target/debug/waypoints-rune --native --trace
+- Native trace rerun: `target/debug/waypoints-app --native --trace
   target/port-info/rune/native-canvas-120.jsonl --frames 120 --theme dark --size
-  1280x820` printed 120 frames, 118 presented, 2 skipped, interval p50/p95
+  1280x820` printed 120 frames, 119 presented, 1 skipped, interval p50/p95
   16.67/16.67 ms, max 33.33 ms, lag p50/p95 16.67/16.67 ms, and exited normally.
   A 30-frame light run also completed. The earlier automated display-link
   failure therefore did not recur on this host. Interactive pointer feel,
@@ -177,12 +177,12 @@ assignment text, and close/reopen the window.
   retention. Backend output shows run lifecycle, separate snapshot outcome,
   bounded structured ACP event lines, cancellation, single-use permission
   choices, and continuation eligibility plus a follow-up composer.
-- Changed paths: `crates/waypoints-rune/src/{backend,project,state,startup,activity,main,fixture,canvas,workbench}.rs`,
-  `crates/waypoints-rune/Cargo.toml`, `Cargo.lock`, and
-  `crates/waypoints-rune/fixtures/backend-tour.json`. State, startup, and
+- Changed paths: `crates/waypoints-app/src/{backend,project,state,startup,activity,main,fixture,canvas,workbench}.rs`,
+  `crates/waypoints-app/Cargo.toml`, `Cargo.lock`, and
+  `crates/waypoints-app/fixtures/backend-tour.json`. State, startup, and
   activity helpers are split out so no non-test module exceeds the Rune-style
   800-line guidance.
-- `cargo test -p waypoints-rune --locked`: 12 passed, 0 failed. The two live
+- `cargo test -p waypoints-app --locked`: 12 passed, 0 failed. The two live
   backend tests start `waypoints_backend::serve` in-process against a temporary
   database/socket and use the deterministic `crates/waypoints-cli/tests/fixtures/acp_agent.py`
   adapter. They cover workflow selection, graph loading, a stale graph reply
@@ -191,9 +191,9 @@ assignment text, and close/reopen the window.
   snapshot, a second run cancelled while awaiting permission, and switching
   nodes while a live permission is pending. Separate tests cover unavailable/
   empty/retry UI states and all earlier fixture canvas behavior.
-- `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, `cargo fmt -p waypoints-rune -- --check`, and
-  `cargo doc -p waypoints-rune --no-deps --locked` pass. `--no-deps` is required
+- `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, `cargo fmt -p waypoints-app -- --check`, and
+  `cargo doc -p waypoints-app --no-deps --locked` pass. `--no-deps` is required
   because the path dependency `waypoints-core` carries a pre-existing
   `ensure_session_after_restore` dead-code warning that `-D warnings` would
   otherwise turn into an error. `cargo check -p waypoints-app --locked` still
@@ -209,7 +209,7 @@ assignment text, and close/reopen the window.
 - Manual headless backend commands used an isolated `XDG_STATE_HOME` plus the
   CLI to create a jj project, workflow, node change and workspace. The app was
   then run with `--project ... --workflow 2 --agent ...` and scripts under
-  `crates/waypoints-rune/fixtures/` (assignment tour) or temporary run scripts
+  `crates/waypoints-app/fixtures/` (assignment tour) or temporary run scripts
   for permission/continue/cancel. The in-process tests reproduce the important
   transitions without requiring a separately installed agent.
 - Limits: no real model or installed ACP agent was executed. Output is one
@@ -217,9 +217,9 @@ assignment text, and close/reopen the window.
   rows, replay/truncation presentation, tail-follow controls, diff review,
   history, settings, sidebar add/remove, and preference persistence remain
   milestone 4 work. Native backend trace:
-  `target/debug/waypoints-rune --project ... --workflow 1 --native --trace
+  `target/debug/waypoints-app --project ... --workflow 1 --native --trace
   target/port-info/rune/native-backend-final.jsonl --frames 120` completed with
-  120 frames, 118 presented, 2 skipped, p50/p95 16.67/16.67 ms. Interactive
+  120 frames, 119 presented, 1 skipped, p50/p95 16.67/16.67 ms. Interactive
   native input, IME, clipboard, accessibility, and close/reopen remain pending
   person checks.
 
@@ -241,10 +241,10 @@ assignment text, and close/reopen the window.
   plus `structured_output_renders_markdown_tools_replay_and_notices`, covering
   Markdown text, stable tool expansion, replay/gap notices, and the
   jump-to-latest affordance.
-- `cargo test -p waypoints-rune --locked`: 13 passed, 0 failed.
-  `cargo fmt -p waypoints-rune -- --check`,
-  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+- `cargo test -p waypoints-app --locked`: 13 passed, 0 failed.
+  `cargo fmt -p waypoints-app -- --check`,
+  `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-app --no-deps
   --locked` pass.
 - Headless artifacts: `target/port-info/rune/structured-output-light.png|json`,
   `structured-output-expanded-light.png|json`, and
@@ -290,10 +290,10 @@ assignment text, and close/reopen the window.
 - Changed paths: `src/{backend,state,diff_review,history_view,preferences,settings,project,workbench,canvas,main,startup}.rs`,
   `Cargo.toml` (including Rune's `native-file-dialog` feature), and
   `Cargo.lock`.
-- `cargo test -p waypoints-rune --locked`: 21 passed, 0 failed (at this step).
-  `cargo fmt -p waypoints-rune -- --check`,
-  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+- `cargo test -p waypoints-app --locked`: 21 passed, 0 failed (at this step).
+  `cargo fmt -p waypoints-app -- --check`,
+  `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-app --no-deps
   --locked` pass.
 - Headless artifacts inspected: `diff-review-light.png|json`,
   `history-runs-light.png|json`, `history-native-light.png|json`,
@@ -339,10 +339,10 @@ assignment text, and close/reopen the window.
   `keyboard_history_and_output_shortcuts_work` (R/N, Cmd+J),
   `keyboard_toggles_sidebar_and_opens_add_project_dialog` (Cmd+B, Cmd+O,
   folder dialog), and Settings shortcut-sheet/focus-return assertions.
-- `cargo test -p waypoints-rune --locked`: 24 passed, 0 failed (at this step).
-  `cargo fmt -p waypoints-rune -- --check`,
-  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+- `cargo test -p waypoints-app --locked`: 24 passed, 0 failed (at this step).
+  `cargo fmt -p waypoints-app -- --check`,
+  `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-app --no-deps
   --locked` pass.
 - Headless artifacts inspected: `graph-preview-light.png|json` (keyboard
   preview beside the focused card) and `settings-shortcuts-light.png|json`
@@ -375,10 +375,10 @@ assignment text, and close/reopen the window.
 - New tests: `pointer_hover_previews_a_card_and_clears_on_leave`,
   `window_geometry_is_throttled_persisted_and_flushed`, and
   `window_geometry_rejects_invalid_values`.
-- `cargo test -p waypoints-rune --locked`: 27 passed, 0 failed (at this step).
-  `cargo fmt -p waypoints-rune -- --check`,
-  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+- `cargo test -p waypoints-app --locked`: 27 passed, 0 failed (at this step).
+  `cargo fmt -p waypoints-app -- --check`,
+  `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-app --no-deps
   --locked` pass.
 - Headless artifacts: `hover-preview-light.png|json` (pointer script over
   node 4) and refreshed `graph-preview-light.png|json`,
@@ -417,11 +417,11 @@ assignment text, and close/reopen the window.
   preference persistence because `cargo test` is not a headless render process.
 - Added fixture scripts `fixtures/menu-settings.json`,
   `fixtures/menu-sidebar.json`, and `fixtures/menu-refresh.json`.
-- `cargo test -p waypoints-rune --locked`: 28 passed, 0 failed (at this step).
-  `cargo fmt -p waypoints-rune -- --check`,
-  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
-  --locked` pass. `cargo test -p waypoints-app --locked`: 53 passed.
+- `cargo test -p waypoints-app --locked`: 28 passed, 0 failed (at this step).
+  `cargo fmt -p waypoints-app -- --check`,
+  `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-app --no-deps
+  --locked` pass. The former GPUI crate also passed 53 tests at this step.
 - Headless menu checks:
   `menu-settings-light.json` contains `settings-panel`;
   `menu-sidebar-light.json` has no `project-panel` and contains
@@ -450,10 +450,10 @@ assignment text, and close/reopen the window.
 - Added `assignment_edit_and_preview_render_draft_and_notice`, which checks the
   editor, mode switch, external-saved notice, save/discard buttons, and a
   preview viewport taller than 200 points.
-- `cargo test -p waypoints-rune --locked`: 29 passed, 0 failed (at this step).
-  `cargo fmt -p waypoints-rune -- --check`,
-  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+- `cargo test -p waypoints-app --locked`: 29 passed, 0 failed (at this step).
+  `cargo fmt -p waypoints-app -- --check`,
+  `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-app --no-deps
   --locked` pass.
 - Artifacts inspected: `assignment-light.png|json` (editor, unsaved state,
   external-saved notice, save/discard) and `assignment-preview-light.png|json`
@@ -483,10 +483,10 @@ assignment text, and close/reopen the window.
   `assignment_edit_and_preview_render_draft_and_notice` (compact clipping,
   expanded fill, footer clearance), and the diff-review test now checks the
   fixed width and drag resize.
-- `cargo test -p waypoints-rune --locked`: 30 passed, 0 failed.
-  `cargo fmt -p waypoints-rune -- --check`,
-  `cargo clippy -p waypoints-rune --all-targets --all-features --locked
-  --no-deps -- -D warnings`, and `cargo doc -p waypoints-rune --no-deps
+- `cargo test -p waypoints-app --locked`: 30 passed, 0 failed.
+  `cargo fmt -p waypoints-app -- --check`,
+  `cargo clippy -p waypoints-app --all-targets --all-features --locked
+  --no-deps -- -D warnings`, and `cargo doc -p waypoints-app --no-deps
   --locked` pass.
 - Artifacts inspected: `assignment-light.png|json` (compact editor clipped,
   controls above footer), `assignment-preview-light.png|json`,
@@ -497,8 +497,32 @@ assignment text, and close/reopen the window.
   p50/p95 16.67/16.67 ms). Recorded as host/display-link variability, not a
   clean-performance claim.
 - User visually confirmed the native traffic-light clearance and HUD placement
-  on macOS (informal confirmation, not the full native QA pass). The diff grip
+  on macOS; the later cutover step confirms the full native pass. The diff grip
   is pointer-only; no keyboard resize.
+
+### Full cutover
+
+- The user approved full cutover and confirmed the native macOS menu, diff
+  divider, Tab/IME/VoiceOver, close/reopen, and multi-display checks.
+- Removed the former GPUI crate, `vendor/*`, and the vendor refresh scripts.
+- Moved Rune to `crates/waypoints-app`, renamed the package and binary to
+  `waypoints-app`, set it as `default-members`, and removed the GPUI patch
+  section from the workspace manifest.
+- Updated `dev` to launch `cargo run -p waypoints-app`, replaced the GPUI-only
+  Renovate trial with ordinary Cargo updates, and removed GPUI-specific docs.
+- `Cargo.lock` was regenerated; `cargo tree -p waypoints-app` contains no GPUI
+  package. `cargo check --workspace --locked` passes.
+- `cargo test -p waypoints-app --locked`: 30 passed, 0 failed.
+  `cargo test --workspace --locked` also passes all app, CLI, backend, and core
+  suites. `cargo fmt -p waypoints-app -- --check`, strict app Clippy, and app doc
+  checks pass. Two pre-existing CLI test expectations were updated from stale
+  lowercase/old error text to the current backend messages; no backend behavior
+  changed. `./dev -- --list-scenes` launches the canonical app.
+- Native trace after the rename: 119/120 presented, 1 skipped, p50/p95
+  16.67/16.67 ms, clean exit; no native-menu errors.
+- Remaining limitations: Linux/Windows were not run and have no native menu bar
+  with the pinned Rune API; display hot-plug/mixed-scale and real ACP execution
+  remain unverified. No commit or push was performed.
 
 Append concise entries as work proceeds. Keep current status and next task above
 up to date; do not make the next agent reconstruct them from the full log.

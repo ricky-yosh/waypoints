@@ -6,18 +6,20 @@ Workflow logic, storage, and jj integration live in a core library with no UI de
 
 The CLI is the interface for human scripting and agents with terminal access; no MCP adapter is planned. Keep workflow metadata durable, but leave conversations and transcripts in existing harnesses. Current clients poll bounded run events and refresh saved state after reconnect; subscriptions and durable event replay are not implemented or required. See the [architecture decision](02-architecture.md#architecture-decision-local-backend-gui-and-cli) for ownership and the [current status map](20-core-backend-status.md) for implemented boundaries.
 
-## GPUI
+## Rune
 
-The app manifest selects `gpui-kit`, pinned to 0.9.0 with GPUI Fast, inspector,
-and syntect support.
-It reexports GPUI and provides the component layer; do not add separate GPUI or
-`gpui-component` dependencies by copying older research examples. The desktop
-app is backend-connected and provides a project/workflow sidebar, dependency
-graph, and floating node workbench for assignments, output, changes, and history.
-Workflow, native-change, and workspace provisioning and code restoration remain
-CLI operations. See [Working in the desktop app](05-ui-and-diffs.md) for controls
-and limits, and [vendor notes](../vendor/README.md) for local framework patches.
-Use the installed GPUI Kit coding/design guides and verify APIs against the pin.
+The canonical desktop app lives in `crates/waypoints-app` and uses the pinned
+Rune/Rune Kit revision from its `Cargo.toml`. The app is canvas-first: a Rune
+`Live` camera owns pan/zoom, cards and edges are drawn in a world layer, and the
+workbench, project panel, previews, and HUD are screen-space overlays. Menus use
+Rune's native macOS menu API; Linux/Windows use in-app controls. Rune preferences
+are separate from the former GPUI workspace file. The app uses only
+`waypoints_backend::Client` for project/workflow/run/review/history state.
+
+See [Working in the desktop app](05-ui-and-diffs.md) for controls and limits,
+and [Rune migration notes](port-info/README.md) for verification evidence. The
+former GPUI frontend, its vendored patches, and its update scripts have been
+removed.
 
 ## Storage: Turso
 
@@ -29,8 +31,8 @@ Use the installed GPUI Kit coding/design guides and verify APIs against the pin.
 ## Prototype language
 
 - React + TypeScript + Tailwind with React Flow was considered for an optional UI prototype. It is not an adopted runtime dependency or a prerequisite for the native GUI.
-- Do not translate code. Translate decisions: the data model, the state machine, layouts and interactions you like, and the shape of agent events. Have the agent write these down as a short spec for the GPUI build.
-- Make the prototype honest: mock data, a fake agent that emits events shaped like ACP `session/update`, and only interactions feasible in GPUI.
+- Do not translate code. Translate decisions: the data model, the state machine, layouts and interactions you like, and the shape of agent events. Have the agent write these down as a short spec for the Rune build.
+- Make the prototype honest: mock data, a fake agent that emits events shaped like ACP `session/update`, and only interactions feasible in Rune.
 
 ## Backend: prototype or just build?
 

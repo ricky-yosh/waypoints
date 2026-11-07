@@ -4,15 +4,6 @@ members = [
     "crates/waypoints-backend",
     "crates/waypoints-cli",
     "crates/waypoints-core",
-    "crates/waypoints-rune",
 ]
 default-members = ["crates/waypoints-app"]
-exclude = ["vendor/*"]
 resolver = "3"
-
-[patch.crates-io]
-gpui-kit = { path = "vendor/gpui-kit" }
-gpui-fast = { path = "vendor/gpui-fast" }
-gpui-fast-macos = { path = "vendor/gpui-fast-macos" }
-gpui-fast-linux = { path = "vendor/gpui-fast-linux" }
-gpui-fast-windows = { path = "vendor/gpui-fast-windows" }

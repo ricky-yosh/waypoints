@@ -1,25 +1,14 @@
-//! App-local workspace preferences, independent of project and backend storage.
-//!
-//! The file is `waypoints/workspace.json` under the platform configuration
-//! directory: `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, the user's
-//! Application Support directory on macOS, and Roaming AppData on Windows.
-//! Set `WAYPOINTS_WORKSPACE_FILE` to an absolute path for an isolated workspace.
-//! Loading and saving perform synchronous filesystem I/O; call them off the UI thread.
+//! Rune-only UI preferences, stored separately from the former GPUI workspace file.
 
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 const VERSION: u64 = 1;
-const DEFAULT_SIDEBAR_WIDTH: f32 = 240.0;
-pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 160.0;
-pub(crate) const MAX_SIDEBAR_WIDTH: f32 = 1000.0;
-const MIN_WINDOW_SIZE: f32 = 100.0;
-const MAX_WINDOW_SIZE: f32 = 16384.0;
+const MAX_WINDOW_SIZE: f32 = 16_384.0;
 const MAX_WINDOW_POSITION: f32 = 100_000.0;
+pub(crate) const INTERFACE_ZOOM_LEVELS: [f32; 4] = [0.85, 1.0, 1.15, 1.3];
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,73 +19,140 @@ pub(crate) enum Appearance {
     Dark,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct WorkspacePreferences {
-    #[serde(default)]
-    pub(crate) workbench_fraction: Option<f32>,
-    #[serde(default)]
-    pub(crate) appearance: Appearance,
-    pub(crate) projects: Vec<ProjectPreferences>,
-    pub(crate) selected: Option<SelectedWorkflow>,
-    pub(crate) sidebar_width: f32,
-    pub(crate) sidebar_visible: bool,
-    pub(crate) window_bounds: Option<WindowGeometry>,
-}
+impl Appearance {
+    pub fn resolve(self, system_dark: bool) -> bool {
+        match self {
+            Self::System => system_dark,
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ProjectPreferences {
-    #[serde(with = "path_encoding")]
-    pub(crate) path: PathBuf,
-    pub(crate) expanded: bool,
-}
+    pub fn index(self) -> usize {
+        match self {
+            Self::System => 0,
+            Self::Light => 1,
+            Self::Dark => 2,
+        }
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SelectedWorkflow {
-    #[serde(with = "path_encoding")]
-    pub(crate) project: PathBuf,
-    pub(crate) workflow_id: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub(crate) struct WindowGeometry {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) width: f32,
-    pub(crate) height: f32,
-}
-
-impl Default for WorkspacePreferences {
-    fn default() -> Self {
-        Self {
-            appearance: Appearance::System,
-            projects: Vec::new(),
-            selected: None,
-            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
-            sidebar_visible: true,
-            workbench_fraction: None,
-            window_bounds: None,
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            1 => Self::Light,
+            2 => Self::Dark,
+            _ => Self::System,
         }
     }
 }
 
-impl WorkspacePreferences {
-    fn sanitize(&mut self) {
-        if !self.sidebar_width.is_finite()
-            || !(MIN_SIDEBAR_WIDTH..=MAX_SIDEBAR_WIDTH).contains(&self.sidebar_width)
-        {
-            self.sidebar_width = DEFAULT_SIDEBAR_WIDTH;
-        }
-        if self.window_bounds.is_some_and(|bounds| {
-            !bounds.x.is_finite()
-                || !bounds.y.is_finite()
-                || bounds.x.abs() > MAX_WINDOW_POSITION
-                || bounds.y.abs() > MAX_WINDOW_POSITION
-                || !bounds.width.is_finite()
-                || !bounds.height.is_finite()
-                || !(MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&bounds.width)
-                || !(MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&bounds.height)
-        }) {
-            self.window_bounds = None;
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WindowGeometry {
+    /// Content top-left in points from the primary display's top-left.
+    pub x: f32,
+    pub y: f32,
+    /// Content size in points.
+    pub width: f32,
+    pub height: f32,
+    /// Display scale used to turn `x`/`y` back into desktop pixels at launch.
+    pub scale: f32,
+}
+
+impl WindowGeometry {
+    pub fn valid(self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.scale.is_finite()
+            && self.x.abs() <= MAX_WINDOW_POSITION
+            && self.y.abs() <= MAX_WINDOW_POSITION
+            && self.width >= crate::WINDOW_MIN_SIZE.0
+            && self.height >= crate::WINDOW_MIN_SIZE.1
+            && self.width <= MAX_WINDOW_SIZE
+            && self.height <= MAX_WINDOW_SIZE
+            && (0.5..=4.0).contains(&self.scale)
+    }
+}
+
+/// Clamp saved content geometry to the first connected display it touches.
+///
+/// `display_bounds` are `[x, y, width, height]` in the same point space as the
+/// saved geometry. Returns `None` when no display intersects it, so launch
+/// falls back to the platform's centered default instead of restoring an
+/// unreachable window.
+pub(crate) fn clamp_window_geometry(
+    geometry: WindowGeometry,
+    display_bounds: &[[f32; 4]],
+) -> Option<WindowGeometry> {
+    if !geometry.valid() {
+        return None;
+    }
+    let desired = [
+        geometry.x,
+        geometry.y,
+        geometry.width.max(crate::WINDOW_MIN_SIZE.0),
+        geometry.height.max(crate::WINDOW_MIN_SIZE.1),
+    ];
+    let display = display_bounds.iter().find(|bounds| {
+        desired[0] < bounds[0] + bounds[2]
+            && desired[0] + desired[2] > bounds[0]
+            && desired[1] < bounds[1] + bounds[3]
+            && desired[1] + desired[3] > bounds[1]
+    })?;
+    let width = desired[2]
+        .max(crate::WINDOW_MIN_SIZE.0)
+        .min(display[2].max(crate::WINDOW_MIN_SIZE.0));
+    let height = desired[3]
+        .max(crate::WINDOW_MIN_SIZE.1)
+        .min(display[3].max(crate::WINDOW_MIN_SIZE.1));
+    let left = display[0];
+    let top = display[1];
+    Some(WindowGeometry {
+        x: desired[0].clamp(left, (left + display[2] - width).max(left)),
+        y: desired[1].clamp(top, (top + display[3] - height).max(top)),
+        width,
+        height,
+        scale: geometry.scale,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RunePreferences {
+    pub appearance: Appearance,
+    pub reduced_motion: bool,
+    #[serde(default = "default_interface_zoom")]
+    pub interface_zoom: f32,
+    #[serde(default)]
+    pub projects: Vec<PathBuf>,
+    #[serde(default)]
+    pub selected_project: Option<PathBuf>,
+    #[serde(default)]
+    pub selected_workflow: Option<i64>,
+    #[serde(default = "default_sidebar_open")]
+    pub sidebar_open: bool,
+    #[serde(default)]
+    pub window_geometry: Option<WindowGeometry>,
+}
+
+fn default_sidebar_open() -> bool {
+    true
+}
+
+fn default_interface_zoom() -> f32 {
+    1.0
+}
+
+impl Default for RunePreferences {
+    fn default() -> Self {
+        Self {
+            appearance: Appearance::System,
+            reduced_motion: false,
+            interface_zoom: 1.0,
+            projects: Vec::new(),
+            selected_project: None,
+            selected_workflow: None,
+            sidebar_open: true,
+            window_geometry: None,
         }
     }
 }
@@ -105,209 +161,130 @@ impl WorkspacePreferences {
 struct PreferencesFile {
     version: u64,
     #[serde(flatten)]
-    workspace: WorkspacePreferences,
+    preferences: RunePreferences,
 }
 
-// UTF-8 paths remain readable; non-UTF-8 paths use lossless platform-specific units.
-mod path_encoding {
-    use std::path::{Path, PathBuf};
+pub(crate) struct Loaded {
+    pub preferences: RunePreferences,
+    pub error: Option<String>,
+    pub writable: bool,
+    pub path: Option<PathBuf>,
+}
 
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+pub(crate) fn load() -> Loaded {
+    let path = match preferences_path() {
+        Ok(path) => path,
+        Err(error) => {
+            return Loaded {
+                preferences: RunePreferences::default(),
+                error: Some(error),
+                writable: false,
+                path: None,
+            };
+        }
+    };
+    load_path(&path)
+}
 
-    #[derive(Serialize, Deserialize)]
-    #[serde(untagged)]
-    enum EncodedPath {
-        Text(String),
-        Unix { unix_bytes: Vec<u8> },
-        Windows { windows_wide: Vec<u16> },
+fn load_path(path: &Path) -> Loaded {
+    if !path.exists() {
+        return Loaded {
+            preferences: RunePreferences::default(),
+            error: None,
+            writable: true,
+            path: Some(path.to_owned()),
+        };
     }
-
-    pub(super) fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
-        if let Some(text) = path.to_str() {
-            return EncodedPath::Text(text.to_owned()).serialize(serializer);
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            return Loaded {
+                preferences: RunePreferences::default(),
+                error: Some(format!("Couldn’t read {}: {error}", path.display())),
+                writable: false,
+                path: Some(path.to_owned()),
+            };
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            EncodedPath::Unix {
-                unix_bytes: path.as_os_str().as_bytes().to_vec(),
-            }
-            .serialize(serializer)
+    };
+    let file: PreferencesFile = match serde_json::from_str(&text) {
+        Ok(file) => file,
+        Err(error) => {
+            return Loaded {
+                preferences: RunePreferences::default(),
+                error: Some(format!(
+                    "Couldn’t parse {}; the existing file was left untouched: {error}",
+                    path.display()
+                )),
+                writable: false,
+                path: Some(path.to_owned()),
+            };
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            EncodedPath::Windows {
-                windows_wide: path.as_os_str().encode_wide().collect(),
-            }
-            .serialize(serializer)
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            Err(serde::ser::Error::custom(
-                "non-UTF-8 paths are unsupported on this platform",
-            ))
-        }
+    };
+    if file.version > VERSION {
+        return Loaded {
+            preferences: RunePreferences::default(),
+            error: Some(format!(
+                "{} uses a newer preferences version {}; this build reads version {VERSION} and left it untouched.",
+                path.display(),
+                file.version
+            )),
+            writable: false,
+            path: Some(path.to_owned()),
+        };
     }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<PathBuf, D::Error> {
-        match EncodedPath::deserialize(deserializer)? {
-            EncodedPath::Text(text) => Ok(text.into()),
-            EncodedPath::Unix { unix_bytes } => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_vec(unix_bytes).into())
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = unix_bytes;
-                    Err(serde::de::Error::custom(
-                        "Unix path cannot be decoded on this platform",
-                    ))
-                }
-            }
-            EncodedPath::Windows { windows_wide } => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_wide(&windows_wide).into())
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = windows_wide;
-                    Err(serde::de::Error::custom(
-                        "The Windows path cannot be decoded on this platform.",
-                    ))
-                }
-            }
-        }
+    let mut preferences = file.preferences;
+    if !preferences.interface_zoom.is_finite()
+        || !(INTERFACE_ZOOM_LEVELS[0]..=INTERFACE_ZOOM_LEVELS[INTERFACE_ZOOM_LEVELS.len() - 1])
+            .contains(&preferences.interface_zoom)
+    {
+        preferences.interface_zoom = 1.0;
+    }
+    if preferences
+        .window_geometry
+        .is_some_and(|geometry| !geometry.valid())
+    {
+        preferences.window_geometry = None;
+    }
+    Loaded {
+        preferences,
+        error: None,
+        writable: true,
+        path: Some(path.to_owned()),
     }
 }
 
-#[derive(Deserialize)]
-struct VersionHeader {
-    version: u64,
+pub(crate) fn save(preferences: &RunePreferences, path: &Path) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Couldn’t create {}: {error}", parent.display()))?;
+    let file = PreferencesFile {
+        version: VERSION,
+        preferences: preferences.clone(),
+    };
+    let text = serde_json::to_string_pretty(&file)
+        .map_err(|error| format!("Couldn’t encode Rune preferences: {error}"))?;
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, text)
+        .map_err(|error| format!("Couldn’t write {}: {error}", temp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&temp, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&temp, path).map_err(|error| format!("Couldn’t replace {}: {error}", path.display()))
 }
 
-fn preferences_path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("WAYPOINTS_WORKSPACE_FILE") {
+fn preferences_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("WAYPOINTS_RUNE_PREFERENCES_FILE") {
         let path = PathBuf::from(path);
         if !path.is_absolute() {
-            bail!("The WAYPOINTS_WORKSPACE_FILE path must be absolute.");
+            return Err("WAYPOINTS_RUNE_PREFERENCES_FILE must be an absolute path".into());
         }
         return Ok(path);
     }
-
-    let base = dirs::config_dir().context("Couldn’t determine the configuration directory.")?;
-    Ok(base.join("waypoints").join("workspace.json"))
-}
-
-/// Loads preferences, returning defaults only when the file is absent.
-pub(crate) fn load_preferences() -> Result<WorkspacePreferences> {
-    load_from(&preferences_path()?)
-}
-
-/// Atomically replaces preferences, refusing to overwrite unreadable or unsupported files.
-pub(crate) fn save_preferences(preferences: &WorkspacePreferences) -> Result<()> {
-    save_to(&preferences_path()?, preferences)
-}
-
-fn load_from(path: &Path) -> Result<WorkspacePreferences> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(WorkspacePreferences::default());
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("Couldn’t read {}", path.display()));
-        }
-    };
-    // Inspect the version before decoding the rest so future formats get a useful error.
-    let header: VersionHeader = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "The preferences file at {} is malformed; repair or move it",
-            path.display()
-        )
-    })?;
-    let version = header.version;
-    if version != VERSION {
-        bail!(
-            "The preferences file at {} has unsupported version {version}. Use a compatible Waypoints version or move the file.",
-            path.display()
-        );
-    }
-    let mut file: PreferencesFile = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "The preferences file at {} is malformed; repair or move it",
-            path.display()
-        )
-    })?;
-    file.workspace.sanitize();
-    Ok(file.workspace)
-}
-
-fn save_to(path: &Path, preferences: &WorkspacePreferences) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("The preferences path has no parent directory.")?;
-    fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "Couldn’t create the preferences directory {}",
-            parent.display()
-        )
-    })?;
-    // Lock a separate, permanent inode: replacing the preferences file must not
-    // let another cooperating process acquire a lock on a different inode.
-    let lock_path = path.with_extension("lock");
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| {
-            format!(
-                "Couldn’t open the preferences lock at {}",
-                lock_path.display()
-            )
-        })?;
-    lock.lock().with_context(|| {
-        format!(
-            "Couldn’t lock the preferences file at {}",
-            lock_path.display()
-        )
-    })?;
-    // A fallback to defaults after a load failure must not destroy the original file.
-    load_from(path)?;
-    let mut workspace = preferences.clone();
-    workspace.sanitize();
-    let bytes = serde_json::to_vec_pretty(&PreferencesFile {
-        version: VERSION,
-        workspace,
-    })
-    .context("Couldn’t serialize workspace settings")?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
-        format!(
-            "Couldn’t create a temporary settings file in {}",
-            parent.display()
-        )
-    })?;
-    temporary
-        .write_all(&bytes)
-        .context("Couldn’t write the temporary settings file")?;
-    temporary
-        .write_all(b"\n")
-        .context("Couldn’t write the temporary settings file")?;
-    temporary
-        .as_file()
-        .sync_all()
-        .context("Couldn’t sync the temporary settings file")?;
-    temporary
-        .persist(path)
-        .with_context(|| format!("Couldn’t replace the settings file at {}", path.display()))?;
-    Ok(())
+    let directory = waypoints_backend::default_state_directory()
+        .map_err(|error| format!("Couldn’t resolve the Rune preferences directory: {error}"))?;
+    Ok(directory.join("rune-workspace.json"))
 }
 
 #[cfg(test)]
@@ -315,152 +292,130 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absent_file_returns_defaults() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        assert_eq!(
-            load_from(&dir.path().join("missing.json"))?,
-            WorkspacePreferences::default()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn round_trip_preserves_order_and_missing_paths() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("nested/workspace.json");
-        let preferences = WorkspacePreferences {
-            projects: vec![
-                ProjectPreferences {
-                    path: "missing-b".into(),
-                    expanded: true,
-                },
-                ProjectPreferences {
-                    path: "missing-a".into(),
-                    expanded: false,
-                },
-            ],
-            selected: Some(SelectedWorkflow {
-                project: "missing-a".into(),
-                workflow_id: 42,
-            }),
-            appearance: Appearance::Dark,
-            sidebar_width: 350.0,
-            sidebar_visible: false,
-            workbench_fraction: Some(0.8),
-            window_bounds: Some(WindowGeometry {
-                x: -400.0,
-                y: 100.0,
-                width: 1200.0,
-                height: 800.0,
-            }),
-        };
-        save_to(&path, &preferences)?;
-        assert_eq!(load_from(&path)?, preferences);
-        save_to(&path, &preferences)?;
-        assert_eq!(load_from(&path)?, preferences);
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_and_future_files_are_not_overwritten() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("workspace.json");
-        for contents in [
-            r#"{"version":1,"projects":"bad"}"#,
-            r#"{"version":999,"new_format":true}"#,
-            r#"{"version":1,"version":999,"projects":[],"selected":null,"sidebar_width":240,"sidebar_visible":true,"window_bounds":null}"#,
-            r#"{"version":1,"projects":[],"projects":[],"selected":null,"sidebar_width":240,"sidebar_visible":true,"window_bounds":null}"#,
-            "not json",
-        ] {
-            fs::write(&path, contents)?;
-            assert!(load_from(&path).is_err(), "accepted {contents}");
-            assert!(
-                save_to(&path, &WorkspacePreferences::default()).is_err(),
-                "overwrote {contents}"
-            );
-            assert_eq!(fs::read_to_string(&path)?, contents);
+    fn appearance_resolves_and_round_trips() {
+        assert!(!Appearance::Light.resolve(true));
+        assert!(Appearance::Dark.resolve(false));
+        assert!(Appearance::System.resolve(true));
+        for appearance in [Appearance::System, Appearance::Light, Appearance::Dark] {
+            assert_eq!(Appearance::from_index(appearance.index()), appearance);
         }
-        Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
-    fn non_utf8_paths_round_trip() -> Result<()> {
-        use std::os::unix::ffi::OsStringExt;
-
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("workspace.json");
-        let project = PathBuf::from(std::ffi::OsString::from_vec(b"missing-\xff".to_vec()));
-        let preferences = WorkspacePreferences {
-            projects: vec![ProjectPreferences {
-                path: project.clone(),
-                expanded: true,
-            }],
-            selected: Some(SelectedWorkflow {
-                project,
-                workflow_id: 7,
-            }),
-            ..WorkspacePreferences::default()
+    fn window_geometry_clamps_to_a_connected_display() {
+        let display = [0.0, 0.0, 1440.0, 900.0];
+        let partially_visible = WindowGeometry {
+            x: 1400.0,
+            y: -700.0,
+            width: 1100.0,
+            height: 800.0,
+            scale: 2.0,
         };
-        save_to(&path, &preferences)?;
-        assert_eq!(load_from(&path)?, preferences);
-        Ok(())
-    }
-
-    #[test]
-    fn save_waits_for_stable_lock_then_checks_file() -> Result<()> {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("workspace.json");
-        let lock = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("lock"))?;
-        lock.lock()?;
-        let (started_tx, started_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let thread_path = path.clone();
-        let thread = std::thread::spawn(move || {
-            started_tx.send(()).expect("test receiver exists");
-            done_tx
-                .send(save_to(&thread_path, &WorkspacePreferences::default()))
-                .expect("test receiver exists");
-        });
-        started_rx.recv()?;
-        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
-        let future = r#"{"version":999}"#;
-        fs::write(&path, future)?;
-        drop(lock);
-        assert!(done_rx.recv_timeout(Duration::from_secs(5))?.is_err());
-        thread.join().expect("save thread completes");
-        assert_eq!(fs::read_to_string(path)?, future);
-        Ok(())
-    }
-
-    #[test]
-    fn invalid_geometry_is_sanitized_on_save_and_load() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("workspace.json");
-        let preferences = WorkspacePreferences {
-            sidebar_width: f32::NAN,
-            window_bounds: Some(WindowGeometry {
+        let clamped = clamp_window_geometry(partially_visible, &[display]).expect("visible");
+        assert_eq!(
+            (clamped.x, clamped.y, clamped.width, clamped.height),
+            (340.0, 0.0, 1100.0, 800.0)
+        );
+        assert_eq!(
+            clamp_window_geometry(
+                WindowGeometry {
+                    x: 3000.0,
+                    ..partially_visible
+                },
+                &[display]
+            ),
+            None,
+            "a disconnected display does not restore offscreen"
+        );
+        let fitted = clamp_window_geometry(
+            WindowGeometry {
                 x: 0.0,
                 y: 0.0,
-                width: -1.0,
-                height: 800.0,
-            }),
-            ..WorkspacePreferences::default()
+                width: 2000.0,
+                height: 1400.0,
+                scale: 2.0,
+            },
+            &[[0.0, 0.0, 1000.0, 700.0]],
+        )
+        .expect("fits the smaller display");
+        assert_eq!((fitted.width, fitted.height), (1000.0, 700.0));
+    }
+
+    #[test]
+    fn window_geometry_rejects_invalid_values() {
+        let geometry = WindowGeometry {
+            x: 40.0,
+            y: 60.0,
+            width: 1100.0,
+            height: 760.0,
+            scale: 2.0,
         };
-        save_to(&path, &preferences)?;
-        assert_eq!(load_from(&path)?, WorkspacePreferences::default());
+        assert!(geometry.valid());
+        assert!(
+            !WindowGeometry {
+                width: 10.0,
+                ..geometry
+            }
+            .valid()
+        );
+        assert!(
+            !WindowGeometry {
+                scale: 0.0,
+                ..geometry
+            }
+            .valid()
+        );
+        assert!(
+            !WindowGeometry {
+                x: f32::NAN,
+                ..geometry
+            }
+            .valid()
+        );
+    }
+
+    #[test]
+    fn invalid_or_newer_files_are_not_writable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("prefs.json");
+        fs::write(&path, "{broken").expect("write invalid");
+        let loaded = load_path(&path);
+        assert!(loaded.error.is_some());
+        assert!(!loaded.writable);
         fs::write(
             &path,
-            r#"{"version":1,"projects":[],"selected":null,"sidebar_width":100000,"sidebar_visible":true,"window_bounds":{"x":100001,"y":0,"width":800,"height":600}}"#,
-        )?;
-        assert_eq!(load_from(&path)?, WorkspacePreferences::default());
-        Ok(())
+            r#"{"version": 99, "appearance": "dark", "reduced_motion": false}"#,
+        )
+        .expect("write newer");
+        let loaded = load_path(&path);
+        assert!(loaded.error.is_some());
+        assert!(!loaded.writable);
+    }
+
+    #[test]
+    fn preferences_save_and_load_round_trip() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("nested/prefs.json");
+        let preferences = RunePreferences {
+            appearance: Appearance::Dark,
+            reduced_motion: true,
+            interface_zoom: 1.15,
+            projects: vec![PathBuf::from("/tmp/project")],
+            selected_project: Some(PathBuf::from("/tmp/project")),
+            selected_workflow: Some(7),
+            sidebar_open: false,
+            window_geometry: Some(WindowGeometry {
+                x: 40.0,
+                y: 60.0,
+                width: 1100.0,
+                height: 760.0,
+                scale: 2.0,
+            }),
+        };
+        save(&preferences, &path).expect("save preferences");
+        let loaded = load_path(&path);
+        assert!(loaded.error.is_none());
+        assert!(loaded.writable);
+        assert_eq!(loaded.preferences, preferences);
     }
 }

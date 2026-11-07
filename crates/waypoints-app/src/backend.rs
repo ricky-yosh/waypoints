@@ -182,7 +182,7 @@ impl Backend {
         let (commands, command_rx) = mpsc::channel();
         let (update_tx, updates) = mpsc::channel();
         thread::Builder::new()
-            .name("waypoints-rune-backend".into())
+            .name("waypoints-app-backend".into())
             .spawn(move || worker(config, command_rx, update_tx, waker))
             .expect("spawning the Rune backend worker");
         Self { commands, updates }

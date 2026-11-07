@@ -3,20 +3,29 @@
 Small, known tradeoffs that are deliberate for now. This is not a roadmap or a
 priority order.
 
-## Icon assets
+## Rune platform boundaries
 
-The app currently embeds the complete Lucide catalog through
-`gpui_kit::assets::AllAssets` (about 1,830 SVGs, roughly 7 MB of source assets)
-because the icon set is still settling and the full catalog keeps iteration
-simple. Once the final icon vocabulary is known, replace it with a selected
-`icon_assets!` bundle composed with the default component assets. Update the
-headless screenshot harness to use the same asset source at that point.
+Rune's native menu API is macOS-only at the pinned revision. Linux and Windows
+keep the in-app controls but have no native menu bar. Native Tab traversal, IME,
+VoiceOver/accessibility, close/reopen, multi-window, and multi-display geometry
+still need person checks on supported hosts. The app does not claim those as
+passed from headless tests.
 
-- Code: `crates/waypoints-app/src/lib.rs`, `crates/waypoints-app/src/screenshots.rs`
-- Related UI notes: [Working in the desktop app](05-ui-and-diffs.md)
+## Display geometry
 
-## Headless screenshots
+Saved window geometry is numerically validated and clamped to a connected
+display, but display hot-plug and mixed-scale multi-display arrangements still
+need manual verification. The diff-pane divider is pointer-only; no keyboard
+resize is implemented.
 
-The screenshot harness renders the real workspace views with deterministic
-fixture data through GPUI Fast's headless renderer. It does not replace native
-screen capture or real end-to-end agent validation.
+## History refresh
+
+A full History refresh replaces the loaded view with loading/error, unlike a
+failed older-page request, which retains loaded rows. This matches the recorded
+behavior and is deliberate.
+
+## Rune preferences
+
+Rune stores its own preferences at `waypoints/rune-workspace.json` under the
+platform state directory. The former GPUI workspace file is neither read nor
+written. Headless render/script runs never write preferences; native runs do.

@@ -9,12 +9,12 @@ Design sketches below are explicitly separated from implemented behavior.
 
 1. **Headless core library:** workflow operations, phase prompts and associations, storage, and jj integration. It has no GUI dependency and can be tested without opening a window.
 2. **Local application backend:** a running process hosting the core and exposing a shared JSON-RPC API.
-3. **Clients:** the GPUI desktop app and a CLI both use that API. Neither implements a separate workflow engine.
+3. **Clients:** the Rune desktop app and a CLI both use that API. Neither implements a separate workflow engine.
 4. **Outside Waypoints:** existing agent harnesses and the user's native jj repository. ACP integration launches a trusted user-installed executable; Waypoints does not implement the agent loop.
 
 ## Architecture decision: local backend, GUI, and CLI
 
-**Decision:** Waypoints is a local desktop tool with a UI-independent core, a shared local backend, and GUI and CLI clients. The CLI is the agent-facing surface for existing harnesses with terminal access. **MCP is out of scope; do not add an MCP adapter or require `gpui-mcp`.**
+**Decision:** Waypoints is a local desktop tool with a UI-independent core, a shared local backend, and GUI and CLI clients. The CLI is the agent-facing surface for existing harnesses with terminal access. **MCP is out of scope; do not add an MCP adapter or make GUI automation a prerequisite.**
 
 This decision supersedes earlier CLI-as-UI-implementation wording and MCP recommendations in the tooling research. Borrowing the client/backend pattern from Codex does not mean building a conversation manager.
 
@@ -31,7 +31,7 @@ CLI -----------+
 - **Persistence:** save workflow prompts, links, and native-change associations so they survive restarts. Conversations and transcripts remain in the existing harness; do not store them in Waypoints.
 - **Updates:** current clients poll run status/events and fetch current saved state after reconnect. No subscriptions, durable notification log, or notification replay are required. Native refresh reports current/missing/divergent revisions and conflicts, not a full ancestry assessment. General reconciliation is not implemented; inferred context-staleness tracking is outside v1 scope under the decision below.
 - **Human-paced execution:** a workflow connection does not automatically run the next phase.
-- **UI debugging is separate:** the native GPUI inspector helps develop the GUI. Agents do not need to click the GUI to perform workflow operations. Screenshots, when useful for visual verification, need not be stored persistently.
+- **UI debugging is separate:** Rune headless scenes and element trees help develop the GUI. Agents do not need to click the GUI to perform workflow operations. Screenshots, when useful for visual verification, need not be stored persistently.
 
 **Implemented background-run checkpoint:** ACP tasks own their subprocesses outside
 short request handlers. Start returns a run ID; clients poll bounded transient

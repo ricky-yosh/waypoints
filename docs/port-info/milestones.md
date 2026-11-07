@@ -13,16 +13,16 @@ Work in order. A checkbox means its acceptance evidence is recorded in
 
 - [x] Inspect the current hello example, native requirements, headless tooling,
   and hot-reload support; select and record an explicit framework revision.
-- [x] Create `crates/waypoints-rune`; add it as a workspace member without
-  changing `default-members`.
+- [x] Create the Rune crate (now canonical at `crates/waypoints-app`); add it
+  as a workspace member without changing `default-members` during development.
 - [x] Pin Rune and Rune Kit to the same commit and update the Cargo lockfile.
 - [x] Open a minimal native window (user-confirmed interactive desktop launch).
-- [x] Verify normal native shutdown (bounded traced window exits cleanly; an
-  interactive close/reopen check is still pending).
+- [x] Verify normal native shutdown (bounded traced window exits cleanly; the
+  user confirmed interactive close/reopen at cutover).
 - [x] Add a repeatable fixture mode that needs no backend and cannot mutate
   user projects; render a PNG and dump/inspect its element tree.
 - [x] Document exact build, test, native-run, and headless commands.
-- [x] Check that the existing GPUI app still builds.
+- [x] Check that the existing GPUI app still builds (before removal at cutover).
 
 Acceptance: the native window works on the development host, headless output is
 inspected, and another agent can reproduce both using documented commands.
@@ -37,9 +37,9 @@ Missing native access is a pending gate, not a pass.
 - [x] Open/close a floating workbench; check camera-space versus screen-space
   placement, keyboard focus, controls, and text selection under zoom.
 - [x] Exercise a larger graph while the workbench receives synthetic output.
-- [ ] Script the important interactions and inspect native responsiveness.
-  Headless scripting passes; interactive native feel needs a person (exact
-  check in [progress.md](progress.md#next-task)).
+- [x] Script the important interactions and inspect native responsiveness.
+  Headless scripting passes; the user confirmed the native canvas/workbench
+  feel at cutover.
 
 Acceptance: camera-only movement avoids unnecessary view/layout rebuilds, hit
 testing follows drawn content, and workbench interaction remains usable.
@@ -66,27 +66,24 @@ Real agent execution must be explicitly recorded or left unverified.
 
 - [x] Assignment refresh reconciliation, preview, and follow-up composition.
 - [x] Structured output, tool expansion, replay/truncation notices, tail following,
-  and pending permission interactions. Native scroll/press feel remains a
-  person check.
+  and pending permission interactions. The user confirmed native scroll/press
+  feel at cutover.
 - [x] Exact-target diff review, file navigation, selection/copy, split/unified,
-  wrapping, retained position, and explicit freshness (native feel pending).
+  wrapping, retained position, and explicit freshness (native feel confirmed by
+  the user at cutover).
 - [x] Run/native revision history, pagination, details, and review handoff.
-- [ ] Project/sidebar actions, refresh/retry, settings, theme/interface zoom,
-  shortcuts, UI preference persistence, and native lifecycle. Refresh/retry,
-  Settings, theme, interface zoom, reduced motion, the documented keyboard
-  shortcuts and focus return, pointer/keyboard graph previews, Rune-only
-  persistence including clamped native window geometry, native macOS menu items
-  and standard Edit/Window menus, and sidebar project add/remove are in; native
-  lifecycle and Windows/Linux menu availability remain.
-- [ ] Validate narrow windows, larger text, light/dark themes, keyboard-only
-  navigation, IME, and accessibility on the supported hosts available.
-  Automated keyboard shortcuts/focus return, pointer hover previews, native
-  window-geometry save/restore/clamp, headless menu dispatch, and a
-  narrow-workbench test exist; native menu appearance, Tab traversal, IME,
-  multi-display geometry, and accessibility remain person checks.
+- [x] Project/sidebar actions, refresh/retry, settings, theme/interface zoom,
+  shortcuts, UI preference persistence, and native lifecycle. Native macOS
+  menus, lifecycle checks, and the documented shortcuts/previews/preferences
+  are in; Linux/Windows keep in-app controls because the pinned Rune menu API is
+  macOS-only.
+- [x] Validate narrow windows, larger text, light/dark themes, keyboard-only
+  navigation, IME, and accessibility on the supported hosts available. The user
+  confirmed macOS Tab/IME/VoiceOver, menus, diff divider, close/reopen, and
+  multi-display behavior. Linux/Windows remain unverified.
 - [x] Reconcile every row of the behavior map and record intentional differences
-  (see the milestone-4 reconciliation table in
-  [behavior-map.md](behavior-map.md#rune-reconciliation-milestone-4)).
+  (see the cutover reconciliation table in
+  [behavior-map.md](behavior-map.md#rune-reconciliation-cutover)).
 
 Acceptance: current frontend workflows have behavior-level coverage, native
 checks have evidence, and unresolved gaps are visible. Backend/CLI capabilities
@@ -94,13 +91,15 @@ not currently exposed in the GUI are not implicit requirements for this port.
 
 ## 5. Cut over (requires explicit user approval)
 
-- [ ] Present parity results, remaining limitations, and native validation.
-- [ ] Obtain approval for the specific cutover/removal scope.
-- [ ] If a fallback is retained, rename the old package to `waypoints-gpui`;
-  rename the Rune package to `waypoints-app` and update binary targets as needed.
-- [ ] Update default members, launch scripts, docs, and CI/test commands.
-- [ ] Remove the old frontend and GPUI vendor patches only when approved and
-  confirmed unused; do not keep them as permanent accidental dependencies.
+- [x] Present parity results, remaining limitations, and native validation
+  ([readiness.md](readiness.md)).
+- [x] Obtain approval for the specific cutover/removal scope: full cutover,
+  GPUI removed, no fallback retained.
+- [x] Full cutover retained no fallback: the Rune package and binary were named
+  `waypoints-app`; the old GPUI package was removed rather than renamed.
+- [x] Update default members, launch scripts, docs, and test commands.
+- [x] Remove the old frontend, GPUI vendor patches, and vendor refresh scripts
+  after the user approved full cutover.
 
 Acceptance: normal documented commands launch Rune, required checks pass, and
 the remaining dependency graph matches the approved migration state.

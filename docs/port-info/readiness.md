@@ -1,15 +1,16 @@
 # Rune cutover readiness
 
-Status: **not ready for cutover**. The GPUI frontend remains the default
-application and no package rename, removal, or launch-script change has been
-made. This report records the current evidence and the remaining gaps for a
-later user-approved cutover.
+Status: **cutover complete**. Rune is the canonical `waypoints-app` desktop
+frontend. The full cutover scope was explicitly approved and applied: the former
+GPUI crate, its vendored patches, and its vendor update scripts were removed;
+the Rune package was renamed to `waypoints-app` and is the workspace default.
+The backend, core, and CLI contracts were not changed.
 
 ## Implemented and verified
 
-- Offline fixture canvas: nine-card and 24-card graphs, connected edges, live
-  pan/pointer-anchored zoom, hit testing, selection, presentation-only card
-  dragging, screen-space HUD and workbench, keyboard focus, text selection, and
+- Canvas-first fixture frontend: nine-card and 24-card graphs, connected edges,
+  live pan/pointer-anchored zoom, hit testing, selection, presentation-only card
+  dragging, screen-space HUD/workbench, keyboard focus, text selection, and
   bounded synthetic output.
 - Backend connection only through `waypoints_backend::Client`: project mode via
   `--project`, workflow list/graph loading, unavailable/empty/error/retry states,
@@ -17,7 +18,8 @@ later user-approved cutover.
   draft preservation across workflow switches.
 - Assignment editing: per-node drafts retained across navigation, Edit/Preview,
   checked saves with the saved baseline, external-saved warnings, save/discard,
-  and an unsaved-state indicator.
+  and an unsaved-state indicator. Compact workbenches scroll the editor/preview
+  above the footer.
 - Run lifecycle: fresh start, continue, cancellation, bounded structured ACP
   events, single-use permission replies, separate run/snapshot state, and
   continuation eligibility.
@@ -25,17 +27,17 @@ later user-approved cutover.
   stable expandable tool/other rows, replay and event-gap notices, bounded
   retention, tail following, and Jump to latest.
 - Exact diff review: Current/Run/revision targets, commit copy, parsed exact
-  patch, file navigation, line selection/copy, unified/split, wrapping,
-  stale-current reload, and review handoff from history.
+  patch, fixed/resizable changed-files pane, line selection/copy,
+  unified/split, wrapping, stale-current reload, and review handoff.
 - History: saved runs and native revisions, state/snapshot/session details,
   native operation metadata, pinned cursors, Load older, Refresh, retained rows
   on older-page failure, and review handoff.
-- Settings: System/Light/Dark appearance, 85/100/115/130% interface zoom,
-  reduced motion, `Cmd+,`, Settings from the HUD, and a separate atomic Rune
-  preferences file. Invalid or newer preference files are left untouched.
+- Settings: System/Light/Dark appearance, interface zoom, reduced motion,
+  `Cmd+,`, Settings from the HUD, and a separate atomic Rune preferences file.
+  Invalid or newer preference files are left untouched.
 - Project navigation: add/remove projects through the native folder dialog, a
   persisted project list, and persisted selected project/workflow restored at
-  launch. Removing a project only removes the sidebar entry, never project data.
+  launch. Removing a project only removes the sidebar entry.
 - History freshness: a newly recorded run or native revision marks loaded
   history as fresh and offers Load newest.
 - Keyboard: Return opens the focused card, Shift+Return toggles its preview,
@@ -52,115 +54,76 @@ later user-approved cutover.
   restores the saved size and position, converting points with the saved scale.
   Invalid/out-of-range geometry is ignored; saved bounds are clamped to the
   connected display they intersect, and fully off-screen bounds fall back to a
-  centered default. Headless renders never write preferences.
+  centered default. Display hot-plug and mixed-scale setups remain unverified.
 - Native menus (macOS): Settings…, Add Project…, Close Window, checked Show
-  Projects Sidebar, and enabled Refresh Project, plus Rune's standard Edit and
+  Projects Sidebar, and enabled Refresh Project, plus the standard Edit and
   Window items. Menu actions share the in-app state methods; checked/enabled
-  flags update as the sidebar/project state changes.
-- Native chrome and UI polish: the HUD keeps its normal left margin but starts
-  below the macOS traffic lights, HUD actions are labeled SVG icon buttons,
-  exact-review changed files use a fixed/resizable pane with a column-resize
-  grip, and compact assignment text clips to a scroll viewport above the footer.
+  flags update with sidebar/project state. Linux/Windows have no native menu bar
+  with this pinned Rune revision.
+- Native chrome and UI: the HUD keeps its normal left margin but starts below
+  the macOS traffic lights; HUD actions are labeled SVG icon buttons; compact
+  assignment text clips above the footer.
 
 ## Automated evidence
 
 Run from the repository root:
 
 ```sh
-cargo test -p waypoints-rune --locked
-cargo fmt -p waypoints-rune -- --check
-cargo clippy -p waypoints-rune --all-targets --all-features --locked --no-deps -- -D warnings
-cargo doc -p waypoints-rune --no-deps --locked
+cargo test -p waypoints-app --locked
+cargo fmt -p waypoints-app -- --check
+cargo clippy -p waypoints-app --all-targets --all-features --locked --no-deps -- -D warnings
+cargo doc -p waypoints-app --no-deps --locked
 cargo check -p waypoints-app --locked
 ```
 
 Current result: 30 Rune tests pass, including in-process real-backend tests
 against temporary databases/sockets and the deterministic
-`crates/waypoints-cli/tests/fixtures/acp_agent.py` adapter. The GPUI app check
-passes with its pre-existing dependency warnings, and
-`cargo test -p waypoints-app --locked` passes 53 tests; no GPUI app code was
-changed by the Rune port. The latest 120-frame native trace passed (118/120
-presented, 2 skipped, p50/p95 16.67/16.67 ms, clean exit), reported no native-menu errors,
-and saved/restored/clamped window geometry was verified with seeded
-preferences.
+`crates/waypoints-cli/tests/fixtures/acp_agent.py` adapter.
+`cargo test --workspace --locked`, `cargo check --workspace --locked`, app
+formatting, app Clippy, and app docs pass. Two stale CLI error-text assertions
+were updated without changing backend behavior. A 120-frame native
+trace passed (119/120 presented, 1 skipped, p50/p95 16.67/16.67 ms, clean exit),
+reported no native-menu errors, and saved/restored/clamped window geometry was
+verified with seeded preferences.
 
 Headless artifacts under `target/port-info/rune/` include the canvas, workbench,
-large-graph, scripted canvas tour, backend navigation/assignment, permission/
-completion/continuation/cancellation, structured-output, diff-review, history,
-settings, assignment edit/preview, pointer-hover and keyboard graph previews,
-project sidebar, native window-geometry traces, and native trace captures. See [validation.md](validation.md) for
-commands and [progress.md](progress.md) for exact results.
+large graph, scripted tour, backend navigation/assignment, permission/
+completion/continuation/cancellation, structured output, diff review, history,
+settings, assignment edit/preview, pointer-hover/keyboard previews, project
+sidebar, traffic-light HUD, and native trace captures. See
+[validation.md](validation.md) for commands and [progress.md](progress.md) for
+exact results.
 
-## Remaining gaps before parity can be claimed
+## User-confirmed native checks (macOS)
 
-- Automated keyboard coverage is in place for the documented shortcuts,
-  focus return, and pointer/keyboard previews, but native keyboard-only Tab
-  traversal, IME behavior, and accessibility are person checks.
-- Rune's native menu API installs only on macOS; Windows and Linux get no
-  native menu bar from this pinned revision. The menu bar's visual placement,
-  key equivalents, and standard Edit/Window behavior need a person on macOS.
-- Geometry clamping was verified with the current single-display host; a
-  multi-display arrangement, display hot-plug, and mixed-scale positions still
-  need a person.
-- The traffic-light clearance and HUD placement were visually confirmed by the
-  user on native macOS. The diff-pane grip's native resize feel, Tab/IME/
-  accessibility, close/reopen, and multi-display geometry still need a person.
-  The diff grip is pointer-only; keyboard resizing is not implemented.
-- Native interactive pointer feel, trackpad gestures, IME, clipboard,
-  accessibility, minimize/close/reopen, and multi-window behavior still require
-  a person on a desktop session. One earlier trace attempt failed with
-  `display link creation failed: -6661`; immediate retries and the latest
-  120-frame trace passed, so the failure is intermittent and the native gate
-  remains unverified beyond startup/pacing/clean exit/geometry save-and-restore.
-- Linux and Windows have not been built or run. No real ACP model/agent has been
-  executed; all agent checks used the deterministic test adapter.
-- No comparative performance measurement against GPUI has been made.
+The user confirmed the following on a native macOS session:
 
-## Native person checks to perform
+- native menu bar, checked/enabled states, and key equivalents;
+- Tab traversal, IME/text composition, VoiceOver/accessibility, close/reopen,
+  and multi-display window behavior;
+- diff-pane divider feel, traffic-light clearance, HUD icon labels, and the
+  compact assignment layout.
 
-Launch from an interactive desktop session:
+These were informal confirmations, not per-step logs. The native trace and
+headless artifacts above remain the reproducible evidence.
 
-```sh
-cargo run -p waypoints-rune --locked
-```
+## Remaining limitations
 
-Then check and record:
+- Linux and Windows have not been built or run. Rune's native menu API is
+  macOS-only at the pinned revision; those platforms use in-app controls.
+- Display hot-plug and mixed-scale multi-display arrangements remain unverified.
+  The diff-pane divider is pointer-only; keyboard resize is not implemented.
+- No real ACP model/agent has been executed; all agent checks use the
+  deterministic test adapter.
+- No comparative performance measurement was made, and the former GPUI
+  frontend is no longer available for a side-by-side benchmark. Workspace-wide
+  `cargo fmt --all` and Clippy reach pre-existing backend formatting/MSRV
+  findings; the canonical app's strict checks pass.
 
-1. Pan with a drag, trackpad scroll, and middle drag; pinch or `Cmd`-scroll zoom
-   stays anchored under the pointer.
-2. Select, drag, and double-click cards; edges follow without changing saved
-   dependencies. Rest the pointer on a card for the preview, move away to close
-   it, then click a card, press Shift+Return, Escape to close, and Return to
-   open the workbench.
-3. Open the workbench, use `Cmd+1–4` and Tab through
-   Assignment/Output/Changes/History, select and copy text, and close/reopen
-   with Escape and the close/reopen controls. Confirm focus returns to the
-   graph card; repeat for Settings (`Cmd+,`).
-4. Run a fixture/backend flow with the deterministic adapter, reply to a
-   permission, cancel a run, expand a tool row, scroll away from and back to the
-   output tail.
-5. Review current/run/revision diffs, drag the changed-files divider, switch
-   unified/split and wrap, navigate files, select/copy lines, refresh a stale
-   current review, and open history.
-6. Use `Cmd+B` to hide/show the sidebar and `Cmd+O` to add a project with the
-   native folder picker, remove a project, record a new run while History is
-   open, confirm Load newest appears, then switch selected project/workflow.
-7. Use the native menu bar for Settings, Add Project, Show Projects Sidebar,
-   Refresh Project, Close Window, Undo/Cut/Copy/Paste/Select All, and the
-   Window menu; confirm checked/enabled states and key equivalents. Confirm the
-   HUD and project panel clear the traffic lights and the HUD icons have
-   tooltips.
-8. Move and resize the window, note the size/position, switch
-   System/Light/Dark, interface zoom, and reduced motion, quit, relaunch, and
-   confirm the separate Rune preference file restores all of them without
-   touching the GPUI file. Repeat on a second display, including partially
-   off-screen and disconnected-display cases.
-9. Check IME composition, accessibility tree, window resize/narrow layout,
-   larger text, minimize/close/reopen, and normal shutdown.
+## Cutover record
 
-## Cutover gate
-
-Cutover remains blocked until the user approves the exact scope and the native
-checks above are recorded. Per [milestones.md](milestones.md), any fallback
-rename, package/binary rename, default-members change, launch-script change,
-GPUI removal, or vendor-patch cleanup must happen only after that approval.
+The approved full cutover removed the GPUI crate, `vendor/*`, and the vendor
+refresh scripts; moved the Rune crate to `crates/waypoints-app`; set it as the
+workspace default; renamed the package and binary to `waypoints-app`; updated
+`dev`, `renovate.json`, the README, and the documentation map; and regenerated
+`Cargo.lock`. No commit or push was performed as part of this cutover step.

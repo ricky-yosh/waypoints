@@ -1,64 +1,59 @@
 # Rune frontend migration
 
-Status: the Rune frontend passes fixture-canvas checks and a real-backend
-vertical slice (project/workflow/graph loading, checked assignment saves,
-start/continue/cancel, structured events, permission replies, snapshot and
-continuation state, exact diff review, history, settings, keyboard shortcuts and
-focus return, pointer/keyboard previews, clamped native window geometry, and
-macOS native menu items). Backend tests use an in-process server and
-deterministic ACP adapter; no real model agent has run. Native menu appearance,
-interactive lifecycle checks, Windows/Linux validation, and menu support outside
-macOS remain. The GPUI frontend remains the active/default application; cutover
-is not approved. See [readiness.md](readiness.md).
+Status: **cutover complete**. Rune is the canonical `waypoints-app` desktop
+frontend; the former GPUI frontend, vendored patches, and vendor update scripts
+were removed with explicit user approval. The Rune app passes fixture-canvas
+and real-backend checks, including exact diff review, history, settings,
+keyboard/focus behavior, previews, native window geometry, and macOS native
+menus. The user confirmed the native macOS menu, diff divider, Tab/IME/
+VoiceOver, close/reopen, and multi-display checks. Backend tests use an
+in-process server and deterministic ACP adapter; no real model agent has run.
+Linux/Windows validation and real-agent execution remain unverified. See
+[readiness.md](readiness.md).
 
 ## Goal and scope
 
-Replace the GPUI frontend with a canvas-first Rune frontend. The motivation is
-fluid canvas interaction and an agent-friendly development loop, not a proven
-performance advantage over GPUI Fast. Comparative performance is unmeasured.
+The cutover replaced the GPUI frontend with a canvas-first Rune frontend. The
+motivation was fluid canvas interaction and an agent-friendly development loop,
+not a proven performance advantage over GPUI Fast. Comparative performance was
+not measured.
 
 Keep the workflow engine, persistence, jj operations, ACP integration, and CLI.
 The new frontend uses the existing `waypoints_backend::Client`; it must not open
 the database or invoke jj independently.
 
-This packet defines the migration sequence, not authorization to land changes,
-publish anything, delete the old frontend, or add backend-only product features.
+The migration and user-approved full cutover are complete. This packet is the
+historical and current verification record for the canonical Rune frontend.
 
 ## Read in this order
 
 1. This brief.
 2. [Progress and handoff](progress.md): current milestone and next task.
 3. [Milestones](milestones.md): ordered work and acceptance gates.
-4. [Behavior map](behavior-map.md): reference implementation and parity checklist.
+4. [Behavior map](behavior-map.md): final Rune parity checklist and intentional differences.
 5. [Validation](validation.md): checks and evidence requirements.
-6. [Cutover readiness](readiness.md): current verdict, remaining gaps, and the
-   native person checks required before approval.
+6. [Cutover readiness](readiness.md): completed cutover record, evidence, and
+   remaining platform/agent limitations.
 
 Read applicable repository instructions and Rust skills before implementation.
-GPUI Kit guides apply to GPUI work; do not assume their APIs or dependency rules
-apply to Rune. Inspect Rune's actual source and examples before choosing APIs.
+Inspect Rune's actual source and examples before choosing APIs.
 
-## Working decisions
+## Cutover decisions
 
-- Add `crates/waypoints-rune` alongside `crates/waypoints-app`. Keep the current
-  default package, GPUI executable, development launcher, and vendor patches.
-- Depend on Rune and Rune Kit at the same explicit Git commit. Record the chosen
-  revision, upstream examples consulted, platform prerequisites, and reproduction
-  commands in this packet. Cargo fetches dependencies; a separate framework
-  checkout is optional.
-- Build the fixture canvas before wiring real backend operations.
-- Preserve user-visible behavior and backend safeguards, not GPUI layout code.
-  Rune's camera/input/motion mechanisms should drive the new canvas.
-- Keep domain identities stable across selection, reordering, and async updates.
-  Stale responses must not replace another project's or node's state.
-- Extract framework-independent code only when it has a real shared purpose.
-  Do not create a universal GPUI/Rune UI abstraction or copy the workflow engine.
-- Use separate Rune UI preferences during development. Keep storage and test
-  projects isolated from normal user data for mutating validation.
-- Respect unrelated/concurrent edits. Re-read the reference implementation before
-  porting a capability; this inventory is a starting point, not a frozen snapshot.
-- Do not add node-reparenting or other persistent graph mutations merely because
-  the canvas supports dragging. Initially, dragging changes presentation only.
+- Rune is the canonical frontend at `crates/waypoints-app`; it is the workspace
+  default. The former GPUI crate, vendor patches, and vendor scripts are removed.
+- Rune and Rune Kit use the same pinned Git commit in the app manifest. The
+  revision, platform prerequisites, and reproduction commands are recorded here.
+- The app uses only `waypoints_backend::Client`; it does not open the database or
+  invoke jj independently.
+- Rune's camera/input/motion mechanisms drive the canvas. Per-node presentation
+  dragging never mutates dependencies or backend records.
+- Domain identities stay stable across selection, reordering, and async updates;
+  stale responses do not replace another project or node.
+- Rune-only preferences are stored separately and skip writes in headless runs.
+  Mutating validation uses isolated state/project directories.
+- Respect unrelated/concurrent edits. The behavior map records the final
+  reconciliation and intentional differences.
 
 ## Agent execution loop
 

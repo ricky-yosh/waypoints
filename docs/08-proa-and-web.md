@@ -10,7 +10,7 @@ Proa (proa.so) is a new Rust web framework: batteries-included, server-rendered,
 
 ## Proa is not a desktop UI tool
 
-It does not replace GPUI. It is only for web pages.
+It does not replace the Rune desktop app. It is only for web pages.
 
 ## Where it could fit here (optional)
 
@@ -27,4 +27,4 @@ It does not replace GPUI. It is only for web pages.
 
 ## Original question that started this
 
-The author was building a TTRPG desktop app in Rust and GPUI, had heard Proa was good, and asked about a website or mobile companion. The table has no wifi, which is why the app is desktop and offline-first. The conversation then moved to a different project (this one).
+The author was building a TTRPG desktop app in Rust, had heard Proa was good, and asked about a website or mobile companion. The table has no wifi, which is why the app is desktop and offline-first. The conversation then moved to a different project (this one).

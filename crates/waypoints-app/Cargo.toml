@@ -2,32 +2,16 @@
 name = "waypoints-app"
 version = "0.1.0"
 edition = "2024"
-
-[features]
-hot-reload = ["gpui-kit/hot-reload"]
-screenshot-fixtures = ["gpui-kit/test-support"]
-native-qa = ["screenshot-fixtures"]
-
-[[bin]]
-name = "waypoints-screenshots"
-path = "src/bin/screenshots.rs"
-required-features = ["screenshot-fixtures"]
-
-[[bin]]
-name = "waypoints-native-qa"
-path = "src/bin/native_qa.rs"
-required-features = ["native-qa"]
+publish = false
 
 [dependencies]
-anyhow = "1.0.104"
-dirs = "6"
-gpui-kit = { version = "=0.9.0", features = ["gpui-fast", "inspector", "syntect"] }
+rune = { git = "https://github.com/anomalyco/rune", rev = "a8ca769b944598e179f33cc6843629b90e6ca831", default-features = false, features = ["accessibility", "dbus", "embedded-fonts", "metal-backend", "native-file-dialog"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a8ca769b944598e179f33cc6843629b90e6ca831", features = ["markdown"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tempfile = "3"
-tokio = { version = "1", features = ["rt", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "time"] }
 waypoints-backend = { path = "../waypoints-backend" }
-waypoints-core = { version = "0.1.0", path = "../waypoints-core" }
+waypoints-core = { path = "../waypoints-core" }
 
 [dev-dependencies]
-gpui-kit = { version = "=0.9.0", features = ["gpui-fast", "test-support"] }
+tempfile = "3"

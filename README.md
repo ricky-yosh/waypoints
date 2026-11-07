@@ -1,6 +1,6 @@
 # Waypoints: plan-driven agent workflows
 
-Status: early headless implementation on macOS/Linux. Core/backend/CLI support
+Status: early implementation. Core/backend/CLI support
 persistent rooted workflows, native jj changes and on-demand workspaces, ACP runs
 and continuation, automatic successful-turn snapshots, same-change run/commit restoration
 and explicitly confirmed same-workflow downstream rebasing,
@@ -9,9 +9,10 @@ native deletion with retained workspace folders,
 read-only native code review, paginated revision history and restore-impact inspection,
 an informational upstream-revision hint, and undoable prompt-only move/delete.
 Explicit recovery handles clear interrupted outcomes; ambiguous states remain
-blocked. The desktop app provides a project/workflow sidebar, dependency graph,
-editable assignments, live agent output and controls, exact patch review, and
-native revision history. Workflow, native-change, and workspace provisioning
+blocked. The macOS desktop app is validated; Linux/Windows are not yet verified.
+It provides a project/workflow sidebar, canvas dependency graph, editable
+assignments, live agent output and controls, exact patch review, and native
+revision history. Workflow, native-change, and workspace provisioning
 still use the CLI.
 
 **V1 reflects native jj revisions and conflicts.** Users decide what changed
@@ -51,91 +52,58 @@ test data, the local protocol, and current limitations.
 ## Try the desktop app
 
 Start the backend with a workflow command, for example
-`cargo run -p waypoints-cli -- workflow list --project .`, then run
-`cargo run -p waypoints-app`. Choose **Add project…** to open a folder in the
-Projects sidebar. Multiple projects can stay open; expand a project and select
-an active workflow to inspect its saved nodes and dependencies. Each project has
-its own Refresh/Retry action; toolbar Refresh targets the selected workflow's project,
-including changes made through the CLI. **Remove from sidebar** only removes the
-UI entry: it never deletes project files or saved workflows.
+`cargo run -p waypoints-cli -- workflow list --project .`, then run the
+canonical Rune desktop app:
 
-Drag the divider to resize the sidebar, or use **Show/Hide Projects** in the View
-menu. On macOS, Command-O adds a project, Command-B toggles the sidebar, and
-Command-R refreshes the selected project (Control equivalents on Linux).
-Open folders, expanded sections, selection, sidebar layout, and window bounds are
-remembered in `waypoints/workspace.json` under the platform configuration directory
-(`~/Library/Application Support` on macOS; `$XDG_CONFIG_HOME` or `~/.config` on Linux).
-Unavailable saved folders remain visible for retry or removal. Invalid or newer
-preferences files produce a warning and are not overwritten; repair or move the
-file to allow preferences to save again.
+```sh
+cargo run -p waypoints-app
+```
 
-Select a graph node to open its floating workbench: edit and save its assignment,
-start or explicitly continue an eligible agent session, inspect live output,
-review exact patches, and browse run records and native revisions. Runs require
-an associated native change and a verified, ready workspace provisioned through
-the CLI. History browsing does not restore code. See
+Use **Add** in the Projects panel to choose a project folder. The panel keeps a
+Rune-only project list and the selected project/workflow; remove an entry with
+the `×` button, which never deletes project files. The graph is canvas-first:
+drag to pan, pinch or ⌘-scroll to zoom, click to select, drag a card to move its
+presentation position, and double-click or press Return on a focused card to
+open the workbench.
+
+The workbench provides Assignment, Output, Changes, and History tabs. Edit or
+preview the saved assignment, start/continue/cancel runs, reply to permissions,
+review exact patches, and browse saved runs or native revisions. Hover or press
+Shift+Return for a card preview, Escape closes the topmost layer, and the
+Workbench/Settings views return focus to their opener. `Cmd+1–4`, `Cmd+R`,
+`Cmd+B`, `Cmd+O`, `Cmd+,`, and the other shortcuts are listed in Settings.
+
+On macOS the app installs native menus (Settings, Add Project, Close Window,
+Show Projects Sidebar, Refresh Project) plus the standard Edit and Window menus.
+Rune's pinned menu API is macOS-only; Linux/Windows use the in-app controls.
+Window size/position restore and clamp to connected displays. Rune preferences
+are stored separately at `waypoints/rune-workspace.json` under the platform
+state directory (`~/Library/Application Support` on macOS,
+`$XDG_STATE_HOME/waypoints` or `~/.local/state/waypoints` elsewhere). Invalid or
+newer files are left untouched. No GPUI preference file is read or written.
+
+The backend must be started separately as described above; the app can also
+start it when a saved project is selected. Workflow/native-change/workspace
+provisioning and code restoration remain CLI operations. See
 [Working in the desktop app](docs/05-ui-and-diffs.md) for controls and limits.
 
-The app does not automatically start the backend and uses the
-CLI's default database and socket paths (including `XDG_STATE_HOME`); custom CLI
-`--database` and `--socket` options are not yet exposed in the GUI. An interrupted
-dependency operation is shown because saved edges may not reflect native state.
-
-### Develop with native hot reload
-
-The desktop app uses GPUI Kit's **GPUI Fast** backend for retained rendering and
-layout, including in tests. Application code continues to use `gpui_kit`.
-The local patches preserve the AccessKit window-close fix for GPUI Fast;
-see [`vendor/README.md`](vendor/README.md).
-
-The desktop UI uses experimental native Rust hot patching for development.
-From the repository root, run:
+### Develop
 
 ```sh
 ./dev
 ```
 
-This launches Dioxus CLI with the `hot-reload` feature and patches code in the
-running app rather than restarting it. Edit a label, spacing, or layout in a
-`render` method and save to see the change in the existing window. Restart the
-development session after changing struct fields, constructors, startup logic,
-or persisted-state formats, or if a patch fails.
+`./dev` launches `cargo run -p waypoints-app` from the workspace root. Native
+hot reload is not part of the Rune build; restart after changing startup or
+persisted-state formats. Use `cargo test -p waypoints-app --locked` and the
+headless commands in [Rune validation](docs/port-info/validation.md) for the
+repeatable checks.
 
-Install the matching CLI once:
+### Dependency updates
 
-```sh
-cargo install dioxus-cli --version 0.7.10 --locked
-```
-
-The script uses `${CARGO_HOME:-$HOME/.cargo}/bin/dx` explicitly because another
-program named `dx` may be on `PATH`. Set `DIOXUS_DX` to use a different Dioxus
-installation. Extra arguments are forwarded; `./dev --help` shows the CLI options.
-It always runs from the workspace root and selects `waypoints-app`, avoiding a
-Dioxus 0.7.10 default-member path bug when launched from a nested directory.
-
-The opt-in feature is forwarded through the local `vendor/gpui-kit` patch to
-GPUI Fast's Subsecond integration only.
-Normal `cargo run -p waypoints-app` builds do not
-enable hot reload. The backend still needs to be started separately as described
-above; UI code hot reload does not refresh workflow data.
-
-### Dependency update PRs
-
-[`renovate.json`](renovate.json) configures a GPUI-only Renovate trial: grouped
-Cargo updates on Mondays before 06:00 UTC, with manual merging. Other dependencies,
-vendored manifests, and general lockfile maintenance are excluded from this trial.
-
-To activate it, install the [Renovate GitHub app](https://github.com/apps/renovate)
-for `ricky-yosh/waypoints`, then merge this configuration into the default branch.
-Review any onboarding PR or Dependency Dashboard setup errors. Adding the
-configuration locally does not activate the hosted bot.
-
-The GPUI family currently uses local hot-reload and AccessKit compatibility
-patches. Renovate can propose new upstream versions, but it cannot refresh the
-vendored sources automatically. Follow [`vendor/README.md`](vendor/README.md)
-before merging an update PR. Resolve any lockfile errors, run tests and lint
-checks, and verify native Settings close/reopen and `./dev` on macOS. A dependency
-PR alone is not evidence that the window-close crash is fixed.
+[`renovate.json`](renovate.json) enables ordinary Cargo dependency updates on
+Monday mornings (manual merge, no lockfile maintenance). The former GPUI vendor
+patch/update workflow has been removed with the GPUI frontend.
 
 ## One line
 
@@ -150,7 +118,7 @@ Waypoints turns a plan into a graph of assignments. A node can own one evolving
 jj change with many exact revisions, and its agent work can use fresh sessions or
 explicit continuation over ACP. Review diffs, branch parallel work, revisit an
 earlier revision, and see jj's resulting changes and conflicts. The headless
-implementation is Rust; the desktop client uses GPUI Kit. Codex is the
+implementation is Rust; the desktop client uses Rune and Rune Kit. Codex is the
 manually validated adapter, not a guarantee that every ACP agent is supported.
 
 ## Documentation
@@ -191,7 +159,7 @@ manually validated adapter, not a guarantee that every ACP agent is supported.
 | Code history | One evolving jj change per node, many exact revisions; workspaces allocated on demand |
 | Native feedback | Reflect jj changes/conflicts; no inferred downstream-context-staleness state for v1 |
 | Diff viewing | Headless and GUI exact-revision review implemented; editor handoff pending; no custom multibuffer |
-| UI | GPUI Kit (`gpui-kit`); graph and node workbench backed by the shared API; see [desktop workflow](docs/05-ui-and-diffs.md) and [current stack](docs/06-stack-and-storage.md#gpui) |
+| UI | Rune and Rune Kit; canvas graph and node workbench backed by the shared API; see [desktop workflow](docs/05-ui-and-diffs.md) and [current stack](docs/06-stack-and-storage.md#rune) |
 | Storage | Backend-owned Turso with plain SQL; SQLite migration and backup procedures are not implemented |
 | Prototype | React/TypeScript/React Flow is an optional design experiment, not a required build stage |
 | Web / mobile | Optional, undecided; Proa is a candidate for a web side |

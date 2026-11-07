@@ -2,31 +2,10 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "enabledManagers": ["cargo"],
-  "ignorePaths": ["vendor/**"],
   "timezone": "Etc/UTC",
   "schedule": ["before 6am on monday"],
   "automerge": false,
   "lockFileMaintenance": {
     "enabled": false
-  },
-  "packageRules": [
-    {
-      "description": "Limit this trial to the GPUI family.",
-      "matchManagers": ["cargo"],
-      "enabled": false
-    },
-    {
-      "description": "Group GPUI family updates for manual compatibility review.",
-      "matchManagers": ["cargo"],
-      "matchPackageNames": ["/^gpui(?:-|$)/"],
-      "enabled": true,
-      "groupName": "GPUI Kit family",
-      "groupSlug": "gpui-kit-family",
-      "rangeStrategy": "bump",
-      "prBodyNotes": [
-        "The GPUI family has local patches for hot reload and the AccessKit window-close fix. See `vendor/README.md` and `scripts/refresh-ui-vendor.py`. Update the pinned source versions and checksums, regenerate the vendored sources, and preserve patches still missing upstream. A manifest bump alone is not a complete upgrade; check for Cargo patch or lockfile errors.",
-        "Before merging, run the workspace tests and lint checks, verify native Settings window close/reopen on macOS, and smoke-test `./dev`. Automerging is disabled."
-      ]
-    }
-  ]
+  }
 }
