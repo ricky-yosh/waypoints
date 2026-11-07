@@ -1,4 +1,10 @@
-use std::{cell::Cell, collections::{BTreeSet, VecDeque}, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    collections::{BTreeSet, VecDeque},
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName;
@@ -16,8 +22,8 @@ use gpui_kit::{
     InteractiveElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
     Styled as _, WeakEntity, Window, div,
 };
-use waypoints_backend::{Client, Permission, RunEvent, RunEventOrigin, RunStatus};
 use waypoints_backend::activity::{Activity, ActivityBlock, ActivityLog as Transcript, Stream};
+use waypoints_backend::{Client, Permission, RunEvent, RunEventOrigin, RunStatus};
 use waypoints_core::run::{RunState, SnapshotState};
 
 use super::{
@@ -37,8 +43,11 @@ trait TranscriptView {
 
 impl TranscriptView for Transcript {
     fn apply_events(
-        &mut self, events: Vec<RunEvent>, gap: bool,
-        scroll: &Entity<MessageScrollerState>, cx: &mut App,
+        &mut self,
+        events: Vec<RunEvent>,
+        gap: bool,
+        scroll: &Entity<MessageScrollerState>,
+        cx: &mut App,
     ) {
         let delta = self.apply(events, gap);
         scroll.update(cx, |scroll, cx| {
@@ -171,14 +180,7 @@ impl RunPanel {
         }
         match state {
             RunState::Running => {
-                if let Some(tool) = self
-                    .output
-                    .blocks
-                    .iter_mut()
-                    .find(|block| block.sequence == 6)
-                {
-                    tool.expanded = true;
-                }
+                self.expanded_tools.insert(6);
             }
             RunState::Completed => {
                 self.output = Transcript::default();
@@ -195,7 +197,7 @@ impl RunPanel {
             }
             _ => self.output = Transcript::default(),
         }
-        self.output_scroll = cx.new(|cx| MessageScrollerState::new(self.output.blocks.len(), cx));
+        self.output_scroll = cx.new(|cx| MessageScrollerState::new(self.output.blocks().len(), cx));
     }
 
     #[cfg(feature = "screenshot-fixtures")]
@@ -302,7 +304,7 @@ impl RunPanel {
             json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The focused tests pass. The diff viewport still owns its scrolling, and historical targets remain pinned.\n"}}),
         );
         self.output = transcript;
-        self.output_scroll = cx.new(|cx| MessageScrollerState::new(self.output.blocks.len(), cx));
+        self.output_scroll = cx.new(|cx| MessageScrollerState::new(self.output.blocks().len(), cx));
     }
 }
 
@@ -527,7 +529,7 @@ impl Workspace {
                                         &panel.output_scroll,
                                         cx,
                                     );
-                                    if panel.output.trimmed {
+                                    if panel.output.is_trimmed() {
                                         panel.output_notice =
                                             Some("Some earlier output was omitted.");
                                     }
@@ -831,7 +833,7 @@ impl Workspace {
         let Some(panel) = self.node_workspaces.get(&key).map(|node| &node.run) else {
             return GraphActivity::default();
         };
-        let blocks = &panel.output.blocks;
+        let blocks = panel.output.blocks();
         let assistant = blocks.iter().rev().find_map(|block| match &block.activity {
             Activity::Text(Stream::Assistant, text) if !text.trim().is_empty() => {
                 Some(text.as_str())
@@ -866,6 +868,7 @@ impl Workspace {
 
     pub(in crate::workspace) fn permission_actions(
         &self,
+        compact: bool,
         cx: &Context<Self>,
     ) -> impl gpui_kit::IntoElement {
         let Some((project, workflow)) = self.state.selected else {
@@ -881,17 +884,21 @@ impl Workspace {
             {
                 let id = status.run.id;
                 let permission = permission.clone();
-                actions = actions.child(
-                    Button::new(SharedString::from(format!("permission-{id}")))
-                        .outline()
-                        .small()
-                        .icon(IconName::ShieldAlert)
-                        .label(format!("Review permission · Node #{}…", key.2))
-                        .accessibility_label(format!("Review permission for node #{}", key.2))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_permission(key, id, &permission, window, cx)
-                        })),
-                );
+                let label = format!("Review permission · Node #{}…", key.2);
+                let button = Button::new(SharedString::from(format!("permission-{id}")))
+                    .outline()
+                    .small()
+                    .icon(IconName::ShieldAlert)
+                    .accessibility_label(format!("Review permission for node #{}", key.2));
+                let button = if compact {
+                    button.tooltip(label)
+                } else {
+                    button.label(label)
+                };
+                actions =
+                    actions.child(button.on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_permission(key, id, &permission, window, cx)
+                    })));
             }
         }
         div().flex_1().min_w_0().child(actions)
@@ -1088,7 +1095,7 @@ impl Workspace {
             }
             toolbar = toolbar.child(trailing);
         }
-        let mut summary = div().flex().items_center().flex_wrap().gap_2();
+        let mut summary = div().flex().items_center().flex_wrap().gap_2().min_w_0();
         let mut follow_up = None;
         if unsaved {
             summary = summary.child(message(
@@ -1151,12 +1158,19 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .min_w_0()
                     .child(
                         Icon::new(IconName::CircleAlert)
                             .size_3()
+                            .flex_none()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(message(notice).text_color(cx.theme().muted_foreground)),
+                    .child(
+                        message(notice)
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
             );
         }
         let workspace = cx.weak_entity();
@@ -1169,7 +1183,7 @@ impl Workspace {
         };
         root.child(toolbar)
             .child(summary)
-            .when(panel.output.blocks.is_empty(), |root| {
+            .when(panel.output.blocks().is_empty(), |root| {
                 root.child(
                     div()
                         .flex_1()
@@ -1183,7 +1197,7 @@ impl Workspace {
                         .child(message(empty_message)),
                 )
             })
-            .when(!panel.output.blocks.is_empty(), |root| {
+            .when(!panel.output.blocks().is_empty(), |root| {
                 root.child(
                     MessageScroller::new(
                         "run-output",
@@ -1196,11 +1210,12 @@ impl Workspace {
                                 return div();
                             };
                             let transcript = &node.run.output;
-                            let Some(block) = transcript.blocks.get(index) else {
+                            let Some(block) = transcript.blocks().get(index) else {
                                 return div();
                             };
-                            let replay = begins_replay(&transcript.blocks, index);
-                            render_activity(block, replay, key, workspace.clone(), cx)
+                            let replay = begins_replay(transcript.blocks(), index);
+                            let expanded = node.run.expanded_tools.contains(&block.sequence);
+                            render_activity(block, replay, expanded, key, workspace.clone(), cx)
                         },
                     )
                     .with_jump_button_label("Jump to latest")
@@ -1226,6 +1241,7 @@ fn begins_replay(blocks: &VecDeque<ActivityBlock>, index: usize) -> bool {
 fn render_activity(
     block: &ActivityBlock,
     begins_replay: bool,
+    expanded: bool,
     key: NodeKey,
     workspace: WeakEntity<Workspace>,
     cx: &App,
@@ -1294,29 +1310,31 @@ fn render_activity(
             let (title, summary) = other_heading(update);
             (title, summary, None, json_markdown(update))
         }
+        _ => ("Activity".to_owned(), None, None, String::new()),
     };
     let toggle = Button::new(SharedString::from(format!("activity-{sequence}")))
         .ghost()
         .small()
-        .icon(if block.expanded {
+        .icon(if expanded {
             IconName::ChevronDown
         } else {
             IconName::ChevronRight
         })
         .label(title)
-        .selected(block.expanded)
+        .selected(expanded)
         .on_click(move |_, _, cx| {
             let _ = workspace.update(cx, |this, cx| {
                 if let Some(node) = this.node_workspaces.get_mut(&key)
-                    && let Some((index, block)) = node
+                    && let Some(index) = node
                         .run
                         .output
-                        .blocks
-                        .iter_mut()
-                        .enumerate()
-                        .find(|(_, block)| block.sequence == sequence)
+                        .blocks()
+                        .iter()
+                        .position(|block| block.sequence == sequence)
                 {
-                    block.expanded = !block.expanded;
+                    if !node.run.expanded_tools.insert(sequence) {
+                        node.run.expanded_tools.remove(&sequence);
+                    }
                     node.run.output_scroll.update(cx, |scroll, cx| {
                         scroll.remeasure_items(index..index + 1, cx);
                     });
@@ -1357,7 +1375,7 @@ fn render_activity(
         .items_start()
         .gap_1()
         .child(header)
-        .when(block.expanded, |row| {
+        .when(expanded, |row| {
             row.child(markdown_with_copy(
                 format!("details-{key:?}-{sequence}"),
                 details,
@@ -1522,6 +1540,7 @@ fn fenced_code(language: &str, code: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use waypoints_backend::activity::ACTIVITY_BYTES;
 
     fn chunk(text: &str) -> serde_json::Value {
         json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
@@ -1550,16 +1569,19 @@ mod tests {
                 "sessionUpdate": "tool_call_update", "toolCallId": "read", "status": "completed"
             }),
         );
-        assert_eq!(transcript.blocks.len(), 4);
+        assert_eq!(transcript.blocks().len(), 4);
         assert!(
-            matches!(&transcript.blocks[1].activity, Activity::Text(Stream::Assistant, text)
+            matches!(&transcript.blocks()[1].activity, Activity::Text(Stream::Assistant, text)
             if text == "```rust\nlet café = 1;\n```")
         );
         assert!(
-            matches!(&transcript.blocks[2].activity, Activity::Tool { fields, .. }
+            matches!(&transcript.blocks()[2].activity, Activity::Tool { fields, .. }
             if fields["title"] == "Read source" && fields["status"] == "completed")
         );
-        assert!(matches!(&transcript.blocks[3].activity, Activity::Other(_)));
+        assert!(matches!(
+            &transcript.blocks()[3].activity,
+            Activity::Other(_)
+        ));
     }
 
     #[test]
@@ -1622,51 +1644,46 @@ mod tests {
             chunk("Here is the change:\n\n```rust\nfn main() {"),
         );
         transcript.push(2, RunEventOrigin::Live, chunk("\n}\n```\n\nDone."));
-        assert_eq!(transcript.blocks.len(), 1);
+        assert_eq!(transcript.blocks().len(), 1);
         assert!(
-            matches!(&transcript.blocks[0].activity, Activity::Text(Stream::Assistant, text)
+            matches!(&transcript.blocks()[0].activity, Activity::Text(Stream::Assistant, text)
             if text == "Here is the change:\n\n```rust\nfn main() {\n}\n```\n\nDone.")
         );
     }
 
     #[test]
     fn replay_label_starts_only_at_a_replay_boundary() {
-        fn block(sequence: u64, origin: RunEventOrigin) -> ActivityBlock {
-            ActivityBlock {
-                sequence,
-                origin,
-                activity: Activity::Other(json!({})),
-                expanded: false,
-            }
+        let mut transcript = Transcript::default();
+        for (sequence, origin) in [
+            (1, RunEventOrigin::Replay),
+            (2, RunEventOrigin::Replay),
+            (3, RunEventOrigin::Live),
+            (4, RunEventOrigin::Replay),
+        ] {
+            transcript.push(sequence, origin, json!({"future": "update"}));
         }
-
-        let blocks = VecDeque::from([
-            block(1, RunEventOrigin::Replay),
-            block(2, RunEventOrigin::Replay),
-            block(3, RunEventOrigin::Live),
-            block(4, RunEventOrigin::Replay),
-        ]);
-        assert!(begins_replay(&blocks, 0));
-        assert!(!begins_replay(&blocks, 1));
-        assert!(!begins_replay(&blocks, 2));
-        assert!(begins_replay(&blocks, 3));
-        assert!(!begins_replay(&blocks, 4));
+        let blocks = transcript.blocks();
+        assert!(begins_replay(blocks, 0));
+        assert!(!begins_replay(blocks, 1));
+        assert!(!begins_replay(blocks, 2));
+        assert!(begins_replay(blocks, 3));
+        assert!(!begins_replay(blocks, 4));
     }
 
     #[test]
     fn trims_whole_blocks_and_caps_oversized_unicode() {
         let mut transcript = Transcript::default();
         transcript.push(1, RunEventOrigin::Replay, chunk("Earlier"));
-        transcript.push(2, RunEventOrigin::Live, chunk(&"猫".repeat(OUTPUT_LIMIT)));
-        assert!(transcript.trimmed);
-        assert_eq!(transcript.blocks.len(), 1);
+        transcript.push(2, RunEventOrigin::Live, chunk(&"猫".repeat(ACTIVITY_BYTES)));
+        assert!(transcript.is_trimmed());
+        assert_eq!(transcript.blocks().len(), 1);
         assert!(
-            matches!(&transcript.blocks[0].activity, Activity::Text(_, text)
-            if text.len() <= OUTPUT_LIMIT && text.ends_with('猫'))
+            matches!(&transcript.blocks()[0].activity, Activity::Text(_, text)
+            if text.len() <= ACTIVITY_BYTES && text.ends_with('猫'))
         );
         transcript.push(3, RunEventOrigin::Live, chunk("New output"));
         assert!(
-            matches!(&transcript.blocks.back().expect("new output block").activity,
+            matches!(&transcript.blocks().back().expect("new output block").activity,
             Activity::Text(_, text) if text == "New output")
         );
     }

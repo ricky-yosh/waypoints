@@ -784,6 +784,7 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                 .flex()
                 .items_start()
                 .gap_1()
+                .min_w_0()
                 .pt_1()
                 .child(
                     Icon::new(state_icon)
@@ -791,13 +792,18 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                         .text_color(state_color)
                         .flex_none(),
                 )
-                .child(message(node_runs::state_label(&status.run.state))),
+                .child(
+                    message(node_runs::state_label(&status.run.state))
+                        .min_w_0()
+                        .whitespace_normal(),
+                ),
         )
         .child(
             div()
                 .flex()
                 .items_start()
                 .gap_1()
+                .min_w_0()
                 .pt_1()
                 .child(
                     Icon::new(snapshot_icon)
@@ -805,7 +811,12 @@ fn run_row(status: &RunStatus, key: NodeKey, workspace: WeakEntity<Workspace>, c
                         .text_color(snapshot_color)
                         .flex_none(),
                 )
-                .child(message(snapshot).text_color(cx.theme().muted_foreground)),
+                .child(
+                    message(snapshot)
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_color(cx.theme().muted_foreground),
+                ),
         )
         .when_some(status.run.continued_from, |detail, previous| {
             detail.child(

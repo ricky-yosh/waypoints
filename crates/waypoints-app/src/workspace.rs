@@ -648,6 +648,12 @@ fn message(text: impl Into<SharedString>) -> gpui_kit::Div {
     div().text_sm().child(text.into())
 }
 
+/// Whether the window is too narrow for the full toolbar and split layouts.
+/// Uses `rem` so the threshold tracks interface zoom.
+pub(super) fn compact_window(window: &Window) -> bool {
+    window.viewport_size().width < window.rem_size() * 50.0
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A project refresh can replace a saved assignment while its draft
@@ -978,6 +984,7 @@ impl Render for Workspace {
                     .overflow_y_scroll()
                     .child(div().px_2().pb_2().child(list)),
             );
+        let compact_header = compact_window(window);
         let detail = if let (Some(key), Load::Ready(graph)) = (self.state.selected, &self.graph) {
             let selected = self.selected_nodes.get(&key).copied();
             self.graph_cameras.entry(key).or_default();
@@ -1016,8 +1023,8 @@ impl Render for Workspace {
                     .border_b_1().border_color(cx.theme().border)
                     .child(div().min_w_0().font_semibold().overflow_hidden().text_ellipsis()
                         .child(graph.workflow.name.clone()))
-                    .child(self.permission_actions(cx))
-                    .child(self.graph_zoom_controls(key, cx)))
+                    .child(self.permission_actions(compact_header, cx))
+                    .child(self.graph_zoom_controls(key, compact_header, cx)))
                 .when(graph.nodes.is_empty(), |detail| detail.child(message("No nodes in this workflow.").px_3()))
                 .when(graph.unresolved_dependency_operation.is_some(), |detail| {
                     detail.child(Alert::warning("graph-unresolved", "Saved edges may differ from jj while a dependency operation is unresolved.").small())

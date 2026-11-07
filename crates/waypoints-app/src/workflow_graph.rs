@@ -166,6 +166,7 @@ impl Workspace {
     pub(super) fn graph_zoom_controls(
         &self,
         key: (u64, i64),
+        compact: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let zoom = self.graph_cameras[&key].zoom;
@@ -190,7 +191,11 @@ impl Workspace {
                 Button::new("graph-zoom-reset")
                     .ghost()
                     .small()
-                    .label(format!("Reset zoom · {}%", ZOOM_LEVELS[zoom]))
+                    .label(if compact {
+                        format!("{}%", ZOOM_LEVELS[zoom])
+                    } else {
+                        format!("Reset zoom · {}%", ZOOM_LEVELS[zoom])
+                    })
                     .accessibility_label(format!(
                         "Graph zoom {}%. Reset to 100%",
                         ZOOM_LEVELS[zoom]

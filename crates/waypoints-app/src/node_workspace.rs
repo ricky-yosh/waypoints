@@ -15,6 +15,7 @@ use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants as _},
     diff::{Diff, DiffFile, DiffFileStatus, DiffMode, DiffState},
     input::{Editor, EditorState},
+    scroll::ScrollableElement as _,
     tab::{Tab as TabItem, TabBar},
     text::TextView,
 };
@@ -30,7 +31,7 @@ use waypoints_core::{
     storage::{Node, NodeRevisionPage},
 };
 
-use super::{Load, Workspace, message, run_backend, workflow_graph::node_title};
+use super::{Load, Workspace, compact_window, message, run_backend, workflow_graph::node_title};
 
 type NodeKey = (u64, i64, i64);
 
@@ -820,6 +821,7 @@ impl Workspace {
             ("History", Tab::History),
         ];
         let compact = node_runs::compact_follow_up(window);
+        let compact_width = compact_window(window);
         let compact_continue = node
             .run
             .continue_target()
@@ -856,47 +858,59 @@ impl Workspace {
                             ),
                     )
                     .when_some(compact_continue, |row, run_id| {
-                        row.child(
-                            Button::new("continue-session")
-                                .outline()
-                                .small()
-                                .icon(IconName::Play)
-                                .label("Continue session…")
-                                .disabled(node.run.is_busy())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_follow_up(key, run_id, window, cx)
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new("expand-workbench")
-                            .ghost()
+                        let button = Button::new("continue-session")
+                            .outline()
                             .small()
-                            .icon(if self.expanded_workbench {
+                            .icon(IconName::Play)
+                            .disabled(node.run.is_busy());
+                        let button = if compact_width {
+                            button
+                                .tooltip("Continue session…")
+                                .accessibility_label("Continue session")
+                        } else {
+                            button.label("Continue session…")
+                        };
+                        row.child(button.on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_follow_up(key, run_id, window, cx)
+                        })))
+                    })
+                    .child({
+                        let label = if self.expanded_workbench {
+                            "Restore"
+                        } else {
+                            "Expand"
+                        };
+                        let button = Button::new("expand-workbench").ghost().small().icon(
+                            if self.expanded_workbench {
                                 IconName::Minimize2
                             } else {
                                 IconName::Maximize2
-                            })
-                            .label(if self.expanded_workbench {
-                                "Restore"
-                            } else {
-                                "Expand"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.expanded_workbench = !this.expanded_workbench;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("close-workbench")
+                            },
+                        );
+                        let button = if compact_width {
+                            button.tooltip(label).accessibility_label(label)
+                        } else {
+                            button.label(label)
+                        };
+                        button.on_click(cx.listener(|this, _, _, cx| {
+                            this.expanded_workbench = !this.expanded_workbench;
+                            cx.notify();
+                        }))
+                    })
+                    .child({
+                        let button = Button::new("close-workbench")
                             .ghost()
                             .small()
-                            .icon(IconName::X)
-                            .label("Close")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.close_workbench(window, cx)),
-                            ),
-                    ),
+                            .icon(IconName::X);
+                        let button = if compact_width {
+                            button.tooltip("Close").accessibility_label("Close")
+                        } else {
+                            button.label("Close")
+                        };
+                        button.on_click(
+                            cx.listener(|this, _, window, cx| this.close_workbench(window, cx)),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1052,6 +1066,7 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&node.assignment_preview_scroll)
+                    .vertical_scrollbar(&node.assignment_preview_scroll)
                     .child(
                         div()
                             .max_w(gpui_kit::rems(48.))
@@ -1159,14 +1174,23 @@ impl Workspace {
                     .gap_2()
                     .flex_wrap()
                     .items_center()
-                    .child(div().font_semibold().child(review.label.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_semibold()
+                            .child(review.label.clone()),
+                    )
                     .child(
                         Button::new("copy-review-id")
                             .ghost()
                             .small()
+                            .max_w_full()
                             .icon(IconName::Copy)
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .truncate()
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .child(short_commit),
                             )
@@ -1313,6 +1337,7 @@ impl Workspace {
                                 .w_56()
                                 .max_w(relative(0.36))
                                 .min_h_0()
+                                .min_w_0()
                                 .border_r_1()
                                 .border_color(cx.theme().border)
                                 .pr_2()
@@ -1321,6 +1346,8 @@ impl Workspace {
                                     div()
                                         .px_1()
                                         .pb_1()
+                                        .min_w_0()
+                                        .truncate()
                                         .text_xs()
                                         .font_family(cx.theme().mono_font_family.clone())
                                         .text_color(cx.theme().muted_foreground)
@@ -1341,6 +1368,7 @@ impl Workspace {
                                         .min_h_0()
                                         .overflow_y_scroll()
                                         .track_scroll(&node.review_files_scroll)
+                                        .vertical_scrollbar(&node.review_files_scroll)
                                         .children(review.files.iter().enumerate().map(
                                             |(index, (path, diff))| {
                                                 let file = &diff.read(cx).files()[0];
