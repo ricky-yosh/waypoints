@@ -76,17 +76,13 @@ impl Storage {
         Ok(async {
             validate_prompt(prompt)?;
             let source = self.run(source_run_id).await?;
-            self.ensure_session_after_restore(&source).await?;
-            anyhow::ensure!(
-                matches!(source.state, RunState::Completed | RunState::Cancelled | RunState::Failed { .. } | RunState::Recovered { .. }),
-                "continue requires a stopped run with confirmed cleanup or explicit recovery"
-            );
+            if let crate::run::ContinuationAssessment::Blocked { detail, .. } =
+                self.assess_continuation(source_run_id).await?
+            {
+                anyhow::bail!("{detail}");
+            }
             let session = source.session_id.as_ref().filter(|id| !id.is_empty())
                 .context("selected run has no saved ACP session; explicitly start a fresh run instead")?;
-            let latest = self.node_runs(source.workflow_id, source.node_id).await?
-                .into_iter().rev().find(|run| run.session_id.as_ref() == Some(session))
-                .context("saved session has no runs")?;
-            anyhow::ensure!(latest.id == source.id, "session has a newer run {}; continue that run instead (continuation does not fork history)", latest.id);
             let mut run = self.prepare_run(source.workflow_id, source.node_id, &source.executable).await?;
             anyhow::ensure!(
                 run.executable == source.executable,

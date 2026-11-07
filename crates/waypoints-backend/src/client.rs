@@ -490,6 +490,65 @@ impl Client {
         .await
     }
 
+    /// Saves an assignment only while its saved text matches the editing baseline.
+    ///
+    /// # Errors
+    ///
+    /// A stale baseline returns a typed `PromptConflict` with the current node.
+    /// Other failures preserve the backend or transport error.
+    pub async fn update_node_checked(
+        &self, workflow_id: i64, node_id: i64, prompt: &str, expected_prompt: &str,
+    ) -> Result<Node, BackendError> {
+        self.call("node.update", json!({
+            "workflow_id": workflow_id, "node_id": node_id,
+            "prompt": prompt, "expected_prompt": expected_prompt,
+        })).await
+    }
+
+    /// Fetches the newest run without transferring the node's entire history.
+    ///
+    /// # Errors
+    ///
+    /// Returns membership, backend, or transport failures.
+    pub async fn latest_node_run(&self, workflow_id: i64, node_id: i64) -> Result<Option<RunStatus>, BackendError> {
+        self.call("run.latest", json!({"workflow_id": workflow_id, "node_id": node_id})).await
+    }
+
+    /// Fetches a bounded newest-first history page using an opaque node-scoped cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid-cursor/page, backend, or transport failures.
+    pub async fn node_run_page(
+        &self, workflow_id: i64, node_id: i64, page_size: usize, cursor: Option<&str>,
+    ) -> Result<crate::RunStatusPage, BackendError> {
+        self.call("run.page", json!({
+            "workflow_id": workflow_id, "node_id": node_id, "page_size": page_size, "cursor": cursor,
+        })).await
+    }
+
+    /// Fetches latest run state and permissions independently of GUI node selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns missing-workflow, invalid-page, backend, or transport failures.
+    pub async fn workflow_run_page(
+        &self, workflow_id: i64, page_size: usize, after_node: Option<i64>,
+    ) -> Result<crate::WorkflowRunStatusPage, BackendError> {
+        self.call("workflow.runs", json!({
+            "workflow_id": workflow_id, "page_size": page_size, "after_node": after_node,
+        })).await
+    }
+
+    /// Assesses local continuation prerequisites; execution still revalidates them.
+    ///
+    /// # Errors
+    ///
+    /// Returns lookup, native observation, backend, or transport failures.
+    pub async fn assess_continuation(&self, run_id: i64) -> Result<waypoints_core::run::ContinuationAssessment, BackendError> {
+        self.call("run.continuation", json!({"run_id": run_id})).await
+    }
+
     /// Explicitly selects an existing native jj change for a saved node.
     ///
     /// # Errors

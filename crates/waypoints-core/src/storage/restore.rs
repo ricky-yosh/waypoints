@@ -100,6 +100,14 @@ impl Storage {
     }
 
     pub(super) async fn ensure_session_after_restore(&self, run: &Run) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.session_was_restored(run).await?,
+            "code restoration invalidated this session for continuation; explicitly start a fresh run"
+        );
+        Ok(())
+    }
+
+    pub(super) async fn session_was_restored(&self, run: &Run) -> anyhow::Result<bool> {
         let connection = self.database.connect()?;
         let mut rows = connection
             .query(
@@ -110,11 +118,7 @@ impl Storage {
                 turso::params![run.node_id, run.id],
             )
             .await?;
-        anyhow::ensure!(
-            rows.next().await?.is_none(),
-            "code restoration invalidated this session for continuation; explicitly start a fresh run"
-        );
-        Ok(())
+        Ok(rows.next().await?.is_some())
     }
 
     /// Restores a successful run's saved code into the same node's current change.

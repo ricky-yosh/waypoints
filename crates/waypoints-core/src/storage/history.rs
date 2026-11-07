@@ -193,6 +193,7 @@ impl Storage {
         workflow_id: i64,
         node_id: i64,
         prompt: &str,
+        expected_prompt: Option<&str>,
     ) -> anyhow::Result<Node> {
         self.ensure_dependency_operations_clear().await?;
         let mut connection = self.database.connect()?;
@@ -216,6 +217,9 @@ impl Storage {
                     })?;
                 let before = decode_node(&row)?;
                 drop(rows);
+                if expected_prompt.is_some_and(|expected| expected != before.prompt) {
+                    return Err(super::StorageFailure::PromptConflict { current: before }.into());
+                }
                 if before.prompt != prompt {
                     replace_prompt(&tx, &before, &before.prompt, prompt).await?;
                     append(

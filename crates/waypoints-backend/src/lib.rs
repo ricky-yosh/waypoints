@@ -4,6 +4,7 @@
 compile_error!("The initial Waypoints backend requires Unix sockets (macOS or Linux)");
 
 mod client;
+pub mod activity;
 mod config;
 mod protocol;
 mod runs;
@@ -14,6 +15,7 @@ pub use config::{Config, default_state_directory};
 pub use protocol::BackendInfo;
 pub use protocol::RpcError;
 pub use runs::{Permission, PermissionOption, RunEvent, RunEventOrigin, RunEvents, RunStatus};
+pub use runs::{NodeRunStatus, RunStatusPage, WorkflowRunStatusPage};
 pub use server::serve;
 
 use std::error::Error;

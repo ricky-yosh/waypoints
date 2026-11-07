@@ -274,6 +274,14 @@ pub(crate) struct NodeRevisionsParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowRunsParams {
+    pub workflow_id: i64,
+    pub page_size: usize,
+    pub after_node: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NodeRevisionParams {
     pub workflow_id: i64,
     pub node_id: i64,
@@ -419,6 +427,8 @@ pub(crate) struct UpdateNodeParams {
     pub workflow_id: i64,
     pub node_id: i64,
     pub prompt: String,
+    #[serde(default)]
+    pub expected_prompt: Option<String>,
 }
 
 #[derive(Deserialize)]

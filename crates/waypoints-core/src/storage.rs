@@ -19,6 +19,7 @@ mod reparent;
 mod restore;
 mod review;
 mod revisions;
+mod run_queries;
 mod runs;
 mod upstream;
 mod workspaces;
@@ -145,6 +146,8 @@ pub enum StorageFailure {
     NodeBusy { node_id: i64, run_id: i64 },
     /// A required workspace is absent or its allocation is not acknowledged ready.
     WorkspaceNotReady { node_id: i64 },
+    /// The saved assignment no longer matches the caller's editing baseline.
+    PromptConflict { current: Node },
 }
 
 impl fmt::Display for StorageFailure {
@@ -166,6 +169,7 @@ impl fmt::Display for StorageFailure {
                 "node is reserved by run {run_id}; inspect its status first"
             ),
             Self::WorkspaceNotReady { .. } => formatter.write_str("workspace is not ready"),
+            Self::PromptConflict { .. } => formatter.write_str("assignment changed since it was loaded"),
         }
     }
 }
@@ -461,7 +465,26 @@ impl Storage {
     ) -> Result<Node, StorageError> {
         validate_prompt(prompt)?;
         Ok(self
-            .update_node_with_history(workflow_id, node_id, prompt)
+            .update_node_with_history(workflow_id, node_id, prompt, None)
+            .await?)
+    }
+
+    /// Replaces an assignment only if its saved text still matches the editing baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PromptConflict` with the current node on mismatch, without changing
+    /// the assignment or undo history. Other errors match [`Self::update_node`].
+    pub async fn update_node_checked(
+        &mut self,
+        workflow_id: i64,
+        node_id: i64,
+        prompt: &str,
+        expected_prompt: &str,
+    ) -> Result<Node, StorageError> {
+        validate_prompt(prompt)?;
+        Ok(self
+            .update_node_with_history(workflow_id, node_id, prompt, Some(expected_prompt))
             .await?)
     }
 

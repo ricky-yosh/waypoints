@@ -358,6 +358,27 @@ fn finish_request(
             Some("run.start" | "run.continue") => json!(runs.start(serde_json::from_value(value)?)),
             Some("run.recover") => json!(runs.recovered(serde_json::from_value(value)?)),
             Some("run.status") => json!(runs.status(serde_json::from_value(value)?)),
+            Some("run.latest") => {
+                let record: Option<waypoints_core::run::Run> = serde_json::from_value(value)?;
+                json!(record.map(|run| runs.status(run)))
+            }
+            Some("run.page") => {
+                let page: waypoints_core::run::RunPage = serde_json::from_value(value)?;
+                json!(crate::RunStatusPage {
+                    runs: page.runs.into_iter().map(|run| runs.status(run)).collect(),
+                    next_cursor: page.next_cursor,
+                })
+            }
+            Some("workflow.runs") => {
+                let page: waypoints_core::run::WorkflowRunPage = serde_json::from_value(value)?;
+                json!(crate::WorkflowRunStatusPage {
+                    nodes: page.nodes.into_iter().map(|node| crate::NodeRunStatus {
+                        node_id: node.node_id,
+                        latest: node.latest.map(|run| runs.status(run)),
+                    }).collect(),
+                    next_node: page.next_node,
+                })
+            }
             Some("run.list") => {
                 let records: Vec<waypoints_core::run::Run> = serde_json::from_value(value)?;
                 json!(
@@ -411,6 +432,10 @@ storage_requests! {
     "run.inputs" => RunInputs(RunParams),
     "run.status" => RunStatus(RunParams),
     "run.list" => RunList(NodeParams),
+    "run.latest" => RunLatest(NodeParams),
+    "run.page" => RunPage(NodeRevisionsParams),
+    "run.continuation" => RunContinuation(RunParams),
+    "workflow.runs" => WorkflowRuns(crate::protocol::WorkflowRunsParams),
     "history.status" => HistoryStatus(ProjectParams),
     "history.undo" | "history.redo" => HistoryEdit(HistoryParams),
     "repository.inspect" => RepositoryInspect(ProjectParams),
@@ -498,6 +523,18 @@ async fn dispatch(
             .await
             .map(|records| json!(records))
             .map_err(crate::RpcError::from_cause),
+        StorageParams::RunLatest(params) => storage
+            .latest_node_run(params.workflow_id, params.node_id)
+            .await.map(|run| json!(run)).map_err(crate::RpcError::from_cause),
+        StorageParams::RunPage(params) => storage
+            .node_run_page(params.workflow_id, params.node_id, params.page_size, params.cursor.as_deref())
+            .await.map(|page| json!(page)).map_err(crate::RpcError::from_cause),
+        StorageParams::RunContinuation(params) => storage
+            .assess_continuation(params.run_id)
+            .await.map(|assessment| json!(assessment)).map_err(crate::RpcError::from_cause),
+        StorageParams::WorkflowRuns(params) => storage
+            .workflow_run_page(params.workflow_id, params.page_size, params.after_node)
+            .await.map(|page| json!(page)).map_err(crate::RpcError::from_cause),
         StorageParams::HistoryStatus(params) => storage
             .history_status(&params.project_path)
             .await
@@ -759,11 +796,15 @@ async fn dispatch(
             .await
             .map(|state| json!(state))
             .map_err(crate::RpcError::from_cause),
-        StorageParams::NodeUpdate(params) => storage
-            .update_node(params.workflow_id, params.node_id, &params.prompt)
-            .await
-            .map(|node| json!(node))
-            .map_err(crate::RpcError::from_cause),
+        StorageParams::NodeUpdate(params) => {
+            let result = match params.expected_prompt {
+                Some(expected) => storage.update_node_checked(
+                    params.workflow_id, params.node_id, &params.prompt, &expected,
+                ).await,
+                None => storage.update_node(params.workflow_id, params.node_id, &params.prompt).await,
+            };
+            result.map(|node| json!(node)).map_err(crate::RpcError::from_cause)
+        }
         StorageParams::ConnectionCreate(params) => storage
             .connect_nodes(params.workflow_id, params.source_id, params.target_id)
             .await

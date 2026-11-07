@@ -64,6 +64,36 @@ pub struct RunStatus {
     pub permission: Option<Permission>,
 }
 
+/// Newest-first saved run history with current live status where retained.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RunStatusPage {
+    /// Bounded run records.
+    pub runs: Vec<RunStatus>,
+    /// Opaque cursor for older records.
+    pub next_cursor: Option<String>,
+}
+
+/// Latest persisted/live state for a workflow node, including unrun nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct NodeRunStatus {
+    /// Node identity.
+    pub node_id: i64,
+    /// Latest run, overlaid with backend-owned live state.
+    pub latest: Option<RunStatus>,
+}
+
+/// Paginated workflow overview; no native or filesystem mutation is performed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WorkflowRunStatusPage {
+    /// Node states in ascending node order.
+    pub nodes: Vec<NodeRunStatus>,
+    /// Last included node ID, or none on the final page.
+    pub next_node: Option<i64>,
+}
+
 /// A sequenced ACP update, which may contain proposed rather than completed edits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]

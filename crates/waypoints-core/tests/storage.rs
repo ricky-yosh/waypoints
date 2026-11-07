@@ -31,6 +31,35 @@ fn workflows_survive_reopening_database() -> anyhow::Result<()> {
 }
 
 #[test]
+fn checked_assignment_save_refuses_stale_clients_without_changing_history() -> anyhow::Result<()> {
+    run_test(async {
+        let directory = tempfile::tempdir()?;
+        let mut storage = Storage::open(&directory.path().join("workflows.db")).await?;
+        let workflow = storage.create_workflow(directory.path(), "Workflow").await?;
+        let node = storage.create_node(workflow.id, "original").await?;
+        let current = storage.update_node(workflow.id, node.id, "CLI edit").await?;
+        let history = storage.history_status(directory.path()).await?;
+        let error = storage
+            .update_node_checked(workflow.id, node.id, "stale GUI edit", &node.prompt)
+            .await
+            .expect_err("stale baseline must be refused");
+        assert_eq!(
+            error.failure(),
+            Some(&waypoints_core::storage::StorageFailure::PromptConflict {
+                current: current.clone(),
+            })
+        );
+        assert_eq!(storage.node(workflow.id, node.id).await?, current);
+        assert_eq!(storage.history_status(directory.path()).await?, history);
+        let saved = storage
+            .update_node_checked(workflow.id, node.id, "resolved edit", &current.prompt)
+            .await?;
+        assert_eq!(saved.prompt, "resolved edit");
+        Ok(())
+    })
+}
+
+#[test]
 fn workflows_are_project_scoped_ordered_and_parameterized() -> anyhow::Result<()> {
     run_test(async {
         let directory = tempfile::tempdir()?;

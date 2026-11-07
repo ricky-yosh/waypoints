@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
+use std::{cell::Cell, collections::{BTreeSet, VecDeque}, path::PathBuf, rc::Rc, time::Duration};
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName;
@@ -17,6 +17,7 @@ use gpui_kit::{
     Styled as _, WeakEntity, Window, div,
 };
 use waypoints_backend::{Client, Permission, RunEvent, RunEventOrigin, RunStatus};
+use waypoints_backend::activity::{Activity, ActivityBlock, ActivityLog as Transcript, Stream};
 use waypoints_core::run::{RunState, SnapshotState};
 
 use super::{
@@ -24,189 +25,33 @@ use super::{
     run_state_visual, semantic_status,
 };
 
-const OUTPUT_LIMIT: usize = 128 * 1024;
-
-const OUTPUT_BLOCK_LIMIT: usize = 512;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Stream {
-    Assistant,
-    Thought,
-}
-
-enum Activity {
-    Text(Stream, String),
-    Tool {
-        id: String,
-        fields: serde_json::Value,
-    },
-    Other(serde_json::Value),
-}
-
-struct ActivityBlock {
-    sequence: u64,
-    origin: RunEventOrigin,
-    activity: Activity,
-    expanded: bool,
-}
-
-#[derive(Default)]
-struct Transcript {
-    blocks: VecDeque<ActivityBlock>,
-    break_stream: bool,
-    trimmed: bool,
-}
-
-impl Transcript {
-    fn push(&mut self, sequence: u64, origin: RunEventOrigin, update: serde_json::Value) -> u64 {
-        let mut changed = sequence;
-        let kind = update
-            .get("sessionUpdate")
-            .and_then(serde_json::Value::as_str);
-        let stream = match kind {
-            Some("agent_message_chunk") => Some(Stream::Assistant),
-            Some("agent_thought_chunk") => Some(Stream::Thought),
-            _ => None,
-        };
-        if let Some(stream) = stream
-            && let Some(text) = update
-                .pointer("/content/text")
-                .and_then(serde_json::Value::as_str)
-        {
-            if !self.break_stream
-                && let Some(previous) = self.blocks.back_mut()
-                && previous.origin == origin
-                && let Activity::Text(previous_stream, previous_text) = &mut previous.activity
-                && *previous_stream == stream
-            {
-                previous_text.push_str(text);
-                changed = previous.sequence;
-            } else {
-                self.add(sequence, origin, Activity::Text(stream, text.into()));
-            }
-            self.break_stream = false;
-        } else if matches!(kind, Some("tool_call" | "tool_call_update"))
-            && let Some(id) = update.get("toolCallId").and_then(serde_json::Value::as_str)
-        {
-            self.break_stream = true;
-            if let Some((existing_sequence, fields)) =
-                self.blocks.iter_mut().rev().find_map(|block| {
-                    if block.origin == origin
-                        && let Activity::Tool {
-                            id: existing,
-                            fields,
-                        } = &mut block.activity
-                        && existing == id
-                    {
-                        Some((block.sequence, fields))
-                    } else {
-                        None
-                    }
-                })
-            {
-                changed = existing_sequence;
-                if let (Some(fields), Some(update)) = (fields.as_object_mut(), update.as_object()) {
-                    fields.extend(
-                        update
-                            .iter()
-                            .map(|(key, value)| (key.clone(), value.clone())),
-                    );
-                }
-            } else {
-                self.add(
-                    sequence,
-                    origin,
-                    Activity::Tool {
-                        id: id.to_owned(),
-                        fields: update,
-                    },
-                );
-            }
-        } else {
-            self.break_stream = true;
-            self.add(sequence, origin, Activity::Other(update));
-        }
-        self.trim();
-        changed
-    }
-
+trait TranscriptView {
     fn apply_events(
         &mut self,
         events: Vec<RunEvent>,
         gap: bool,
         scroll: &Entity<MessageScrollerState>,
         cx: &mut App,
+    );
+}
+
+impl TranscriptView for Transcript {
+    fn apply_events(
+        &mut self, events: Vec<RunEvent>, gap: bool,
+        scroll: &Entity<MessageScrollerState>, cx: &mut App,
     ) {
-        self.break_stream |= gap;
-        if events.is_empty() {
-            return;
-        }
-        let previous: Vec<_> = self.blocks.iter().map(|block| block.sequence).collect();
-        let mut changed = Vec::new();
-        for event in events {
-            let sequence = self.push(event.sequence, event.origin, event.update);
-            if let Ok(index) = previous.binary_search(&sequence) {
-                changed.push(index);
-            }
-        }
-        let removed = self.blocks.front().map_or(previous.len(), |first| {
-            previous.partition_point(|sequence| *sequence < first.sequence)
-        });
-        let appended = self.blocks.len() - (previous.len() - removed);
-        changed.sort_unstable();
-        changed.dedup();
+        let delta = self.apply(events, gap);
         scroll.update(cx, |scroll, cx| {
-            if removed > 0 {
-                scroll.splice(0..removed, 0, cx);
+            if delta.removed > 0 {
+                scroll.splice(0..delta.removed, 0, cx);
             }
-            if appended > 0 {
-                scroll.append(appended, cx);
+            if delta.appended > 0 {
+                scroll.append(delta.appended, cx);
             }
-            for index in changed
-                .into_iter()
-                .filter_map(|index| index.checked_sub(removed))
-            {
+            for index in delta.changed {
                 scroll.remeasure_items(index..index + 1, cx);
             }
         });
-    }
-
-    fn add(&mut self, sequence: u64, origin: RunEventOrigin, activity: Activity) {
-        self.blocks.push_back(ActivityBlock {
-            sequence,
-            origin,
-            activity,
-            expanded: false,
-        });
-    }
-
-    fn trim(&mut self) {
-        let mut remaining = OUTPUT_LIMIT;
-        let mut keep = 0;
-        for block in self.blocks.iter_mut().rev().take(OUTPUT_BLOCK_LIMIT) {
-            let size = match &mut block.activity {
-                Activity::Text(_, text) => {
-                    if keep == 0 && text.len() > remaining {
-                        let boundary = text.floor_char_boundary(remaining);
-                        text.truncate(boundary);
-                        self.trimmed = true;
-                        self.break_stream = true;
-                    }
-                    text.len()
-                }
-                Activity::Tool { fields, .. } | Activity::Other(fields) => fields.to_string().len(),
-            };
-            if size > remaining {
-                break;
-            }
-            remaining -= size;
-            keep += 1;
-        }
-        let drop = self.blocks.len() - keep;
-        if drop > 0 {
-            self.blocks.drain(..drop);
-            self.trimmed = true;
-        }
     }
 }
 
@@ -226,6 +71,7 @@ pub(super) struct RunPanel {
     busy: bool,
     error: Option<String>,
     output: Transcript,
+    expanded_tools: BTreeSet<u64>,
     output_scroll: Entity<MessageScrollerState>,
     cursor: u64,
     output_notice: Option<&'static str>,
@@ -301,6 +147,7 @@ impl RunPanel {
             busy: false,
             error: None,
             output: Transcript::default(),
+            expanded_tools: BTreeSet::new(),
             output_scroll: cx.new(|cx| MessageScrollerState::new(0, cx)),
             cursor: 0,
             output_notice: None,

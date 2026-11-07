@@ -46,6 +46,67 @@ pub struct Run {
     pub upstream_inputs: Option<Vec<RunInput>>,
 }
 
+/// A bounded, newest-first page of saved runs, pinned against later insertions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RunPage {
+    /// Saved runs, including their captured instructions.
+    pub runs: Vec<Run>,
+    /// Opaque, node-scoped cursor for older records.
+    pub next_cursor: Option<String>,
+}
+
+/// The newest saved run for one visible workflow node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct NodeRun {
+    /// Node identity, including nodes which have never run.
+    pub node_id: i64,
+    /// Latest run, or none when the node has no history.
+    pub latest: Option<Run>,
+}
+
+/// A bounded workflow-wide run overview, ordered by node ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WorkflowRunPage {
+    /// Latest saved state for each node on this page.
+    pub nodes: Vec<NodeRun>,
+    /// Last included node; use as `after_node` for the next page.
+    pub next_node: Option<i64>,
+}
+
+/// Readonly assessment of a saved session; execution always revalidates it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ContinuationAssessment {
+    /// Local checks passed, but the adapter must still support loading the session.
+    Eligible { run_id: i64 },
+    /// A known local prerequisite prevents continuation.
+    Blocked {
+        /// Machine-readable cause, independent of diagnostic wording.
+        reason: ContinuationBlocker,
+        /// Diagnostic with the relevant recovery instruction.
+        detail: String,
+    },
+}
+
+/// Known reasons a saved session cannot be continued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ContinuationBlocker {
+    RunNotStopped,
+    MissingSession,
+    RestoredSession,
+    Superseded,
+    NodeBusy,
+    WorkspaceNotReady,
+    WorkspaceChanged,
+    ExecutableChanged,
+}
+
 /// One direct workflow dependency observed before an agent turn, not agent context provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
